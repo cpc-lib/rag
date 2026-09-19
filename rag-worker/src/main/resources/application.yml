@@ -1,0 +1,66 @@
+spring:
+  application:
+    name: rag-worker
+  main:
+    web-application-type: none
+  datasource:
+    url: jdbc:mysql://${MYSQL_HOST:192.168.1.200}:${MYSQL_PORT:3306}/${MYSQL_DB:rag}?serverTimezone=Asia/Shanghai&useUnicode=true&characterEncoding=UTF-8&useSSL=false&allowPublicKeyRetrieval=true
+    username: ${MYSQL_USER:root}
+    password: ${MYSQL_PASSWORD:rag123456}
+    driver-class-name: com.mysql.cj.jdbc.Driver
+    hikari:
+      maximum-pool-size: 5
+  flyway:
+    enabled: false
+  data:
+    redis:
+      host: ${MIDDLEWARE_HOST:192.168.1.200}
+      port: ${REDIS_PORT:6379}
+  rabbitmq:
+    host: ${MIDDLEWARE_HOST:192.168.1.200}
+    port: ${RABBITMQ_PORT:5672}
+    username: ${RABBITMQ_USER:guest}
+    password: ${RABBITMQ_PASSWORD:guest}
+  elasticsearch:
+    uris: http://${MIDDLEWARE_HOST:192.168.1.200}:${ES_PORT:9200}
+
+mybatis-plus:
+  configuration:
+    map-underscore-to-camel-case: true
+  global-config:
+    banner: false
+    db-config:
+      id-type: auto
+
+rag:
+  mq:
+    exchange: rag.ingest
+    queue: rag.ingest.parse
+    retry-queue: rag.ingest.retry
+    dlq-queue: rag.ingest.dlq
+  minio:
+    endpoint: http://${MIDDLEWARE_HOST:192.168.1.200}:${MINIO_PORT:9000}
+    access-key: ${MINIO_USER:minioadmin}
+    secret-key: ${MINIO_PASSWORD:minioadmin123}
+    bucket: ${MINIO_BUCKET:rag-files}
+  milvus:
+    host: ${MIDDLEWARE_HOST:192.168.1.200}
+    port: ${MILVUS_PORT:19530}
+  etcd:
+    endpoints: http://${MIDDLEWARE_HOST:192.168.1.200}:${ETCD_PORT:2379}
+    enabled: true
+  ocr:
+    # Tesseract 训练数据目录（需包含 chi_sim.traineddata 等），留空则 OCR 降级跳过
+    tessdata: ${RAG_OCR_TESSDATA:}
+    langs: ${RAG_OCR_LANGS:chi_sim+eng}
+  es:
+    analyzer: ${RAG_ES_ANALYZER:standard}
+  llm:
+    timeout-seconds: 60
+  worker:
+    max-retry: 3
+    retry-base-delay-ms: 10000
+
+logging:
+  level:
+    com.rag: info

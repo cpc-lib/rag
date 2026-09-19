@@ -1,0 +1,88 @@
+server:
+  port: 8080
+
+spring:
+  application:
+    name: rag-api
+  datasource:
+    url: jdbc:mysql://${MYSQL_HOST:192.168.1.200}:${MYSQL_PORT:3306}/${MYSQL_DB:rag}?serverTimezone=Asia/Shanghai&useUnicode=true&characterEncoding=UTF-8&useSSL=false&allowPublicKeyRetrieval=true
+    username: ${MYSQL_USER:root}
+    password: ${MYSQL_PASSWORD:rag123456}
+    driver-class-name: com.mysql.cj.jdbc.Driver
+    hikari:
+      maximum-pool-size: 10
+  flyway:
+    enabled: true
+    locations: classpath:db/migration
+    baseline-on-migrate: true
+  data:
+    redis:
+      host: ${MIDDLEWARE_HOST:192.168.1.200}
+      port: ${REDIS_PORT:6379}
+  rabbitmq:
+    host: ${MIDDLEWARE_HOST:192.168.1.200}
+    port: ${RABBITMQ_PORT:5672}
+    username: ${RABBITMQ_USER:guest}
+    password: ${RABBITMQ_PASSWORD:guest}
+    publisher-confirm-type: correlated
+    publisher-returns: true
+  servlet:
+    multipart:
+      max-file-size: 100MB
+      max-request-size: 110MB
+  elasticsearch:
+    uris: http://${MIDDLEWARE_HOST:192.168.1.200}:${ES_PORT:9200}
+  jackson:
+    time-zone: Asia/Shanghai
+    date-format: yyyy-MM-dd HH:mm:ss
+
+mybatis-plus:
+  configuration:
+    map-underscore-to-camel-case: true
+  global-config:
+    banner: false
+    db-config:
+      id-type: auto
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info
+
+rag:
+  jwt:
+    secret: ${RAG_JWT_SECRET:rag-dev-secret-key-change-me-32bytes!!}
+    ttl-hours: 2
+  minio:
+    endpoint: http://${MIDDLEWARE_HOST:192.168.1.200}:${MINIO_PORT:9000}
+    access-key: ${MINIO_USER:minioadmin}
+    secret-key: ${MINIO_PASSWORD:minioadmin123}
+    bucket: ${MINIO_BUCKET:rag-files}
+    presign-minutes: 15
+  milvus:
+    host: ${MIDDLEWARE_HOST:192.168.1.200}
+    port: ${MILVUS_PORT:19530}
+  etcd:
+    endpoints: http://${MIDDLEWARE_HOST:192.168.1.200}:${ETCD_PORT:2379}
+    enabled: true
+  mq:
+    exchange: rag.ingest
+    queue: rag.ingest.parse
+    retry-queue: rag.ingest.retry
+    dlq-queue: rag.ingest.dlq
+  # 检索参数兜底值（etcd /rag/config/global/retrieval 可热更覆盖）
+  retrieval:
+    vector-top-n: 20
+    keyword-top-n: 20
+    top-k: 8
+    rrf-k: 60
+    low-confidence-threshold: 0.35
+  llm:
+    timeout-seconds: 60
+  chat:
+    sse-timeout-seconds: 60
+
+logging:
+  level:
+    com.rag: info

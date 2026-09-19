@@ -1,0 +1,142 @@
+services:
+  mysql:
+    image: registry.cn-hangzhou.aliyuncs.com/snow-io/mysql:8.4
+    container_name: rag-mysql
+    environment:
+      MYSQL_ROOT_PASSWORD: rag123456
+      MYSQL_DATABASE: rag
+      TZ: Asia/Shanghai
+    command: --character-set-server=utf8mb4 --collation-server=utf8mb4_unicode_ci --default-time-zone=+08:00
+    ports:
+      - "3306:3306"
+    volumes:
+      - mysql-data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-prag123456"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+
+  redis:
+    image: registry.cn-hangzhou.aliyuncs.com/snow-io/redis:7.4-alpine
+    container_name: rag-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+
+#  rabbitmq:
+#    image: registry.cn-hangzhou.aliyuncs.com/snow-io/rabbitmq:3.13-management
+#    container_name: rag-rabbitmq
+#    environment:
+#      TZ: Asia/Shanghai
+#    ports:
+#      - "5672:5672"
+#      - "15672:15672"
+#    volumes:
+#      - rabbitmq-data:/var/lib/rabbitmq
+#    healthcheck:
+#      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+#      interval: 10s
+#      timeout: 10s
+#      retries: 12
+
+  minio:
+    image: minio/minio:latest
+    container_name: rag-minio
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin123
+      TZ: Asia/Shanghai
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - minio-data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+
+  # 初始化 MinIO 桶：rag-files 存业务文件，a-bucket 为 Milvus 默认桶
+  mc-init:
+    image: minio/mc:latest
+    depends_on:
+      minio:
+        condition: service_healthy
+    entrypoint: >
+      /bin/sh -c "
+      mc alias set local http://minio:9000 minioadmin minioadmin123 &&
+      mc mb -p local/rag-files &&
+      mc mb -p local/a-bucket || true"
+
+  # etcd：同时作为 Milvus 元数据后端与业务服务注册/动态配置中心（业务前缀 /rag/）
+  etcd:
+    image: registry.cn-hangzhou.aliyuncs.com/snow-io/etcd:v3.5.18
+    container_name: rag-etcd
+    environment:
+      ALLOW_NONE_AUTHENTICATION: "yes"
+      ETCD_ADVERTISE_CLIENT_URLS: http://etcd:2379
+      ETCD_LISTEN_CLIENT_URLS: http://0.0.0.0:2379
+    command: etcd --data-dir=/etcd-data
+    ports:
+      - "2379:2379"
+    volumes:
+      - etcd-data:/etcd-data
+
+  elasticsearch:
+    image: registry.cn-hangzhou.aliyuncs.com/snow-io/elasticsearch:8.14.3
+    container_name: rag-es
+    environment:
+      discovery.type: single-node
+      xpack.security.enabled: "false"
+      ES_JAVA_OPTS: -Xms1g -Xmx1g
+      TZ: Asia/Shanghai
+    ports:
+      - "9200:9200"
+    volumes:
+      - es-data:/usr/share/elasticsearch/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:9200/_cluster/health || exit 1"]
+      interval: 15s
+      timeout: 10s
+      retries: 20
+
+  milvus:
+    image: registry.cn-hangzhou.aliyuncs.com/snow-io/milvus:v2.5.4
+    container_name: rag-milvus
+    command: ["milvus", "run", "standalone"]
+    environment:
+      ETCD_ENDPOINTS: etcd:2379
+      MINIO_ADDRESS: minio:9000
+      MINIO_ACCESS_KEY_ID: minioadmin
+      MINIO_SECRET_ACCESS_KEY: minioadmin123
+      MINIO_BUCKET: a-bucket
+      COMMON_STORAGETYPE: remote
+      TZ: Asia/Shanghai
+    depends_on:
+      etcd:
+        condition: service_started
+      minio:
+        condition: service_healthy
+    ports:
+      - "19530:19530"
+      - "9091:9091"
+    volumes:
+      - milvus-data:/var/lib/milvus
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9091/healthz"]
+      interval: 15s
+      timeout: 10s
+      retries: 20
+
+volumes:
+  mysql-data: {}
+  redis-data: {}
+  rabbitmq-data: {}
+  minio-data: {}
+  etcd-data: {}
+  es-data: {}
+  milvus-data: {}
