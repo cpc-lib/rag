@@ -9,6 +9,7 @@ tsconfig.tsbuildinfo
 # ---- IDE ----
 .idea/
 *.iml
+.trae/
 
 # ---- 本地临时脚本与文件 ----
 tmp_*/

@@ -255,7 +255,8 @@ public class PipelineProcessor {
             return "IMAGE";
         }
         String text = content.stripLeading();
-        if (text.startsWith("|") && text.contains("\n|---")) {
+        if (text.startsWith("|") && text.lines().skip(1).findFirst().orElse("")
+                .matches("^\\|\\s*:?-{2,}.*")) {
             return "TABLE";
         }
         if (text.startsWith("```") || text.startsWith("~~~")) {

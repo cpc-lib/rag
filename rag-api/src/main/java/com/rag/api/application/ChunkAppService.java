@@ -56,6 +56,7 @@ public class ChunkAppService {
         chunk.setPage(req.page() == null ? 0 : req.page());
         chunk.setSectionTitle(req.sectionTitle() == null || req.sectionTitle().isBlank()
                 ? null : req.sectionTitle());
+        chunk.setSectionPath(chunk.getSectionTitle());
         chunk.setStatus("MANUAL");
         chunk.setChunkType("CHILD");
         chunk.setContentType("TEXT");
@@ -81,6 +82,7 @@ public class ChunkAppService {
         }
         if (req.sectionTitle() != null) {
             chunk.setSectionTitle(req.sectionTitle().isBlank() ? null : req.sectionTitle());
+            chunk.setSectionPath(chunk.getSectionTitle());
         }
         chunk.setStatus("MANUAL");
         chunkMapper.updateById(chunk);

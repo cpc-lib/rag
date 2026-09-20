@@ -126,14 +126,18 @@ public class DocumentAppService {
             throw BizException.badRequest("文档正在处理，请完成后再重新解析");
         }
 
-        doc.setStatus("PARSING");
-        doc.setProgress(0);
-        doc.setErrorMsg(null);
-        documentMapper.update(null, new UpdateWrapper<DocumentEntity>()
+        int updated = documentMapper.update(null, new UpdateWrapper<DocumentEntity>()
                 .eq("id", doc.getId())
+                .in("status", "READY", "FAILED")
                 .set("status", "PARSING")
                 .set("progress", 0)
                 .set("error_msg", null));
+        if (updated != 1) {
+            throw BizException.badRequest("文档正在处理，请完成后再重新解析");
+        }
+        doc.setStatus("PARSING");
+        doc.setProgress(0);
+        doc.setErrorMsg(null);
 
         PipelineTaskEntity task = new PipelineTaskEntity();
         task.setTenantId(doc.getTenantId());

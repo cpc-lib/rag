@@ -76,6 +76,10 @@ public class ChunkSupport {
         }
         String sep = separators.get(0);
         List<String> rest = separators.subList(1, separators.size());
+        if (sep.isEmpty()) {
+            recurse(text, rest, out);
+            return;
+        }
         if (!text.contains(sep)) {
             recurse(text, rest, out);
             return;
@@ -216,7 +220,7 @@ public class ChunkSupport {
         for (int i = 2; i < rows.length; i++) {
             String row = rows[i];
             int groupTokens = tokens(header + "\n" + sep + "\n" + String.join("\n", group) + "\n" + row);
-            if (!group.isEmpty() && groupTokens > maxTokens) {
+            if (!group.isEmpty() && (groupTokens > maxTokens || group.size() >= 50)) {
                 out.add(header + "\n" + sep + "\n" + String.join("\n", group));
                 group = new ArrayList<>();
             }

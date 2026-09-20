@@ -186,6 +186,7 @@ public class RetrievalService {
                 citation = new Citation(seq, id, null, child.getDocumentId(), citation.documentName(),
                         citation.page(), sectionPath, child.getContentType(), citation.previewUrl(),
                         child.getContent());
+                unitKey = child.getId();
             }
             if (countTokens(citation.material()) > remaining) {
                 int contentBudget = remaining - countTokens(citation.material().substring(0,
