@@ -135,7 +135,7 @@ services:
 volumes:
   mysql-data: {}
   redis-data: {}
-  rabbitmq-data: {}
+  #rabbitmq-data: {}
   minio-data: {}
   etcd-data: {}
   es-data: {}
