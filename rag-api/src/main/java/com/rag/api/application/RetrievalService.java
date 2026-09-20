@@ -39,8 +39,17 @@ import java.util.stream.Collectors;
 @RequiredArgsConstructor
 public class RetrievalService {
 
-    public record Citation(int seq, long chunkId, long documentId, String documentName, int page,
+    public record Citation(int seq, long chunkId, Long parentChunkId, long documentId,
+                           String documentName, int page, String sectionPath, String contentType,
                            String previewUrl, String content) {
+        public String material() {
+            StringBuilder sb = new StringBuilder("[").append(seq).append("] （")
+                    .append(documentName).append(" 第").append(page + 1).append("页");
+            if (sectionPath != null && !sectionPath.isBlank()) {
+                sb.append(" · 章节：").append(sectionPath);
+            }
+            return sb.append("）\n").append(content).toString();
+        }
     }
 
     public record RetrievalResult(List<Citation> citations, double bestVectorScore) {
@@ -138,28 +147,116 @@ public class RetrievalService {
 
         List<Citation> citations = new ArrayList<>();
         int seq = 1;
+        int usedTokens = 0;
         Set<Long> citedUnits = new HashSet<>();
         for (Long id : topIds) {
+            if (citations.size() >= rc.finalContextTopK || usedTokens >= rc.maxContextTokens) {
+                break;
+            }
             ChunkEntity child = chunks.get(id);
             if (child == null) {
                 continue;
             }
             long unitKey = child.getParentChunkId() == null ? id : child.getParentChunkId();
-            // 同 parent 仅保留排名最高的 child
-            if (!citedUnits.add(unitKey)) {
-                continue;
-            }
             ChunkEntity unit = all.get(unitKey);
             if (unit == null || "DELETED".equals(unit.getStatus())) {
                 unit = child; // parent 缺失时回退 child 自身
             }
+            // 失效 parent 的 children 仍是独立检索单元，不能用旧 parentId 合并。
+            unitKey = unit.getId();
+            if (citedUnits.contains(unitKey)) {
+                continue;
+            }
             DocumentEntity doc = docs.get(unit.getDocumentId());
-            citations.add(new Citation(seq++, id, unit.getDocumentId(),
+            String sectionPath = child.getSectionPath();
+            if (sectionPath == null || sectionPath.isBlank()) {
+                sectionPath = child.getSectionTitle();
+            }
+            if (sectionPath == null || sectionPath.isBlank()) {
+                sectionPath = unit.getSectionPath();
+            }
+            Citation citation = new Citation(seq, id,
+                    unit.getId().equals(child.getId()) ? null : unit.getId(), unit.getDocumentId(),
                     doc == null ? "" : doc.getFileName(),
-                    child.getPage() == null ? 0 : child.getPage(),
+                    child.getPage() == null ? 0 : child.getPage(), sectionPath, child.getContentType(),
                     doc == null ? null : minio.presignUrl(doc.getObjectKey()),
-                    unit.getContent()));
+                    unit.getContent());
+            int remaining = rc.maxContextTokens - usedTokens;
+            if (countTokens(citation.material()) > remaining && unit != child) {
+                citation = new Citation(seq, id, null, child.getDocumentId(), citation.documentName(),
+                        citation.page(), sectionPath, child.getContentType(), citation.previewUrl(),
+                        child.getContent());
+            }
+            if (countTokens(citation.material()) > remaining) {
+                int contentBudget = remaining - countTokens(citation.material().substring(0,
+                        citation.material().length() - citation.content().length()));
+                if (contentBudget <= 0) {
+                    continue;
+                }
+                String bounded = truncateToTokens(citation.content(), contentBudget);
+                citation = new Citation(seq, id, citation.parentChunkId(), citation.documentId(),
+                        citation.documentName(), citation.page(), citation.sectionPath(),
+                        citation.contentType(), citation.previewUrl(), bounded);
+            }
+            int citationTokens = countTokens(citation.material());
+            if (citation.content().isBlank() || citationTokens > remaining) {
+                continue;
+            }
+            citations.add(citation);
+            citedUnits.add(unitKey);
+            usedTokens += citationTokens;
+            seq++;
         }
         return new RetrievalResult(citations, bestScore);
+    }
+
+    /** 与 Worker 的切片计数保持同一近似口径。 */
+    static int countTokens(String text) {
+        if (text == null || text.isEmpty()) {
+            return 0;
+        }
+        int tokens = 0;
+        int asciiRun = 0;
+        for (int i = 0; i < text.length(); i++) {
+            char c = text.charAt(i);
+            if (isAsciiAlnum(c)) {
+                asciiRun++;
+                continue;
+            }
+            if (asciiRun > 0) {
+                tokens += (asciiRun + 3) / 4;
+                asciiRun = 0;
+            }
+            if (!Character.isWhitespace(c)) {
+                tokens++;
+            }
+        }
+        return tokens + (asciiRun + 3) / 4;
+    }
+
+    private static String truncateToTokens(String text, int maxTokens) {
+        int used = 0;
+        int asciiRun = 0;
+        int end = 0;
+        for (int i = 0; i < text.length();) {
+            int codePoint = text.codePointAt(i);
+            int next = i + Character.charCount(codePoint);
+            int cost = isAsciiAlnum(codePoint) ? (asciiRun++ % 4 == 0 ? 1 : 0)
+                    : Character.isWhitespace(codePoint) ? 0 : 1;
+            if (!isAsciiAlnum(codePoint)) {
+                asciiRun = 0;
+            }
+            if (used + cost > maxTokens) {
+                break;
+            }
+            used += cost;
+            end = next;
+            i = next;
+        }
+        return text.substring(0, end).stripTrailing();
+    }
+
+    private static boolean isAsciiAlnum(int c) {
+        return c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9';
     }
 }

@@ -573,6 +573,14 @@ export default function ChatPage() {
                               <Typography.Text type="secondary" style={{ fontSize: 12 }}>
                                 第 {c.page + 1} 页
                               </Typography.Text>
+                              {c.sectionPath && (
+                                <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                                  {c.sectionPath}
+                                </Typography.Text>
+                              )}
+                              {c.contentType && c.contentType !== 'TEXT' && (
+                                <Tag>{({ TABLE: '表格', CODE: '代码', IMAGE: '图片' } as Record<string, string>)[c.contentType] ?? c.contentType}</Tag>
+                              )}
                               {c.previewUrl && (
                                 <a
                                   href={c.previewUrl}

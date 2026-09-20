@@ -96,6 +96,9 @@ public class PipelineProcessor {
                 doc.getObjectKey(), outcome.pages(), chunkParams(kb));
         ChunkStrategy strategy = strategyRouter.route(kb.getChunkStrategy(), doc.getFileName());
         List<ChunkPlan> plans = strategy.plan(chunkCtx);
+        if (plans.stream().noneMatch(p -> !p.children().isEmpty())) {
+            throw new IllegalStateException("文档未提取到可检索内容，请检查文件或 OCR/Vision 配置");
+        }
         persistPlans(doc, plans);
         setStage(doc, "CHUNKING", 40);
 
@@ -189,6 +192,7 @@ public class PipelineProcessor {
             if (plan.parentChild()) {
                 ChunkEntity parent = newChunk(doc, seq++, 0);
                 parent.setChunkType("PARENT");
+                parent.setContentType("TEXT");
                 parent.setContent(plan.parentContent());
                 parent.setSectionTitle(plan.sectionTitle());
                 parent.setSectionPath(plan.sectionPath());
@@ -204,6 +208,7 @@ public class PipelineProcessor {
                 c.setChunkType("CHILD");
                 c.setParentChunkId(parentId);
                 c.setContent(child.content());
+                c.setContentType(contentType(doc.getFileName(), child.content()));
                 c.setSectionTitle(plan.sectionTitle());
                 c.setSectionPath(plan.sectionPath());
                 chunkMapper.insert(c);
@@ -213,9 +218,9 @@ public class PipelineProcessor {
 
     private ChunkParams chunkParams(KnowledgeBaseEntity kb) {
         return new ChunkParams(
-                kb.getParentChunkSize() == null ? 1200 : kb.getParentChunkSize(),
-                kb.getChildChunkSize() == null ? 400 : kb.getChildChunkSize(),
-                kb.getChildOverlap() == null ? 60 : kb.getChildOverlap(),
+                kb.getParentChunkSize() == null ? 2000 : kb.getParentChunkSize(),
+                kb.getChildChunkSize() == null ? 500 : kb.getChildChunkSize(),
+                kb.getChildOverlap() == null ? 80 : kb.getChildOverlap(),
                 parseSeparators(kb.getSeparators()));
     }
 
@@ -244,12 +249,29 @@ public class PipelineProcessor {
         return c;
     }
 
+    private String contentType(String fileName, String content) {
+        String lower = fileName == null ? "" : fileName.toLowerCase(java.util.Locale.ROOT);
+        if (lower.endsWith(".png") || lower.endsWith(".jpg") || lower.endsWith(".jpeg")) {
+            return "IMAGE";
+        }
+        String text = content.stripLeading();
+        if (text.startsWith("|") && text.contains("\n|---")) {
+            return "TABLE";
+        }
+        if (text.startsWith("```") || text.startsWith("~~~")) {
+            return "CODE";
+        }
+        return "TEXT";
+    }
+
     /** Embedding 内容增强（指南 §9/28）：文档标题 + 章节路径 + 正文。 */
     private String embeddingText(DocumentEntity doc, ChunkEntity c) {
         StringBuilder sb = new StringBuilder("文档：").append(doc.getFileName()).append('\n');
         if (c.getSectionPath() != null && !c.getSectionPath().isBlank()) {
-            sb.append("章节：").append(c.getSectionPath()).append("\n\n");
+            sb.append("章节：").append(c.getSectionPath()).append('\n');
         }
+        sb.append("类型：").append(c.getContentType() == null ? "TEXT" : c.getContentType())
+                .append("\n\n");
         return sb.append(c.getContent()).toString();
     }
 

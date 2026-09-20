@@ -21,6 +21,7 @@ public class ChunkEntity {
     private String status;
     /** PARENT/CHILD */
     private String chunkType;
+    private String contentType;
     private Long parentChunkId;
     private String sectionTitle;
     private String sectionPath;

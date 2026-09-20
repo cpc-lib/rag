@@ -106,9 +106,9 @@ export default function KnowledgeBasesPage() {
     editForm.setFieldsValue({
       name: kb.name,
       description: kb.description ?? '',
-      parentChunkSize: kb.parentChunkSize ?? 1200,
-      childChunkSize: kb.childChunkSize ?? 400,
-      childOverlap: kb.childOverlap ?? 60,
+      parentChunkSize: kb.parentChunkSize ?? 2000,
+      childChunkSize: kb.childChunkSize ?? 500,
+      childOverlap: kb.childOverlap ?? 80,
       chunkStrategy: kb.chunkStrategy ?? 'AUTO',
       separatorsText: separatorsToText(kb.separators),
     });
@@ -263,9 +263,9 @@ export default function KnowledgeBasesPage() {
           layout="vertical"
           initialValues={{
             chunkStrategy: 'AUTO',
-            parentChunkSize: 1200,
-            childChunkSize: 400,
-            childOverlap: 60,
+            parentChunkSize: 2000,
+            childChunkSize: 500,
+            childOverlap: 80,
             separatorsText: '\n\n\n\n。\n？\n！',
           }}
         >

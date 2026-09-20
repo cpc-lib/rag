@@ -1,10 +1,9 @@
 package com.rag.api.application;
 
 import com.baomidou.mybatisplus.core.conditions.query.QueryWrapper;
+import com.baomidou.mybatisplus.core.conditions.update.UpdateWrapper;
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import com.rag.api.common.BizException;
-import com.rag.api.common.ErrorCode;
-import com.rag.api.common.TenantContext;
 import com.rag.api.infrastructure.mq.IngestPublisher;
 import com.rag.api.infrastructure.persistence.entity.ChunkEntity;
 import com.rag.api.infrastructure.persistence.entity.DocumentEntity;
@@ -16,8 +15,6 @@ import com.rag.api.interfaces.dto.Dtos;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
-
-import java.util.List;
 
 /**
  * 切片管理：人工增删改后触发 REINDEX 任务（spec 3.2）。
@@ -49,6 +46,7 @@ public class ChunkAppService {
 
     public ChunkEntity create(Dtos.ChunkCreateReq req) {
         DocumentEntity doc = assertDocOwned(req.documentId());
+        requireEditable(doc);
         ChunkEntity chunk = new ChunkEntity();
         chunk.setKbId(doc.getKbId());
         chunk.setDocumentId(doc.getId());
@@ -60,6 +58,7 @@ public class ChunkAppService {
                 ? null : req.sectionTitle());
         chunk.setStatus("MANUAL");
         chunk.setChunkType("CHILD");
+        chunk.setContentType("TEXT");
         chunkMapper.insert(chunk);
         enqueueReindex(doc);
         return chunk;
@@ -67,6 +66,13 @@ public class ChunkAppService {
 
     public ChunkEntity update(long chunkId, Dtos.ChunkUpdateReq req) {
         ChunkEntity chunk = getOwnedChunk(chunkId);
+        requireChild(chunk);
+        DocumentEntity doc = documentMapper.selectById(chunk.getDocumentId());
+        requireEditable(doc);
+        if (chunk.getParentChunkId() != null) {
+            dissolveParent(chunk.getParentChunkId(), chunk.getDocumentId());
+            chunk.setParentChunkId(null);
+        }
         if (req.content() != null && !req.content().isBlank()) {
             chunk.setContent(req.content());
         }
@@ -77,40 +83,48 @@ public class ChunkAppService {
             chunk.setSectionTitle(req.sectionTitle().isBlank() ? null : req.sectionTitle());
         }
         chunk.setStatus("MANUAL");
-        if (chunk.getParentChunkId() != null) {
-            // 人工修改的 child 脱离 parent，成为独立检索单元
-            chunk.setParentChunkId(null);
-        }
         chunkMapper.updateById(chunk);
-        DocumentEntity doc = documentMapper.selectById(chunk.getDocumentId());
         enqueueReindex(doc);
         return chunk;
     }
 
     public void delete(long chunkId) {
         ChunkEntity chunk = getOwnedChunk(chunkId);
+        requireChild(chunk);
+        DocumentEntity doc = documentMapper.selectById(chunk.getDocumentId());
+        requireEditable(doc);
         if (chunk.getParentChunkId() != null) {
-            dissolveParent(chunk.getParentChunkId());
+            dissolveParent(chunk.getParentChunkId(), chunk.getDocumentId());
+            chunk.setParentChunkId(null);
         }
         chunk.setStatus("DELETED");
         chunkMapper.updateById(chunk);
-        DocumentEntity doc = documentMapper.selectById(chunk.getDocumentId());
         enqueueReindex(doc);
     }
 
-    /** 删除某 child 时解散其 parent：parent 标记删除，其余 child 全部脱离为独立单元。 */
-    private void dissolveParent(long parentId) {
+    /** 编辑或删除 child 时解散其 parent，防止旧 parent 内容再次进入检索上下文。 */
+    private void dissolveParent(long parentId, long documentId) {
         ChunkEntity parent = chunkMapper.selectById(parentId);
-        if (parent != null && !"DELETED".equals(parent.getStatus())) {
+        if (parent != null && parent.getDocumentId() == documentId && !"DELETED".equals(parent.getStatus())) {
             parent.setStatus("DELETED");
             chunkMapper.updateById(parent);
         }
-        List<ChunkEntity> siblings = chunkMapper.selectList(new QueryWrapper<ChunkEntity>()
+        chunkMapper.update(null, new UpdateWrapper<ChunkEntity>()
                 .eq("parent_chunk_id", parentId)
-                .ne("status", "DELETED"));
-        for (ChunkEntity sibling : siblings) {
-            sibling.setParentChunkId(null);
-            chunkMapper.updateById(sibling);
+                .eq("document_id", documentId)
+                .ne("status", "DELETED")
+                .set("parent_chunk_id", null));
+    }
+
+    private void requireChild(ChunkEntity chunk) {
+        if (!"CHILD".equals(chunk.getChunkType())) {
+            throw BizException.badRequest("Parent 切片仅用于上下文，请编辑或删除其 Child 切片");
+        }
+    }
+
+    private void requireEditable(DocumentEntity doc) {
+        if (doc == null || !("READY".equals(doc.getStatus()) || "FAILED".equals(doc.getStatus()))) {
+            throw BizException.badRequest("文档处理未结束，请稍后修改切片");
         }
     }
 
@@ -143,6 +157,9 @@ public class ChunkAppService {
         if (doc == null) {
             return;
         }
+        doc.setStatus("EMBEDDING");
+        doc.setProgress(0);
+        documentMapper.updateById(doc);
         PipelineTaskEntity task = new PipelineTaskEntity();
         task.setTenantId(doc.getTenantId());
         task.setKbId(doc.getKbId());

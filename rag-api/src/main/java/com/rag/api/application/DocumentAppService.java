@@ -1,6 +1,7 @@
 package com.rag.api.application;
 
 import com.baomidou.mybatisplus.core.conditions.query.QueryWrapper;
+import com.baomidou.mybatisplus.core.conditions.update.UpdateWrapper;
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.rag.api.common.BizException;
@@ -108,6 +109,51 @@ public class DocumentAppService {
         knowledgeBaseService.getOwned(kbId);
         return documentMapper.selectPage(new Page<>(page, size),
                 new QueryWrapper<DocumentEntity>().eq("kb_id", kbId).orderByDesc("id"));
+    }
+
+    /** 使用原文件和知识库当前切片策略重新解析；人工切片由 Worker 保留。 */
+    public DocumentEntity reparse(long documentId) {
+        TenantContext.Session s = TenantContext.require();
+        if (s.userType() != 1) {
+            throw BizException.forbidden("仅租户管理员可重新解析文档");
+        }
+        DocumentEntity doc = documentMapper.selectById(documentId);
+        if (doc == null) {
+            throw BizException.notFound("文档不存在");
+        }
+        knowledgeBaseService.getOwned(doc.getKbId());
+        if (!("READY".equals(doc.getStatus()) || "FAILED".equals(doc.getStatus()))) {
+            throw BizException.badRequest("文档正在处理，请完成后再重新解析");
+        }
+
+        doc.setStatus("PARSING");
+        doc.setProgress(0);
+        doc.setErrorMsg(null);
+        documentMapper.update(null, new UpdateWrapper<DocumentEntity>()
+                .eq("id", doc.getId())
+                .set("status", "PARSING")
+                .set("progress", 0)
+                .set("error_msg", null));
+
+        PipelineTaskEntity task = new PipelineTaskEntity();
+        task.setTenantId(doc.getTenantId());
+        task.setKbId(doc.getKbId());
+        task.setDocumentId(doc.getId());
+        task.setType("PARSE");
+        task.setStatus("PENDING");
+        task.setRetryCount(0);
+        taskMapper.insert(task);
+
+        var msg = new IngestPublisher.IngestMessage(task.getId(), "PARSE", doc.getTenantId(),
+                doc.getKbId(), doc.getId(), doc.getObjectKey());
+        try {
+            task.setPayload(objectMapper.writeValueAsString(msg));
+            taskMapper.updateById(task);
+        } catch (Exception ignored) {
+        }
+        publisher.publish(msg);
+        log.info("文档重新解析任务已投递 doc={} task={}", doc.getId(), task.getId());
+        return doc;
     }
 
     public String downloadUrl(long documentId) {

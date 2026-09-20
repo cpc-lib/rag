@@ -76,6 +76,7 @@ public class IngestConsumer {
             task.setStatus("RUNNING");
             taskMapper.updateById(task);
             processor.process(msg, task);
+            taskMapper.updateById(task);
             channel.basicAck(tag, false);
             log.info("任务成功 task={}", msg.taskId());
         } catch (Exception e) {

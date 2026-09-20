@@ -18,6 +18,8 @@ export const documentApi = {
     ),
   downloadUrl: (id: number) =>
     unwrap<string>(http.get(`/documents/${id}/download-url`)),
+  reparse: (id: number) =>
+    unwrap<DocumentItem>(http.post(`/documents/${id}/reparse`)),
   /** 删除文档：同时删除全部切片、索引及 MinIO 原文件 */
   remove: (id: number) => unwrap<void>(http.delete(`/documents/${id}`)),
 };

@@ -1,6 +1,7 @@
 package com.rag.worker.pipeline.chunk;
 
 import com.rag.worker.infrastructure.storage.MinioStorage;
+import com.rag.worker.pipeline.ParseService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.pdfbox.pdmodel.PDDocument;
@@ -16,7 +17,7 @@ import java.util.Map;
 /**
  * PDF_LAYOUT（指南 §23/24）：重读原始 PDF，按坐标排序提取阅读顺序
  * （sortByPosition 改善多栏），统计并剔除重复页眉/页脚；文本层为空时
- * 回退解析阶段产出的 OCR 文本；最后按段落+递归打包。
+ * 回退解析阶段产出的 OCR 文本；清理后的页交给父子切片策略。
  */
 @Slf4j
 @Component
@@ -25,7 +26,7 @@ public class PdfLayoutStrategy implements ChunkStrategy {
 
     private static final double REPEAT_RATIO = 0.6;
 
-    private final ChunkSupport support;
+    private final ParentChildStrategy parentChildStrategy;
     private final MinioStorage minioStorage;
 
     @Override
@@ -71,31 +72,26 @@ public class PdfLayoutStrategy implements ChunkStrategy {
         }
         double total = Math.max(1, pageTexts.size());
 
-        int size = ctx.params().childSize();
-        int overlap = ctx.params().overlap();
-        List<ChunkPlan> plans = new ArrayList<>();
+        Map<Integer, String> parsedPages = new HashMap<>();
+        for (ParseService.RawPage page : ctx.pages()) {
+            parsedPages.put(page.page(), page.text());
+        }
+        List<ParseService.RawPage> cleanedPages = new ArrayList<>();
         for (int i = 0; i < pageTexts.size(); i++) {
             String text = stripRepeating(pageTexts.get(i), firstFreq, lastFreq, total);
-            if (text.isBlank() && i < ctx.pages().size()) {
-                text = ctx.pages().get(i).text(); // OCR 回退
+            String parsed = parsedPages.get(i);
+            String rawText = pageTexts.get(i);
+            if ((rawText == null || rawText.strip().length() < 10)
+                    && parsed != null && !parsed.isBlank()) {
+                text = parsed; // 按实际页码回退 OCR，避免跳页后错位
             }
             if (text == null || text.isBlank()) {
                 continue;
             }
-            List<ChunkSupport.PackPiece> pieces = new ArrayList<>();
-            for (String para : support.paragraphs(text)) {
-                for (String part : support.recursive(para, ctx.params().separators())) {
-                    for (String bounded : support.hardSplit(part, size)) {
-                        pieces.add(ChunkSupport.PackPiece.text(i, bounded));
-                    }
-                }
-            }
-            List<PlannedChild> children = support.pack(pieces, size, overlap);
-            if (!children.isEmpty()) {
-                plans.add(ChunkPlan.independent(null, null, children));
-            }
+            cleanedPages.add(new ParseService.RawPage(i, text));
         }
-        return plans;
+        return parentChildStrategy.plan(new ChunkContext(ctx.tenantId(), ctx.documentId(),
+                ctx.fileName(), ctx.objectKey(), cleanedPages, ctx.params()));
     }
 
     private String stripRepeating(String text, Map<String, Integer> first,
@@ -104,12 +100,12 @@ public class PdfLayoutStrategy implements ChunkStrategy {
             return "";
         }
         List<String> kept = new ArrayList<>();
-        String[] lines = text.split("\n", -1);
+        String[] lines = text.split("\n");
         for (int i = 0; i < lines.length; i++) {
             String s = lines[i].strip();
-            boolean isRepeating = (i == 0 && first.getOrDefault(s, 0) / total > REPEAT_RATIO)
+            boolean isRepeating = total > 1 && ((i == 0 && first.getOrDefault(s, 0) / total > REPEAT_RATIO)
                     || (i == lines.length - 1
-                            && last.getOrDefault(s, 0) / total > REPEAT_RATIO);
+                            && last.getOrDefault(s, 0) / total > REPEAT_RATIO));
             if (!isRepeating) {
                 kept.add(lines[i]);
             }
@@ -117,28 +113,9 @@ public class PdfLayoutStrategy implements ChunkStrategy {
         return String.join("\n", kept).strip();
     }
 
-    /** 无法按版式处理时：用解析文本走递归切片。 */
+    /** 无法按版式处理时：用解析文本生成父子切片。 */
     private List<ChunkPlan> fallback(ChunkContext ctx) {
-        int size = ctx.params().childSize();
-        int overlap = ctx.params().overlap();
-        List<ChunkPlan> plans = new ArrayList<>();
-        for (var page : ctx.pages()) {
-            String text = page.text();
-            if (text == null || text.isBlank()) {
-                continue;
-            }
-            List<ChunkSupport.PackPiece> pieces = new ArrayList<>();
-            for (String part : support.recursive(text, ctx.params().separators())) {
-                for (String bounded : support.hardSplit(part, size)) {
-                    pieces.add(ChunkSupport.PackPiece.text(page.page(), bounded));
-                }
-            }
-            List<PlannedChild> children = support.pack(pieces, size, overlap);
-            if (!children.isEmpty()) {
-                plans.add(ChunkPlan.independent(null, null, children));
-            }
-        }
-        return plans;
+        return parentChildStrategy.plan(ctx);
     }
 
     private void bump(Map<String, Integer> freq, String key) {

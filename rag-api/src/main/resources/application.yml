@@ -76,6 +76,8 @@ rag:
     vector-top-n: 20
     keyword-top-n: 20
     top-k: 8
+    final-context-top-k: 5
+    max-context-tokens: 12000
     rrf-k: 60
     low-confidence-threshold: 0.35
   llm:

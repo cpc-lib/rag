@@ -20,7 +20,7 @@ import {
   Typography,
   Upload,
 } from 'antd';
-import { ArrowLeftOutlined, UploadOutlined, EyeOutlined, FileTextOutlined } from '@ant-design/icons';
+import { ArrowLeftOutlined, UploadOutlined, EyeOutlined, FileTextOutlined, ReloadOutlined } from '@ant-design/icons';
 import type { UploadRequestOption } from 'rc-upload/lib/interface';
 import { useNavigate, useParams } from 'react-router-dom';
 import { documentApi } from '../api/documents';
@@ -260,6 +260,12 @@ export default function KbDetailPage() {
     loadDocs();
   };
 
+  const reparseDocument = async (doc: DocumentItem) => {
+    await documentApi.reparse(doc.id);
+    message.success('已按当前策略重新解析并切片');
+    loadDocs();
+  };
+
   const docColumns = [
     { title: 'ID', dataIndex: 'id', width: 70 },
     {
@@ -289,7 +295,7 @@ export default function KbDetailPage() {
     },
     {
       title: '操作',
-      width: 280,
+      width: 380,
       render: (_: unknown, r: DocumentItem) => (
         <Space>
           <Button size="small" onClick={() => openChunks(r)}>
@@ -298,6 +304,17 @@ export default function KbDetailPage() {
           <Button size="small" icon={<EyeOutlined />} onClick={() => openPreview(r)}>
             预览
           </Button>
+          <Popconfirm
+            title="重新解析该文档？"
+            description="将按当前策略重建自动切片并重新索引，人工切片保留"
+            okText="重新解析"
+            cancelText="取消"
+            onConfirm={() => reparseDocument(r)}
+          >
+            <Button size="small" icon={<ReloadOutlined />} disabled={!TERMINAL_STATUS.has(r.status)}>
+              重新解析
+            </Button>
+          </Popconfirm>
           <Popconfirm
             title="确认删除该文档？"
             description="将删除文档、全部切片、索引及原始文件，不可恢复"
@@ -361,16 +378,18 @@ export default function KbDetailPage() {
       title: '操作',
       width: 120,
       render: (_: unknown, r: Chunk) => (
-        <Space>
-          <Button size="small" onClick={() => openChunkEdit(r)}>
-            编辑
-          </Button>
-          <Popconfirm title="确认删除该切片？" onConfirm={() => deleteChunk(r)}>
-            <Button size="small" danger>
-              删除
+        r.chunkType === 'PARENT' ? <Typography.Text type="secondary">上下文切片</Typography.Text> : (
+          <Space>
+            <Button size="small" onClick={() => openChunkEdit(r)}>
+              编辑
             </Button>
-          </Popconfirm>
-        </Space>
+            <Popconfirm title="确认删除该切片？" onConfirm={() => deleteChunk(r)}>
+              <Button size="small" danger>
+                删除
+              </Button>
+            </Popconfirm>
+          </Space>
+        )
       ),
     },
   ];

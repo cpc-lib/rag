@@ -40,6 +40,11 @@ public class DocumentController {
         return ApiResult.ok();
     }
 
+    @PostMapping("/api/v1/documents/{id}/reparse")
+    public ApiResult<DocumentEntity> reparse(@PathVariable long id) {
+        return ApiResult.ok(documentAppService.reparse(id));
+    }
+
     @GetMapping("/api/v1/documents/{id}/download-url")
     public ApiResult<String> downloadUrl(@PathVariable long id) {
         return ApiResult.ok(documentAppService.downloadUrl(id));

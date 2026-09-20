@@ -71,7 +71,7 @@ public class ChunkSupport {
             return;
         }
         if (separators.isEmpty()) {
-            out.add(text);
+            out.add(text.strip());
             return;
         }
         String sep = separators.get(0);
@@ -80,8 +80,14 @@ public class ChunkSupport {
             recurse(text, rest, out);
             return;
         }
-        for (String part : text.split(Pattern.quote(sep))) {
-            recurse(part, rest, out);
+        int start = 0;
+        int end;
+        while ((end = text.indexOf(sep, start)) >= 0) {
+            recurse(text.substring(start, end + sep.length()), rest, out);
+            start = end + sep.length();
+        }
+        if (start < text.length()) {
+            recurse(text.substring(start), rest, out);
         }
     }
 
@@ -126,7 +132,7 @@ public class ChunkSupport {
                 continue;
             }
             if (FENCE.matcher(line).find()) {
-                flushParagraphs(page, normal, blocks);
+                flushTablesAndParagraphs(page, normal, blocks);
                 codeBuf = new ArrayList<>();
                 codeBuf.add(line);
                 continue;
@@ -251,15 +257,27 @@ public class ChunkSupport {
         int bufPage = 0;
         String lastTextTail = "";
         for (PackPiece piece : pieces) {
+            if (piece.text() == null || piece.text().isBlank()) {
+                continue;
+            }
+            if (piece.atomic()) {
+                if (!buf.isEmpty()) {
+                    children.add(new PlannedChild(bufPage, buf.toString().strip()));
+                    buf.setLength(0);
+                }
+                children.add(new PlannedChild(piece.page(), piece.text().strip()));
+                lastTextTail = "";
+                continue;
+            }
             boolean overflow = !buf.isEmpty()
                     && tokens(buf.toString()) + tokens(piece.text()) > size;
             if (overflow) {
                 children.add(new PlannedChild(bufPage, buf.toString().strip()));
                 buf.setLength(0);
-                buf.append(lastTextTail);
-                if (buf.isEmpty()) {
-                    bufPage = piece.page();
+                if (tokens(lastTextTail) + tokens(piece.text()) <= size) {
+                    buf.append(lastTextTail);
                 }
+                bufPage = piece.page();
             }
             if (buf.isEmpty()) {
                 bufPage = piece.page();
@@ -267,11 +285,7 @@ public class ChunkSupport {
                 buf.append('\n');
             }
             buf.append(piece.text());
-            if (!piece.atomic()) {
-                lastTextTail = tail(piece.text(), overlapTokens);
-            } else {
-                lastTextTail = "";
-            }
+            lastTextTail = tail(piece.text(), overlapTokens);
         }
         if (!buf.toString().isBlank()) {
             children.add(new PlannedChild(bufPage, buf.toString().strip()));

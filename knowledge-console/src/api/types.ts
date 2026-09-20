@@ -275,10 +275,13 @@ export interface QuotaUsage {
 export interface Citation {
   seq: number;
   chunkId: number;
+  parentChunkId: number | null;
   documentId: number;
   documentName: string;
   page: number;
-  previewUrl: string;
+  sectionPath: string | null;
+  contentType: string | null;
+  previewUrl: string | null;
   content: string;
 }
 

@@ -50,9 +50,9 @@ public class KnowledgeBaseService {
         kb.setTenantId(s.tenantId());
         kb.setName(req.name());
         kb.setDescription(req.description());
-        kb.setParentChunkSize(req.parentChunkSize() == null ? 1200 : req.parentChunkSize());
-        kb.setChildChunkSize(req.childChunkSize() == null ? 400 : req.childChunkSize());
-        kb.setChildOverlap(req.childOverlap() == null ? 60 : req.childOverlap());
+        kb.setParentChunkSize(req.parentChunkSize() == null ? 2000 : req.parentChunkSize());
+        kb.setChildChunkSize(req.childChunkSize() == null ? 500 : req.childChunkSize());
+        kb.setChildOverlap(req.childOverlap() == null ? 80 : req.childOverlap());
         kb.setChunkStrategy(normalizeStrategy(req.chunkStrategy()));
         kb.setSeparators(toSeparatorsJson(req.separators()));
         kbMapper.insert(kb);
@@ -161,9 +161,9 @@ public class KnowledgeBaseService {
         if (overlap != null && (overlap < 0 || overlap > 500)) {
             throw BizException.badRequest("child_overlap 取值 0~500");
         }
-        int p = parentSize == null ? 1200 : parentSize;
-        int c = childSize == null ? 400 : childSize;
-        int o = overlap == null ? 60 : overlap;
+        int p = parentSize == null ? 2000 : parentSize;
+        int c = childSize == null ? 500 : childSize;
+        int o = overlap == null ? 80 : overlap;
         if (c >= p) {
             throw BizException.badRequest("child_chunk_size 必须小于 parent_chunk_size");
         }
