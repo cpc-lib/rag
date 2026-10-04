@@ -483,8 +483,6 @@ CREATE TABLE `tool_config`  (
 -- ----------------------------
 -- Records of tool_config
 -- ----------------------------
-INSERT INTO `tool_config` VALUES (1, '705879', 1, 1, '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', '2026-09-19 20:20:09', '2026-09-19 20:24:28');
-INSERT INTO `tool_config` VALUES (2, '866818', 1, 0, NULL, '2026-09-20 03:14:29', '2026-09-20 03:16:00');
 
 -- ----------------------------
 -- Table structure for user_feature
