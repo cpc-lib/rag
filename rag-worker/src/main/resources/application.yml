@@ -45,7 +45,7 @@ rag:
   media:
     # ffmpeg 可执行文件路径（文件库视频转 HLS；ffprobe 取同目录）。
     # 固定用 7.1 构建：9.x 要求 NVENC API 13.1（驱动 610+），M4000 驱动最高 582 只提供 13.0，会报 "Function not implemented"
-    ffmpeg-path: ${FFMPEG_PATH:D:\release\rag\tools\ffmpeg-7.1\bin\ffmpeg.exe}
+    ffmpeg-path: ${FFMPEG_PATH:D:\develop\ffmpeg\ffmpeg-7.1\bin\ffmpeg.exe}
   minio:
     endpoint: http://${MIDDLEWARE_HOST:192.168.1.200}:${MINIO_PORT:9000}
     access-key: ${MINIO_USER:minioadmin}
