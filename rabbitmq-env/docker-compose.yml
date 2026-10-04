@@ -1,0 +1,23 @@
+services:
+  rabbitmq:
+    container_name: rabbitmq
+    build:
+      context: .
+    image: g2plus/rabbitmq:4.1-management
+    environment:
+      RABBITMQ_DEFAULT_USER: guest
+      RABBITMQ_DEFAULT_PASS: guest
+    ports:
+      - "15672:15672"
+      - "5672:5672"
+      - "61613:61613"
+    restart: unless-stopped
+    volumes:
+      - /www/devops/rabbitmq/log:/var/log/rabbitmq
+      - /www/devops/rabbitmq/data:/var/lib/rabbitmq
+    networks:
+      - rabbitmq
+
+networks:
+  rabbitmq:
+    driver: bridge

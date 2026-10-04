@@ -40,6 +40,16 @@ public class DocumentController {
         return ApiResult.ok();
     }
 
+    @PostMapping("/api/v1/documents/{id}/start")
+    public ApiResult<DocumentEntity> start(@PathVariable long id) {
+        return ApiResult.ok(documentAppService.startProcessing(id));
+    }
+
+    @PostMapping("/api/v1/documents/{id}/stop")
+    public ApiResult<DocumentEntity> stop(@PathVariable long id) {
+        return ApiResult.ok(documentAppService.stopProcessing(id));
+    }
+
     @PostMapping("/api/v1/documents/{id}/reparse")
     public ApiResult<DocumentEntity> reparse(@PathVariable long id) {
         return ApiResult.ok(documentAppService.reparse(id));

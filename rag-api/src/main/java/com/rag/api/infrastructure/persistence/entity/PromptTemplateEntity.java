@@ -14,6 +14,8 @@ public class PromptTemplateEntity {
 
     private String tenantId;
     private Long kbId;
+    /** 模板分类：NULL=知识库问答（兼容历史），SUBTITLE=字幕翻译。 */
+    private String category;
     private String name;
     private String content;
     private Boolean isDefault;

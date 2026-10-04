@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import {
   App,
   Button,
+  Card,
   Form,
   Input,
   Modal,
@@ -19,7 +20,7 @@ import { promptApi } from '../api/prompts';
 import { kbApi } from '../api/knowledgeBases';
 import type { KnowledgeBase, PromptReq, PromptTemplate } from '../api/types';
 
-/** 提示词模板管理（租户管理员）：增删改查 + 知识库内默认模板。 */
+/** 提示词模板管理（租户管理员）：知识库问答模板 + 字幕翻译提示词。 */
 export default function PromptPage() {
   const { message } = App.useApp();
   const [list, setList] = useState<PromptTemplate[]>([]);
@@ -30,6 +31,10 @@ export default function PromptPage() {
   const [editing, setEditing] = useState<PromptTemplate | null>(null);
   const [form] = Form.useForm();
 
+  // 字幕翻译提示词
+  const [subtitleContent, setSubtitleContent] = useState('');
+  const [subtitleSaving, setSubtitleSaving] = useState(false);
+
   const load = async () => {
     setLoading(true);
     try {
@@ -39,11 +44,35 @@ export default function PromptPage() {
     }
   };
 
+  const loadSubtitle = async () => {
+    try {
+      const t = await promptApi.getSubtitle();
+      setSubtitleContent(t.content);
+    } catch {
+      // 忽略，首次可能不存在
+    }
+  };
+
   useEffect(() => {
     load();
+    loadSubtitle();
     kbApi.list().then(setKbs);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  const saveSubtitle = async () => {
+    if (!subtitleContent.trim()) {
+      message.warning('提示词内容不能为空');
+      return;
+    }
+    setSubtitleSaving(true);
+    try {
+      await promptApi.updateSubtitle(subtitleContent);
+      message.success('字幕翻译提示词已保存');
+    } finally {
+      setSubtitleSaving(false);
+    }
+  };
 
   const openCreate = () => {
     setEditing(null);
@@ -97,7 +126,8 @@ export default function PromptPage() {
       title: '所属知识库',
       dataIndex: 'kbId',
       width: 160,
-      render: (kbId: number) => kbs.find((k) => k.id === kbId)?.name ?? kbId,
+      render: (kbId: number | null) =>
+        kbId == null ? '-' : kbs.find((k) => k.id === kbId)?.name ?? kbId,
     },
     {
       title: '模板名称',
@@ -155,6 +185,27 @@ export default function PromptPage() {
           新建模板
         </Button>
       </Space>
+
+      <Card
+        title="字幕翻译提示词"
+        style={{ marginBottom: 24 }}
+        extra={
+          <Button type="primary" onClick={saveSubtitle} loading={subtitleSaving}>
+            保存
+          </Button>
+        }
+      >
+        <Typography.Paragraph type="secondary" style={{ marginTop: 0 }}>
+          用于字幕转换应用的翻译系统提示词，支持占位符 <Tag color="blue">{`{{目标语言}}`}</Tag>
+        </Typography.Paragraph>
+        <Input.TextArea
+          value={subtitleContent}
+          onChange={(e) => setSubtitleContent(e.target.value)}
+          autoSize={{ minRows: 8, maxRows: 20 }}
+          placeholder="字幕翻译师的系统提示词，可使用 {{目标语言}} 占位符"
+        />
+      </Card>
+
       <Table
         rowKey="id"
         loading={loading}

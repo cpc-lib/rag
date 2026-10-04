@@ -18,9 +18,12 @@ public class DocumentEntity {
     private String objectKey;
     private Long fileSize;
     private String mimeType;
+    /** UPLOADED(待处理)/PARSING/CHUNKING/EMBEDDING/INDEXING/READY/STOPPED(已停止)/FAILED */
     private String status;
     private Integer progress;
     private Integer pageCount;
     private String warning;
     private String errorMsg;
+    /** 停止处理标记：0 正常，1 用户请求停止 */
+    private Integer stopRequested;
 }

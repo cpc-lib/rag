@@ -16,8 +16,10 @@ import org.springframework.transaction.annotation.Transactional;
 import java.util.List;
 
 /**
- * 提示词模板管理：模板按知识库归属，每个知识库有自己的模板集合与一个默认模板。
- * 占位符：{{资料}} 知识库召回、{{外部信息}} 工具/联网结果、{{问题}} 用户问题。
+ * 提示词模板管理：
+ * - 知识库问答模板：按知识库归属（kb_id 非空，category 为 NULL），每个知识库有默认模板。
+ * - 字幕翻译模板：租户级全局模板（kb_id 为 NULL，category='SUBTITLE'），每租户一条，懒加载默认。
+ * 占位符：知识库问答 {{资料}} {{外部信息}} {{问题}}；字幕翻译 {{目标语言}}。
  */
 @Service
 @RequiredArgsConstructor
@@ -33,14 +35,28 @@ public class PromptTemplateService {
             {{资料}}
             {{外部信息}}""";
 
+    /** 字幕翻译模板分类标识。 */
+    public static final String CATEGORY_SUBTITLE = "SUBTITLE";
+
+    public static final String DEFAULT_SUBTITLE_NAME = "字幕翻译模板";
+
+    public static final String DEFAULT_SUBTITLE_CONTENT = """
+            你是专业字幕翻译师。严格遵守：
+            1. 逐条独立翻译，绝不合并或拆分句子，返回条数必须与输入完全一致。
+            2. 只翻译文本内容，不改动任何序号、时间轴或格式标记。
+            3. 保持口语自然流畅，不改变原意。
+            4. 返回格式：纯 JSON 字符串数组，数组长度等于待翻译条数，顺序与输入一致，不要任何额外说明。
+            目标语言：{{目标语言}}。""";
+
     private final PromptTemplateMapper mapper;
     private final KnowledgeBaseMapper kbMapper;
     private final UserPromptMapper userPromptMapper;
 
-    /** 租户下全部模板（管理页/授权弹窗用）。 */
+    /** 租户下全部知识库问答模板（管理页/授权弹窗用），排除字幕等非知识库模板。 */
     public List<PromptTemplateEntity> list(String tenantId) {
         return mapper.selectList(new QueryWrapper<PromptTemplateEntity>()
                 .eq("tenant_id", tenantId)
+                .isNull("category")
                 .orderByDesc("is_default")
                 .orderByDesc("updated_at"));
     }
@@ -129,6 +145,45 @@ public class PromptTemplateService {
         t.setContent(DEFAULT_TEMPLATE_CONTENT);
         t.setIsDefault(true);
         mapper.insert(t);
+    }
+
+    // ---------------- 字幕翻译模板 ----------------
+
+    /** 获取租户的字幕翻译模板；不存在则播种默认模板。 */
+    @Transactional
+    public PromptTemplateEntity getSubtitleTemplate(String tenantId) {
+        PromptTemplateEntity t = mapper.selectOne(new QueryWrapper<PromptTemplateEntity>()
+                .eq("tenant_id", tenantId)
+                .eq("category", CATEGORY_SUBTITLE)
+                .last("LIMIT 1"));
+        if (t == null) {
+            t = new PromptTemplateEntity();
+            t.setTenantId(tenantId);
+            t.setKbId(null);
+            t.setCategory(CATEGORY_SUBTITLE);
+            t.setName(DEFAULT_SUBTITLE_NAME);
+            t.setContent(DEFAULT_SUBTITLE_CONTENT);
+            t.setIsDefault(true);
+            mapper.insert(t);
+        }
+        return t;
+    }
+
+    /** 更新租户的字幕翻译模板内容。 */
+    @Transactional
+    public PromptTemplateEntity updateSubtitleTemplate(String tenantId, String content) {
+        if (content == null || content.isBlank()) {
+            throw BizException.badRequest("提示词内容不能为空");
+        }
+        PromptTemplateEntity t = getSubtitleTemplate(tenantId);
+        t.setContent(content);
+        mapper.updateById(t);
+        return t;
+    }
+
+    /** 渲染字幕翻译模板：替换 {{目标语言}} 占位符。 */
+    public String renderSubtitle(PromptTemplateEntity t, String targetLang) {
+        return t.getContent().replace("{{目标语言}}", targetLang == null ? "" : targetLang);
     }
 
     /** 渲染模板：替换占位符。 */

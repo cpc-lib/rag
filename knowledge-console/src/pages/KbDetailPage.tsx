@@ -55,6 +55,7 @@ function stepOf(status: string, progress: number): number {
 
 /** 文档处理进度：阶段步骤条 + 百分比进度条。 */
 function DocProgress({ doc }: { doc: DocumentItem }) {
+  const stopped = doc.status === 'STOPPED';
   const failed = doc.status === 'FAILED';
   const done = doc.status === 'READY';
   return (
@@ -62,18 +63,18 @@ function DocProgress({ doc }: { doc: DocumentItem }) {
       <Steps
         size="small"
         current={stepOf(doc.status, doc.progress ?? 0)}
-        status={failed ? 'error' : done ? 'finish' : 'process'}
+        status={stopped || failed ? 'error' : done ? 'finish' : 'process'}
         items={PIPELINE_STEPS.map((t) => ({ title: t }))}
         style={{ marginBottom: 6 }}
       />
       <Progress
         percent={doc.progress ?? 0}
         size="small"
-        status={failed ? 'exception' : done ? 'success' : 'active'}
+        status={stopped || failed ? 'exception' : done ? 'success' : 'active'}
       />
-      {failed && doc.errorMsg && (
-        <Typography.Text type="danger" style={{ fontSize: 12 }}>
-          {doc.errorMsg.length > 40 ? `${doc.errorMsg.slice(0, 40)}…` : doc.errorMsg}
+      {(stopped || failed) && doc.errorMsg && (
+        <Typography.Text type="danger" style={{ fontSize: 12, display: 'block', marginTop: 4 }}>
+          {doc.errorMsg}
         </Typography.Text>
       )}
     </div>
@@ -81,6 +82,8 @@ function DocProgress({ doc }: { doc: DocumentItem }) {
 }
 
 const TERMINAL_STATUS = new Set(['READY', 'FAILED']);
+/** 处理中状态：仅这些状态需要轮询进度，UPLOADED/STOPPED 为静态状态 */
+const PROCESSING_STATUS = new Set(['PARSING', 'CHUNKING', 'EMBEDDING', 'INDEXING']);
 
 const formatSize = (bytes: number | null) => {
   if (bytes == null) return '-';
@@ -133,7 +136,7 @@ export default function KbDetailPage() {
 
   // 存在处理中的文档时 3s 轮询
   useEffect(() => {
-    const hasRunning = docs.some((d) => !TERMINAL_STATUS.has(d.status));
+    const hasRunning = docs.some((d) => PROCESSING_STATUS.has(d.status));
     if (!hasRunning) {
       if (timerRef.current) {
         window.clearInterval(timerRef.current);
@@ -162,7 +165,7 @@ export default function KbDetailPage() {
     }
     try {
       await documentApi.upload(kbId, file);
-      message.success(`文件「${file.name}」已上传，开始解析`);
+      message.success(`文件「${file.name}」已上传，点击「开始处理」启动解析`);
       option.onSuccess?.({}, new XMLHttpRequest());
       loadDocs(true);
     } catch (e) {
@@ -266,6 +269,18 @@ export default function KbDetailPage() {
     loadDocs();
   };
 
+  const startProcessing = async (doc: DocumentItem) => {
+    await documentApi.start(doc.id);
+    message.success(doc.status === 'UPLOADED' ? '已开始处理' : '已从断点继续处理');
+    loadDocs();
+  };
+
+  const stopProcessing = async (doc: DocumentItem) => {
+    await documentApi.stop(doc.id);
+    message.success('停止指令已发送，将在当前阶段完成后停止');
+    loadDocs();
+  };
+
   const docColumns = [
     { title: 'ID', dataIndex: 'id', width: 70 },
     {
@@ -281,6 +296,42 @@ export default function KbDetailPage() {
     { title: '大小', dataIndex: 'fileSize', width: 100, render: formatSize },
     { title: '页数', dataIndex: 'pageCount', width: 80, render: (v: number | null) => v ?? 0 },
     {
+      title: '状态',
+      dataIndex: 'status',
+      width: 110,
+      render: (s: string, r: DocumentItem) => {
+        const label: Record<string, string> = {
+          UPLOADED: '待处理',
+          PARSING: '解析中',
+          CHUNKING: '切片中',
+          EMBEDDING: '向量化中',
+          INDEXING: '索引中',
+          READY: '就绪',
+          STOPPED: '已停止',
+          FAILED: '失败',
+        };
+        const color =
+          s === 'READY'
+            ? 'green'
+            : s === 'FAILED'
+              ? 'red'
+              : s === 'STOPPED'
+                ? 'orange'
+                : s === 'UPLOADED'
+                  ? 'default'
+                  : 'blue';
+        const tag = <Tag color={color}>{label[s] ?? s}</Tag>;
+        // 失败时悬浮展示完整错误原因
+        return s === 'FAILED' && r.errorMsg ? (
+          <Tooltip title={r.errorMsg} color="#ff4d4f">
+            {tag}
+          </Tooltip>
+        ) : (
+          tag
+        );
+      },
+    },
+    {
       title: '告警',
       dataIndex: 'warning',
       width: 140,
@@ -295,9 +346,27 @@ export default function KbDetailPage() {
     },
     {
       title: '操作',
-      width: 380,
+      width: 460,
       render: (_: unknown, r: DocumentItem) => (
         <Space>
+          {(r.status === 'UPLOADED' || r.status === 'STOPPED' || r.status === 'FAILED') && (
+            <Button size="small" type="primary" onClick={() => startProcessing(r)}>
+              {r.status === 'UPLOADED' ? '开始处理' : '继续处理'}
+            </Button>
+          )}
+          {PROCESSING_STATUS.has(r.status) && (
+            <Popconfirm
+              title="停止处理该文档？"
+              description="将在当前阶段完成后停止，已完成的解析/切片进度保留"
+              okText="停止"
+              cancelText="取消"
+              onConfirm={() => stopProcessing(r)}
+            >
+              <Button size="small" danger>
+                停止
+              </Button>
+            </Popconfirm>
+          )}
           <Button size="small" onClick={() => openChunks(r)}>
             切片
           </Button>
@@ -394,7 +463,10 @@ export default function KbDetailPage() {
     },
   ];
 
-  const runningDocs = docs.filter((d) => !TERMINAL_STATUS.has(d.status));
+  const activeDocs = docs.filter((d) => PROCESSING_STATUS.has(d.status));
+  const failedDocs = docs.filter((d) => d.status === 'FAILED');
+  // 进度弹窗同时展示处理中/已停止/失败的文档（待处理与就绪的不展示）
+  const progressDocs = docs.filter((d) => d.status !== 'READY' && d.status !== 'UPLOADED');
 
   return (
     <div>
@@ -418,9 +490,11 @@ export default function KbDetailPage() {
           {kb?.description && <Typography.Text type="secondary">{kb.description}</Typography.Text>}
         </Space>
         <Space>
-          {runningDocs.length > 0 && (
-            <Badge count={runningDocs.length} size="small">
-              <Button onClick={() => setProgressOpen(true)}>处理进度</Button>
+          {(activeDocs.length > 0 || failedDocs.length > 0) && (
+            <Badge count={activeDocs.length + failedDocs.length} size="small">
+              <Button danger={failedDocs.length > 0} onClick={() => setProgressOpen(true)}>
+                处理进度
+              </Button>
             </Badge>
           )}
           <Tooltip title="支持 txt / md / pdf / docx / xlsx / png / jpg / jpeg，单个文件 ≤ 100MB">
@@ -457,7 +531,7 @@ export default function KbDetailPage() {
         onOk={() => setProgressOpen(false)}
         onCancel={() => setProgressOpen(false)}
       >
-        {runningDocs.length === 0 ? (
+        {progressDocs.length === 0 ? (
           <Empty
             image={Empty.PRESENTED_IMAGE_SIMPLE}
             description="全部文档处理完成"
@@ -465,7 +539,7 @@ export default function KbDetailPage() {
           />
         ) : (
           <Space direction="vertical" size={20} style={{ width: '100%' }}>
-            {runningDocs.map((doc) => (
+            {progressDocs.map((doc) => (
               <div key={doc.id}>
                 <Space style={{ marginBottom: 6 }}>
                   <FileTextOutlined style={{ color: '#1677ff' }} />

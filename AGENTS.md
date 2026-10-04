@@ -28,15 +28,27 @@ MySQL 8.4 / Redis 7.4 / MinIO（9000 API + 9001 控制台）/ etcd 3.5 / ES 8.14
 
 所有中间件地址默认指向 `192.168.1.200`，可用环境变量覆盖：`MIDDLEWARE_HOST`、`MYSQL_HOST/PORT/DB/USER/PASSWORD`、`MINIO_PORT`、`ES_PORT`、`MILVUS_PORT`、`ETCD_PORT` 等。
 
-### 2.2 数据库初始化（重要：没有 Flyway）
+### 2.2 数据库初始化（Flyway 自动迁移）
 
-项目已**移除 Flyway**，应用启动不会自动建表/升级表。唯一建表脚本：
+使用 **Flyway** 管理数据库版本，应用启动时自动执行迁移脚本（位于 `rag-api/src/main/resources/db/migration/`）：
 
+- `V1__init_schema.sql` — 全量建表 + 种子数据（合并自历史 V1–V20）
+- 后续表结构变更新增 `V2__xxx.sql`、`V3__xxx.sql` …，**不要修改已发布的迁移脚本**
+
+配置（`rag-api/src/main/resources/application.yml`）：
+
+```yaml
+spring:
+  flyway:
+    enabled: true
+    baseline-on-migrate: true   # 已有库自动基线到 V1，不重跑初始化
+    baseline-version: 1
+    clean-disabled: true
 ```
-rag-api/src/main/resources/db/migration/rag_demo.sql
-```
 
-手动在目标 MySQL 执行一次（默认库名 `rag_demo`）。表结构变更时直接维护这个脚本，并确保与实体字段一致。脚本内含 `flyway_schema_history` 遗留表定义，可忽略。
+> **已有数据库迁移**：若库中残留旧的 `flyway_schema_history` 表（来自项目早期版本），需先 `DROP TABLE flyway_schema_history;` 再启动，避免校验失败。空库直接启动即可自动建表。
+
+rag-worker **不引入 Flyway**（两进程连同一库，只由 rag-api 负责迁移）。
 
 ### 2.3 启动应用
 
@@ -100,8 +112,14 @@ POST /api/v1/knowledge-bases/{kbId}/documents (multipart)
   DocumentAppService.upload
     ├─ QuotaService.checkStorage（存储配额）
     ├─ MinIO 上传原文件  key: {tenantId}/{kbId}/{yyyy-MM-dd}/{uuid}.{ext}
-    ├─ document 落库（file_size 等）+ pipeline_task(PARSE, PENDING)
-    └─ IngestPublisher → exchange rag.ingest
+    └─ document 落库 UPLOADED（待处理）+ 文件库登记；**不自动投递**，等待手动触发
+POST /api/v1/documents/{id}/start（开始/继续处理，DocumentAppService.startProcessing）
+    ├─ 已有切片 → resume=true：document 置 EMBEDDING，Worker 跳过解析/切片断点续跑
+    ├─ 无切片 → resume=false：document 置 PARSING，从头跑
+    └─ pipeline_task(PARSE, PENDING) + IngestPublisher → exchange rag.ingest
+POST /api/v1/documents/{id}/stop（停止，DocumentAppService.stopProcessing）
+    └─ stop_requested=1；任务仍 PENDING 则直接 CANCELLED + 文档 STOPPED，
+       否则 Worker 在阶段边界/向量化批次间检测（StoppedException，不重试）→ STOPPED
          ↓
 IngestConsumer（租户并发信号量 → RUNNING）
   PipelineProcessor.parseFlow
@@ -139,9 +157,9 @@ SSE 事件类型（ChatOrchestrator）：`session` / `search_start` / `search_re
 - 详细切片/多模态/语义边界规则见根文档 [RAG_DOCUMENT_PROCESSING_PIPELINE.md](RAG_DOCUMENT_PROCESSING_PIPELINE.md)（§1–§32），改 chunk 相关代码前必读
 - 估算 token 用 worker 的 `TokenCounter`（中文 1 字≈1 token，ASCII run≈len/4），**不要引入重量级 tokenizer**
 
-## 6. 数据模型（19 张业务表）
+## 6. 数据模型（23 张业务表）
 
-`tenant / sys_user / sys_menu / sys_tool / tenant_menu / user_feature / user_kb / user_prompt / knowledge_base / document / chunk / pipeline_task / prompt_template / model / tool_config / chat_session / chat_message / generated_image`（+遗留 flyway_schema_history）
+`tenant / sys_user / sys_menu / sys_tool / tenant_menu / user_feature / user_kb / user_prompt / knowledge_base / document / chunk / pipeline_task / prompt_template / model / tool_config / chat_session / chat_message / generated_image / subtitle / subtitle_cue / library_file / translate_lang`
 
 关键事实：
 - 用户角色 `user_type`：**0 平台管理员 / 1 租户管理员 / 2 普通用户**；租户编码 `tenant_code` 唯一且创建后不可改

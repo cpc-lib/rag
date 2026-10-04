@@ -12,6 +12,9 @@ import {
   KeyOutlined,
   CloudServerOutlined,
   PictureOutlined,
+  EditOutlined,
+  FolderOutlined,
+  GlobalOutlined,
 } from '@ant-design/icons';
 import { Outlet, useLocation, useNavigate } from 'react-router-dom';
 import { useAuthStore } from '../store/auth';
@@ -26,11 +29,14 @@ const ICONS: Record<string, ReactNode> = {
   team: <TeamOutlined />,
   message: <MessageOutlined />,
   picture: <PictureOutlined />,
+  edit: <EditOutlined />,
   book: <BookOutlined />,
   setting: <SettingOutlined />,
   bulb: <BulbOutlined />,
   tool: <ToolOutlined />,
   dashboard: <DashboardOutlined />,
+  folder: <FolderOutlined />,
+  language: <GlobalOutlined />,
 };
 
 const ROLE_TEXT: Record<number, string> = {

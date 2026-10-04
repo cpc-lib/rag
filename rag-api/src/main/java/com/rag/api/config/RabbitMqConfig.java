@@ -64,4 +64,15 @@ public class RabbitMqConfig {
     public Binding dlqBinding(DirectExchange ragIngestExchange, Queue dlqQueue) {
         return BindingBuilder.bind(dlqQueue).to(ragIngestExchange).with("dlq");
     }
+
+    /** 媒体转码队列：文件库视频 → Worker 转 HLS。 */
+    @Bean
+    public Queue mediaTranscodeQueue(@Value("${rag.mq.media-queue}") String queue) {
+        return QueueBuilder.durable(queue).build();
+    }
+
+    @Bean
+    public Binding mediaTranscodeBinding(DirectExchange ragIngestExchange, Queue mediaTranscodeQueue) {
+        return BindingBuilder.bind(mediaTranscodeQueue).to(ragIngestExchange).with("media.transcode");
+    }
 }

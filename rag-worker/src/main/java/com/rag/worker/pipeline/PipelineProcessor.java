@@ -1,6 +1,7 @@
 package com.rag.worker.pipeline;
 
 import com.baomidou.mybatisplus.core.conditions.query.QueryWrapper;
+import com.baomidou.mybatisplus.core.conditions.update.UpdateWrapper;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.rag.worker.infrastructure.llm.EmbeddingClient;
 import com.rag.worker.infrastructure.persistence.entity.ChunkEntity;
@@ -61,6 +62,8 @@ public class PipelineProcessor {
         if (doc == null) {
             throw new IllegalStateException("文档不存在: " + msg.documentId());
         }
+        // 停止标记由 stopProcessing 单独维护：置 null 避免后续 updateById 回写旧值覆盖用户停止请求
+        doc.setStopRequested(null);
         KnowledgeBaseEntity kb = kbMapper.selectById(msg.kbId());
         if (kb == null) {
             throw new IllegalStateException("知识库不存在: " + msg.kbId());
@@ -71,7 +74,7 @@ public class PipelineProcessor {
             throw new IllegalStateException("租户未启用向量(EMBEDDING)模型，无法处理文档");
         }
         if ("PARSE".equalsIgnoreCase(msg.type())) {
-            parseFlow(doc, kb, vision, embedding);
+            parseFlow(doc, kb, vision, embedding, msg.resume());
         } else {
             reindexFlow(doc, kb, embedding);
         }
@@ -84,35 +87,66 @@ public class PipelineProcessor {
     }
 
     private void parseFlow(DocumentEntity doc, KnowledgeBaseEntity kb,
-                           ModelEntity vision, ModelEntity embedding) {
-        setStage(doc, "PARSING", 5);
-        ParseService.ParseOutcome outcome = parseService.parse(doc, vision);
-        doc.setPageCount(outcome.pages().size());
-        doc.setWarning(outcome.warnings().isEmpty() ? null : String.join("；", outcome.warnings()));
-        setStage(doc, "PARSING", 20);
+                           ModelEntity vision, ModelEntity embedding, boolean resume) {
+        checkStop(doc);
+        if (resume && hasChunks(doc)) {
+            // 断点续跑：切片已落库，跳过解析/切片，直接从向量化继续
+            log.info("文档从断点继续处理（跳过解析/切片）doc={}", doc.getId());
+        } else {
+            setStage(doc, "PARSING", 5);
+            ParseService.ParseOutcome outcome = parseService.parse(doc, vision);
+            doc.setPageCount(outcome.pages().size());
+            doc.setWarning(outcome.warnings().isEmpty() ? null : String.join("；", outcome.warnings()));
+            setStage(doc, "PARSING", 20);
+            checkStop(doc);
 
-        setStage(doc, "CHUNKING", 25);
-        ChunkContext chunkCtx = new ChunkContext(doc.getTenantId(), doc.getId(), doc.getFileName(),
-                doc.getObjectKey(), outcome.pages(), chunkParams(kb));
-        ChunkStrategy strategy = strategyRouter.route(kb.getChunkStrategy(), doc.getFileName());
-        List<ChunkPlan> plans = strategy.plan(chunkCtx);
-        if (plans.stream().noneMatch(p -> !p.children().isEmpty())) {
-            throw new IllegalStateException("文档未提取到可检索内容，请检查文件或 OCR/Vision 配置");
+            setStage(doc, "CHUNKING", 25);
+            ChunkContext chunkCtx = new ChunkContext(doc.getTenantId(), doc.getId(), doc.getFileName(),
+                    doc.getObjectKey(), outcome.pages(), chunkParams(kb));
+            ChunkStrategy strategy = strategyRouter.route(kb.getChunkStrategy(), doc.getFileName());
+            List<ChunkPlan> plans = strategy.plan(chunkCtx);
+            if (plans.stream().noneMatch(p -> !p.children().isEmpty())) {
+                throw new IllegalStateException("文档未提取到可检索内容，请检查文件或 OCR/Vision 配置");
+            }
+            persistPlans(doc, plans);
+            setStage(doc, "CHUNKING", 40);
+            int children = plans.stream().mapToInt(p -> p.children().size()).sum();
+            int parents = (int) plans.stream().filter(ChunkPlan::parentChild).count();
+            log.info("文档解析切片完成 doc={} strategy={} pages={} parents={} children={} warnings={}",
+                    doc.getId(), strategy.mode(), outcome.pages().size(), parents, children,
+                    outcome.warnings());
         }
-        persistPlans(doc, plans);
-        setStage(doc, "CHUNKING", 40);
-
+        checkStop(doc);
         indexAll(doc, kb, embedding, 45, 78, 85);
 
         setStage(doc, "READY", 100);
-        int children = plans.stream().mapToInt(p -> p.children().size()).sum();
-        int parents = (int) plans.stream().filter(ChunkPlan::parentChild).count();
-        log.info("文档解析完成 doc={} strategy={} pages={} parents={} children={} warnings={}",
-                doc.getId(), strategy.mode(), outcome.pages().size(), parents, children,
-                outcome.warnings());
+        log.info("文档处理完成 doc={} resume={}", doc.getId(), resume);
+    }
+
+    /** 该文档是否已有有效切片（断点续跑判定依据）。 */
+    private boolean hasChunks(DocumentEntity doc) {
+        return chunkMapper.selectCount(new QueryWrapper<ChunkEntity>()
+                .eq("document_id", doc.getId()).ne("status", "DELETED")) > 0;
+    }
+
+    /**
+     * 停止检查：用户点击停止后 stop_requested=1，在阶段边界/向量化批次间生效。
+     * 检测到后文档置为 STOPPED（保留当前进度），抛出 StoppedException 中断流水线（不重试）。
+     */
+    private void checkStop(DocumentEntity doc) {
+        DocumentEntity cur = documentMapper.selectOne(new QueryWrapper<DocumentEntity>()
+                .select("id", "stop_requested").eq("id", doc.getId()));
+        if (cur != null && cur.getStopRequested() != null && cur.getStopRequested() == 1) {
+            documentMapper.update(null, new UpdateWrapper<DocumentEntity>()
+                    .eq("id", doc.getId()).set("status", "STOPPED"));
+            doc.setStatus("STOPPED");
+            log.info("检测到停止请求，流水线中止 doc={} progress={}", doc.getId(), doc.getProgress());
+            throw new StoppedException(doc.getId());
+        }
     }
 
     private void reindexFlow(DocumentEntity doc, KnowledgeBaseEntity kb, ModelEntity embedding) {
+        checkStop(doc);
         indexAll(doc, kb, embedding, 10, 70, 80);
         setStage(doc, "READY", 100);
         log.info("文档重建索引完成 doc={}", doc.getId());
@@ -151,11 +185,25 @@ public class PipelineProcessor {
         setStage(doc, "EMBEDDING", embStart);
         List<String> contents = chunks.stream().map(c -> embeddingText(doc, c)).toList();
         int totalBatches = (contents.size() + 9) / 10;
-        List<float[]> vectors = embeddingClient.embed(
-                embedding.getBaseUrl(), embedding.getApiKey(), embedding.getModel(), contents,
-                done -> setStage(doc, "EMBEDDING",
-                        embStart + (int) Math.round((double) (embEnd - embStart) * done / totalBatches)));
+        List<float[]> vectors;
+        try {
+            vectors = embeddingClient.embed(
+                    embedding.getBaseUrl(), embedding.getApiKey(), embedding.getModel(), contents,
+                    done -> {
+                        setStage(doc, "EMBEDDING",
+                                embStart + (int) Math.round((double) (embEnd - embStart) * done / totalBatches));
+                        // 批次间检查停止标志：向量化整阶段续跑时本就重做，批次粒度停止不损失已完成工作
+                        checkStop(doc);
+                    });
+        } catch (java.util.concurrent.CompletionException ce) {
+            // 并发批次回调抛出的 StoppedException 会被 CompletableFuture 包装，拆包还原
+            if (ce.getCause() instanceof StoppedException se) {
+                throw se;
+            }
+            throw ce;
+        }
         setStage(doc, "EMBEDDING", embEnd);
+        checkStop(doc);
 
         setStage(doc, "INDEXING", idxStart);
         int dim = embedding.getEmbeddingDim() == null ? vectors.get(0).length : embedding.getEmbeddingDim();
