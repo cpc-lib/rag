@@ -9,10 +9,10 @@
 - **多格式解析**：txt / md / docx / xlsx / csv / pdf（文本层 + 扫描件 Tess4J OCR）/ html / 代码文件 / 图片（Vision 多模态）
 - **15 种切片策略**：固定大小、递归、段落、句子、语义、结构化、Markdown、HTML、PDF 版面、表格、QA、Parent-Child、滑动窗口、代码、AUTO
 - **混合检索**：Milvus 向量召回 + ES BM25 关键词召回 → RRF 融合 → 可选 Rerank 精排 → Parent 内容扩展 → Token Budget 截断
-- **流式问答**：SSE 输出（检索过程 / 引用来源 / 正文增量 / 用量统计），支持多轮会话与提示词模板
+- **流式问答**：SSE 输出（检索过程 / 引用来源 / 正文增量 / 用量统计），支持多轮会话与提示词模板；历史会话可删除（逻辑删除）
 - **AI 文生图**：独立画图工作台，生成结果持久化到 MinIO，保留个人历史记录
-- **文件库**：MinIO 原生分片上传（断点续传）+ 在线播放，视频自动转 HLS（H.264+AAC，NVENC 优先），音频/文本/图片即点即播
-- **字幕翻译**：多语言字幕导入/编辑/翻译，支持 SRT/VTT/ASS，翻译结果存档到文件库
+- **文件库**：MinIO 原生分片上传（断点续传）+ 在线播放，视频自动转 HLS（H.264+AAC，NVENC 优先），音频/文本/图片即点即播；支持重新转码
+- **字幕翻译**：多语言字幕导入/编辑/翻译，支持 SRT/VTT/ASS，翻译结果存档到文件库；目标语言由租户在「目标语言管理」维护；字幕条有备份表（subtitle_cue_backup），删除字幕记录后文件库归档仍可编辑
 - **运维能力**：租户存储配额管理、etcd 动态配置热更、Worker 服务注册、视频转码 WebSocket 实时进度
 
 ## 技术栈
@@ -151,19 +151,20 @@ SSE 事件：`session` / `search_start` / `search_result`（含引用）/ `messa
 
 ```
 文件库上传视频（mp4/mkv/avi/ts）
-  → 用户点击「开始转码」
+  → 用户点击「开始转码」（READY 后也可「重新转码」）
   → RabbitMQ media.transcode
-      → MediaTranscodeConsumer
+      → MediaTranscodeConsumer（收到即 ack，提交自定义线程池异步执行，避免 consumer_timeout 重投）
           ffprobe 探测分辨率/帧率/编码
           H.264+AAC 源 → -c copy 直切（秒级）
           其他 → NVENC 硬编（GPU 解码优先），失败回退 CPU 软编
+                 码率封顶 -maxrate 20M，6 秒分片对齐关键帧
           HLS 产物上传 {objectKey}.hls/
           Redis 广播进度 → WebSocket 推送给前端
           READY 状态回写
   → 前端 hls.js 播放，支持清晰度/倍速/进度拖动
 ```
 
-转码实时进度通过 WebSocket（`/ws/media-progress`）推送，无需轮询。
+转码实时进度通过 WebSocket（`/ws/media-progress`）推送，无需轮询。Worker 的三个消费者（文档解析 / 转码 / SHA-256）统一由 `ExecutorConfig` 自定义线程池承载。
 
 ## 主要配置
 
@@ -172,7 +173,7 @@ SSE 事件：`session` / `search_start` / `search_result`（含引用）/ `messa
 | 环境变量 | 默认值 | 说明 |
 |---|---|---|
 | `MIDDLEWARE_HOST` | `192.168.1.200` | Redis/RabbitMQ/MinIO/Milvus/ES/etcd 统一主机 |
-| `MYSQL_HOST` / `MYSQL_PORT` / `MYSQL_DB` / `MYSQL_USER` / `MYSQL_PASSWORD` | `192.168.1.200` / `3306` / `rag_demo` / `root` / `rag123456` | MySQL 连接 |
+| `MYSQL_HOST` / `MYSQL_PORT` / `MYSQL_DB` / `MYSQL_USER` / `MYSQL_PASSWORD` | `192.168.1.200` / `3306` / `rag` / `root` / `rag123456` | MySQL 连接 |
 | `RAG_JWT_SECRET` | 开发默认值 | JWT 签名密钥，**生产环境必须修改**，且 API / Worker 保持一致 |
 | `MINIO_PORT` / `MINIO_USER` / `MINIO_PASSWORD` / `MINIO_BUCKET` | `9000` / `minioadmin` / `minioadmin123` / `rag-files` | MinIO |
 | `ES_PORT` / `MILVUS_PORT` / `ETCD_PORT` | `9200` / `19530` / `2379` | 检索组件端口 |
