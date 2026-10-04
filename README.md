@@ -64,10 +64,10 @@ docker compose up -d mysql redis minio mc-init etcd elasticsearch milvus
 
 使用 **Flyway** 自动管理数据库版本，rag-api 启动时会自动执行迁移脚本。
 
-1. 在 MySQL 中创建数据库（应用默认连接库名为 `rag_demo`）：
+1. 在 MySQL 中创建数据库（应用默认连接库名为 `rag`）：
 
    ```sql
-   CREATE DATABASE rag_demo DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+   CREATE DATABASE rag DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
    ```
 
 2. 直接启动 rag-api，Flyway 会自动执行 `V1__init_schema.sql` 建表并写入种子数据。
