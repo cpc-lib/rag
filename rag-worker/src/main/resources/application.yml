@@ -1,4 +1,9 @@
 spring:
+  servlet:
+    multipart:
+      enabled: true
+      max-file-size: 500MB
+      max-request-size: 500MB
   application:
     name: rag-worker
   main:
@@ -10,8 +15,6 @@ spring:
     driver-class-name: com.mysql.cj.jdbc.Driver
     hikari:
       maximum-pool-size: 5
-  flyway:
-    enabled: false
   data:
     redis:
       host: ${MIDDLEWARE_HOST:192.168.1.200}
@@ -31,6 +34,10 @@ mybatis-plus:
     banner: false
     db-config:
       id-type: auto
+      # 逻辑删除：实体 deleted 字段自动参与查询过滤与删除标记
+      logic-delete-field: deleted
+      logic-delete-value: 1
+      logic-not-delete-value: 0
 
 rag:
   mq:
@@ -38,6 +45,12 @@ rag:
     queue: rag.ingest.parse
     retry-queue: rag.ingest.retry
     dlq-queue: rag.ingest.dlq
+    media-queue: rag.media.transcode
+    sha256-queue: rag.sha256
+  media:
+    # ffmpeg 可执行文件路径（文件库视频转 HLS；ffprobe 取同目录）。
+    # 固定用 7.1 构建：9.x 要求 NVENC API 13.1（驱动 610+），M4000 驱动最高 582 只提供 13.0，会报 "Function not implemented"
+    ffmpeg-path: ${FFMPEG_PATH:D:\develop\ffmpeg\ffmpeg-7.1\bin\ffmpeg.exe}
   minio:
     endpoint: http://${MIDDLEWARE_HOST:192.168.1.200}:${MINIO_PORT:9000}
     access-key: ${MINIO_USER:minioadmin}

@@ -69,6 +69,19 @@ public class MinioStorage {
         }
     }
 
+    /** 范围下载：offset 起始字节，length 字节数（null 读到末尾），用于媒体流 Range 请求。 */
+    public InputStream downloadRange(String objectKey, long offset, Long length) {
+        try {
+            GetObjectArgs.Builder b = GetObjectArgs.builder().bucket(bucket).object(objectKey).offset(offset);
+            if (length != null) {
+                b.length(length);
+            }
+            return minioClient.getObject(b.build());
+        } catch (Exception e) {
+            throw new BizException(ErrorCode.UPSTREAM, "文件存储读取失败: " + e.getMessage());
+        }
+    }
+
     public String presignUrl(String objectKey) {
         try {
             return minioClient.getPresignedObjectUrl(GetPresignedObjectUrlArgs.builder()
@@ -140,5 +153,19 @@ public class MinioStorage {
         } catch (Exception e) {
             log.warn("MinIO 删除对象失败: {}", objectKey, e);
         }
+    }
+
+    /** 按前缀递归统计真实占用字节数（配额用量展示），异常抛给调用方回退。 */
+    public long sumSizeByPrefix(String prefix) {
+        long[] total = {0};
+        minioClient.listObjects(ListObjectsArgs.builder()
+                        .bucket(bucket).prefix(prefix).recursive(true).build())
+                .forEach(result -> {
+                    try {
+                        total[0] += result.get().size();
+                    } catch (Exception ignored) {
+                    }
+                });
+        return total[0];
     }
 }

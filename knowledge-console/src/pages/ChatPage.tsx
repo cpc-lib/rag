@@ -1,10 +1,12 @@
 import { useEffect, useRef, useState } from 'react';
 import {
   Alert,
+  App,
   Button,
   Card,
   Empty,
   Input,
+  Popconfirm,
   Select,
   Space,
   Spin,
@@ -17,6 +19,7 @@ import {
   ReloadOutlined,
   PaperClipOutlined,
   PlusOutlined,
+  CloseOutlined,
 } from '@ant-design/icons';
 import ReactMarkdown from 'react-markdown';
 import type { ReactNode } from 'react';
@@ -131,6 +134,7 @@ function mapHistory(detail: ChatSessionDetail): ChatMessage[] {
 }
 
 export default function ChatPage() {
+  const { message } = App.useApp();
   const { token, user } = useAuthStore();
   const [kbs, setKbs] = useState<KnowledgeBase[]>([]);
   const [kbId, setKbId] = useState<number | null>(null);
@@ -219,6 +223,18 @@ export default function ChatPage() {
     setCurrentSessionId(id);
     setKbId(detail.session.kbId);
     setMessages(mapHistory(detail));
+  };
+
+  /** 删除会话：从列表移除；删除的是当前打开的会话则回到新对话状态。 */
+  const handleDeleteSession = async (id: number) => {
+    if (running) return;
+    await chatSessionApi.remove(id);
+    setSessions((prev) => prev.filter((s) => s.id !== id));
+    if (id === currentSessionId) {
+      setCurrentSessionId(null);
+      setMessages([]);
+    }
+    message.success('对话已删除');
   };
 
   /** 发起（或重新生成）一次问答。targetId 存在时替换该 assistant 消息。 */
@@ -383,7 +399,7 @@ export default function ChatPage() {
             background: '#fafbfc',
           }}
         >
-          <div style={{ padding: 12 }}>
+          <div style={{ padding: 12, display: 'flex', gap: 8 }}>
             <Button
               block
               type="primary"
@@ -392,6 +408,9 @@ export default function ChatPage() {
               disabled={running}
             >
               新对话
+            </Button>
+            <Button icon={<ReloadOutlined />} onClick={loadSessions} disabled={running}>
+              刷新
             </Button>
           </div>
           <div style={{ flex: 1, overflow: 'auto', padding: '0 8px 8px' }}>
@@ -404,30 +423,14 @@ export default function ChatPage() {
               </Typography.Text>
             ) : (
               sessions.map((s) => (
-                <div
+                <SessionItem
                   key={s.id}
-                  title={running ? '生成中，暂不能切换' : s.title}
-                  onClick={() => openSession(s.id)}
-                  style={{
-                    padding: '8px 10px',
-                    borderRadius: 8,
-                    marginBottom: 4,
-                    cursor: running ? 'not-allowed' : 'pointer',
-                    background: s.id === currentSessionId ? '#e6f4ff' : 'transparent',
-                  }}
-                >
-                  <div
-                    style={{
-                      fontSize: 13,
-                      whiteSpace: 'nowrap',
-                      overflow: 'hidden',
-                      textOverflow: 'ellipsis',
-                      color: s.id === currentSessionId ? '#1677ff' : 'inherit',
-                    }}
-                  >
-                    {s.title}
-                  </div>
-                </div>
+                  session={s}
+                  active={s.id === currentSessionId}
+                  disabled={running}
+                  onOpen={() => openSession(s.id)}
+                  onDelete={() => handleDeleteSession(s.id)}
+                />
               ))
             )}
           </div>
@@ -573,6 +576,14 @@ export default function ChatPage() {
                               <Typography.Text type="secondary" style={{ fontSize: 12 }}>
                                 第 {c.page + 1} 页
                               </Typography.Text>
+                              {c.sectionPath && (
+                                <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                                  {c.sectionPath}
+                                </Typography.Text>
+                              )}
+                              {c.contentType && c.contentType !== 'TEXT' && (
+                                <Tag>{({ TABLE: '表格', CODE: '代码', IMAGE: '图片' } as Record<string, string>)[c.contentType] ?? c.contentType}</Tag>
+                              )}
                               {c.previewUrl && (
                                 <a
                                   href={c.previewUrl}
@@ -675,5 +686,76 @@ export default function ChatPage() {
         </div>
       </div>
     </Card>
+  );
+}
+
+/** 会话列表项：右上角常驻删除 ×（悬停该行变红），删除确认气泡不触发会话切换。 */
+function SessionItem({
+  session,
+  active,
+  disabled,
+  onOpen,
+  onDelete,
+}: {
+  session: ChatSession;
+  active: boolean;
+  disabled: boolean;
+  onOpen: () => void;
+  onDelete: () => Promise<void> | void;
+}) {
+  const [hover, setHover] = useState(false);
+  return (
+    <div
+      title={disabled ? '生成中，暂不能切换' : session.title}
+      onClick={() => !disabled && onOpen()}
+      onMouseEnter={() => setHover(true)}
+      onMouseLeave={() => setHover(false)}
+      style={{
+        padding: '8px 10px',
+        borderRadius: 8,
+        marginBottom: 4,
+        cursor: disabled ? 'not-allowed' : 'pointer',
+        background: active ? '#e6f4ff' : 'transparent',
+        display: 'flex',
+        alignItems: 'center',
+        gap: 4,
+      }}
+    >
+      <div
+        style={{
+          flex: 1,
+          minWidth: 0,
+          fontSize: 13,
+          whiteSpace: 'nowrap',
+          overflow: 'hidden',
+          textOverflow: 'ellipsis',
+          color: active ? '#1677ff' : 'inherit',
+        }}
+      >
+        {session.title}
+      </div>
+      <Popconfirm
+        title="删除该对话？"
+        description="将删除该会话的全部问答记录，不可恢复"
+        okText="删除"
+        okButtonProps={{ danger: true }}
+        cancelText="取消"
+        disabled={disabled}
+        onConfirm={onDelete}
+      >
+        <Button
+          type="text"
+          size="small"
+          icon={<CloseOutlined />}
+          disabled={disabled}
+          onClick={(e) => e.stopPropagation()}
+          style={{
+            padding: '0 2px',
+            height: 22,
+            color: hover ? '#ff4d4f' : '#bfbfbf',
+          }}
+        />
+      </Popconfirm>
+    </div>
   );
 }

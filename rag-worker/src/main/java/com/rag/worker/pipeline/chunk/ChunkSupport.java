@@ -71,17 +71,27 @@ public class ChunkSupport {
             return;
         }
         if (separators.isEmpty()) {
-            out.add(text);
+            out.add(text.strip());
             return;
         }
         String sep = separators.get(0);
         List<String> rest = separators.subList(1, separators.size());
+        if (sep.isEmpty()) {
+            recurse(text, rest, out);
+            return;
+        }
         if (!text.contains(sep)) {
             recurse(text, rest, out);
             return;
         }
-        for (String part : text.split(Pattern.quote(sep))) {
-            recurse(part, rest, out);
+        int start = 0;
+        int end;
+        while ((end = text.indexOf(sep, start)) >= 0) {
+            recurse(text.substring(start, end + sep.length()), rest, out);
+            start = end + sep.length();
+        }
+        if (start < text.length()) {
+            recurse(text.substring(start), rest, out);
         }
     }
 
@@ -126,7 +136,7 @@ public class ChunkSupport {
                 continue;
             }
             if (FENCE.matcher(line).find()) {
-                flushParagraphs(page, normal, blocks);
+                flushTablesAndParagraphs(page, normal, blocks);
                 codeBuf = new ArrayList<>();
                 codeBuf.add(line);
                 continue;
@@ -166,6 +176,9 @@ public class ChunkSupport {
             i++;
         }
         flushParagraphs(page, para, out);
+        // flush 后必须清空：extractBlocks 在每个代码围栏前都会调用本方法，
+        // 不清空会导致历史行在下一次 flush 时被重复输出（前缀雪崩）
+        lines.clear();
     }
 
     private void flushParagraphs(int page, List<String> lines, List<Block> out) {
@@ -210,7 +223,7 @@ public class ChunkSupport {
         for (int i = 2; i < rows.length; i++) {
             String row = rows[i];
             int groupTokens = tokens(header + "\n" + sep + "\n" + String.join("\n", group) + "\n" + row);
-            if (!group.isEmpty() && groupTokens > maxTokens) {
+            if (!group.isEmpty() && (groupTokens > maxTokens || group.size() >= 50)) {
                 out.add(header + "\n" + sep + "\n" + String.join("\n", group));
                 group = new ArrayList<>();
             }
@@ -251,15 +264,27 @@ public class ChunkSupport {
         int bufPage = 0;
         String lastTextTail = "";
         for (PackPiece piece : pieces) {
+            if (piece.text() == null || piece.text().isBlank()) {
+                continue;
+            }
+            if (piece.atomic()) {
+                if (!buf.isEmpty()) {
+                    children.add(new PlannedChild(bufPage, buf.toString().strip()));
+                    buf.setLength(0);
+                }
+                children.add(new PlannedChild(piece.page(), piece.text().strip()));
+                lastTextTail = "";
+                continue;
+            }
             boolean overflow = !buf.isEmpty()
                     && tokens(buf.toString()) + tokens(piece.text()) > size;
             if (overflow) {
                 children.add(new PlannedChild(bufPage, buf.toString().strip()));
                 buf.setLength(0);
-                buf.append(lastTextTail);
-                if (buf.isEmpty()) {
-                    bufPage = piece.page();
+                if (tokens(lastTextTail) + tokens(piece.text()) <= size) {
+                    buf.append(lastTextTail);
                 }
+                bufPage = piece.page();
             }
             if (buf.isEmpty()) {
                 bufPage = piece.page();
@@ -267,11 +292,7 @@ public class ChunkSupport {
                 buf.append('\n');
             }
             buf.append(piece.text());
-            if (!piece.atomic()) {
-                lastTextTail = tail(piece.text(), overlapTokens);
-            } else {
-                lastTextTail = "";
-            }
+            lastTextTail = tail(piece.text(), overlapTokens);
         }
         if (!buf.toString().isBlank()) {
             children.add(new PlannedChild(bufPage, buf.toString().strip()));

@@ -29,7 +29,7 @@ import java.util.List;
 
 /**
  * 多格式解析（spec 4.1）：MD/TXT 直读；DOCX/XLSX 用 POI；PDF 文本层 + 扫描页 OCR；
- * 图片优先视觉大模型，其次 OCR。
+ * 图片同时提取 OCR 文字与视觉描述（可用时）。
  */
 @Slf4j
 @Service
@@ -155,9 +155,8 @@ public class ParseService {
         try (XSSFWorkbook workbook = new XSSFWorkbook(new ByteArrayInputStream(bytes))) {
             for (int s = 0; s < workbook.getNumberOfSheets(); s++) {
                 XSSFSheet sheet = workbook.getSheetAt(s);
-                StringBuilder sb = new StringBuilder();
-                String sheetName = workbook.getSheetName(s);
-                sb.append("# ").append(sheetName == null ? "Sheet" + s : sheetName).append('\n');
+                List<List<String>> rows = new ArrayList<>();
+                int maxCols = 0;
                 for (int r = 0; r <= sheet.getLastRowNum(); r++) {
                     XSSFRow row = sheet.getRow(r);
                     if (row == null) {
@@ -166,13 +165,23 @@ public class ParseService {
                     List<String> cells = new ArrayList<>();
                     for (int c = 0; c < row.getLastCellNum(); c++) {
                         var cell = row.getCell(c);
-                        cells.add(cell == null ? "" : cell.toString().strip());
+                        cells.add(cell == null ? "" : cell.toString().replace("\\", "\\\\")
+                                .replace("|", "\\|").replaceAll("\\s+", " ").strip());
                     }
                     if (cells.stream().anyMatch(v -> !v.isEmpty())) {
-                        sb.append(String.join(" | ", cells)).append('\n');
+                        rows.add(cells);
+                        maxCols = Math.max(maxCols, cells.size());
                     }
                 }
-                if (!sb.isEmpty()) {
+                if (!rows.isEmpty()) {
+                    String sheetName = workbook.getSheetName(s);
+                    StringBuilder sb = new StringBuilder("# ")
+                            .append(sheetName == null ? "Sheet" + s : sheetName).append("\n\n")
+                            .append(toMdRow(rows.get(0), maxCols)).append('\n')
+                            .append('|').append("---|".repeat(maxCols)).append('\n');
+                    for (int r = 1; r < rows.size(); r++) {
+                        sb.append(toMdRow(rows.get(r), maxCols)).append('\n');
+                    }
                     pages.add(new RawPage(s, sb.toString()));
                 }
             }
@@ -206,9 +215,11 @@ public class ParseService {
                     } catch (Exception oe) {
                         log.warn("PDF 第 {} 页 OCR 失败: {}", i + 1, oe.getMessage());
                         warnings.add("第" + (i + 1) + "页OCR失败已跳过");
+                        pages.add(new RawPage(i, ""));
                     }
                 } else {
                     warnings.add("第" + (i + 1) + "页为扫描件且OCR未配置已跳过");
+                    pages.add(new RawPage(i, ""));
                 }
             }
         } catch (Exception e) {
@@ -220,23 +231,30 @@ public class ParseService {
     private ParseOutcome parseImage(DocumentEntity doc, ModelEntity vision, byte[] bytes, String ext) {
         List<RawPage> pages = new ArrayList<>();
         List<String> warnings = new ArrayList<>();
-        String text = null;
+        String visionText = null;
         if (vision != null && visionClient.isConfigured(vision.getBaseUrl(), vision.getModel())) {
-            text = visionClient.describe(vision.getBaseUrl(), vision.getApiKey(), vision.getModel(),
+            visionText = visionClient.describe(vision.getBaseUrl(), vision.getApiKey(), vision.getModel(),
                     bytes, "image/" + ("jpg".equals(ext) ? "jpeg" : ext));
-            if (text == null) {
+            if (visionText == null) {
                 warnings.add("视觉模型调用失败");
             }
         }
-        if (text == null && ocrService.available()) {
+        String ocrText = null;
+        if (ocrService.available()) {
             try {
                 BufferedImage image = ImageIO.read(new ByteArrayInputStream(bytes));
-                text = ocrService.ocr(image);
+                ocrText = ocrService.ocr(image);
             } catch (Exception e) {
                 warnings.add("图片OCR失败: " + e.getMessage());
             }
         }
-        if (text == null) {
+        String text;
+        if (ocrText != null && !ocrText.isBlank() && visionText != null && !visionText.isBlank()) {
+            text = "OCR文字：\n" + ocrText.strip() + "\n\n视觉描述：\n" + visionText.strip();
+        } else {
+            text = ocrText != null && !ocrText.isBlank() ? ocrText : visionText;
+        }
+        if (text == null || text.isBlank()) {
             if (warnings.isEmpty()) {
                 warnings.add("图片未配置视觉模型且OCR不可用，已跳过");
             }

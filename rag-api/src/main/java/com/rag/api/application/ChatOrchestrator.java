@@ -301,9 +301,7 @@ public class ChatOrchestrator {
         }
         StringBuilder sb = new StringBuilder();
         for (RetrievalService.Citation c : citations) {
-            sb.append('[').append(c.seq()).append("] （").append(c.documentName())
-                    .append(" 第").append(c.page() + 1).append("页）\n")
-                    .append(c.content()).append("\n\n");
+            sb.append(c.material()).append("\n\n");
         }
         return sb.toString().stripTrailing();
     }

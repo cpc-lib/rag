@@ -34,6 +34,8 @@ public class EtcdService {
         public int vectorTopN = 20;
         public int keywordTopN = 20;
         public int topK = 8;
+        public int finalContextTopK = 5;
+        public int maxContextTokens = 12000;
         public int rrfK = 60;
         public double lowConfidenceThreshold = 0.35;
     }
@@ -41,7 +43,7 @@ public class EtcdService {
     private final String endpoints;
     private final boolean enabled;
     private final ObjectMapper objectMapper;
-    private final RetrievalConfig defaults = new RetrievalConfig();
+    private final RetrievalConfig defaults;
 
     private volatile Client client;
     private volatile boolean available = false;
@@ -53,20 +55,27 @@ public class EtcdService {
                        @Value("${rag.retrieval.vector-top-n:20}") int vectorTopN,
                        @Value("${rag.retrieval.keyword-top-n:20}") int keywordTopN,
                        @Value("${rag.retrieval.top-k:8}") int topK,
+                       @Value("${rag.retrieval.final-context-top-k:5}") int finalContextTopK,
+                       @Value("${rag.retrieval.max-context-tokens:12000}") int maxContextTokens,
                        @Value("${rag.retrieval.rrf-k:60}") int rrfK,
                        @Value("${rag.retrieval.low-confidence-threshold:0.35}") double threshold,
                        ObjectMapper objectMapper) {
         this.endpoints = endpoints;
         this.enabled = enabled;
         this.objectMapper = objectMapper;
-        this.retrievalConfig = defaults(vectorTopN, keywordTopN, topK, rrfK, threshold);
+        this.defaults = defaults(vectorTopN, keywordTopN, topK, finalContextTopK,
+                maxContextTokens, rrfK, threshold);
+        this.retrievalConfig = defaults;
     }
 
-    private RetrievalConfig defaults(int v, int k, int tk, int rrf, double th) {
+    private RetrievalConfig defaults(int v, int k, int tk, int finalTopK, int maxTokens,
+                                     int rrf, double th) {
         RetrievalConfig c = new RetrievalConfig();
         c.vectorTopN = v;
         c.keywordTopN = k;
         c.topK = tk;
+        c.finalContextTopK = finalTopK;
+        c.maxContextTokens = maxTokens;
         c.rrfK = rrf;
         c.lowConfidenceThreshold = th;
         return c;
@@ -149,6 +158,8 @@ public class EtcdService {
             c.vectorTopN = node.path("vectorTopN").asInt(defaults.vectorTopN);
             c.keywordTopN = node.path("keywordTopN").asInt(defaults.keywordTopN);
             c.topK = node.path("topK").asInt(defaults.topK);
+            c.finalContextTopK = node.path("finalContextTopK").asInt(defaults.finalContextTopK);
+            c.maxContextTokens = node.path("maxContextTokens").asInt(defaults.maxContextTokens);
             c.rrfK = node.path("rrfK").asInt(defaults.rrfK);
             c.lowConfidenceThreshold = node.path("lowConfidenceThreshold").asDouble(defaults.lowConfidenceThreshold);
             retrievalConfig = c;

@@ -39,6 +39,7 @@ public class KnowledgeBaseService {
     private final ObjectMapper objectMapper;
     private final UserManageService userManageService;
     private final PromptTemplateService promptTemplateService;
+    private final FileLibraryService fileLibraryService;
 
     public KnowledgeBaseEntity create(Dtos.KbCreateReq req) {
         TenantContext.Session s = TenantContext.require();
@@ -50,9 +51,9 @@ public class KnowledgeBaseService {
         kb.setTenantId(s.tenantId());
         kb.setName(req.name());
         kb.setDescription(req.description());
-        kb.setParentChunkSize(req.parentChunkSize() == null ? 1200 : req.parentChunkSize());
-        kb.setChildChunkSize(req.childChunkSize() == null ? 400 : req.childChunkSize());
-        kb.setChildOverlap(req.childOverlap() == null ? 60 : req.childOverlap());
+        kb.setParentChunkSize(req.parentChunkSize() == null ? 2000 : req.parentChunkSize());
+        kb.setChildChunkSize(req.childChunkSize() == null ? 500 : req.childChunkSize());
+        kb.setChildOverlap(req.childOverlap() == null ? 80 : req.childOverlap());
         kb.setChunkStrategy(normalizeStrategy(req.chunkStrategy()));
         kb.setSeparators(toSeparatorsJson(req.separators()));
         kbMapper.insert(kb);
@@ -118,10 +119,17 @@ public class KnowledgeBaseService {
             throw BizException.forbidden("仅租户管理员可删除知识库");
         }
         chunkMapper.delete(new QueryWrapper<ChunkEntity>().eq("kb_id", kbId));
+        // 先收集文档 id，用于级联清理文件库条目（MinIO 对象由下方 deletePrefix 删除）
+        List<Long> docIds = documentMapper.selectObjs(new QueryWrapper<DocumentEntity>()
+                        .select("id").eq("kb_id", kbId)).stream()
+                .filter(java.util.Objects::nonNull)
+                .map(o -> ((Number) o).longValue())
+                .toList();
         documentMapper.delete(new QueryWrapper<DocumentEntity>().eq("kb_id", kbId));
         promptTemplateService.deleteByKb(kbId);
         userManageService.onKbDeleted(kbId);
         minio.deletePrefix(kb.getTenantId() + "/" + kbId + "/");
+        fileLibraryService.removeByDocuments(docIds);
         try {
             if (kb.getMilvusCollection() != null && milvus.hasCollection(kb.getMilvusCollection())) {
                 milvus.dropCollection(kb.getMilvusCollection());
@@ -161,9 +169,9 @@ public class KnowledgeBaseService {
         if (overlap != null && (overlap < 0 || overlap > 500)) {
             throw BizException.badRequest("child_overlap 取值 0~500");
         }
-        int p = parentSize == null ? 1200 : parentSize;
-        int c = childSize == null ? 400 : childSize;
-        int o = overlap == null ? 60 : overlap;
+        int p = parentSize == null ? 2000 : parentSize;
+        int c = childSize == null ? 500 : childSize;
+        int o = overlap == null ? 80 : overlap;
         if (c >= p) {
             throw BizException.badRequest("child_chunk_size 必须小于 parent_chunk_size");
         }

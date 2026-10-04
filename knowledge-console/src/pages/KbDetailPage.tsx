@@ -1,10 +1,8 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+﻿import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   App,
-  Badge,
   Button,
   Drawer,
-  Empty,
   Form,
   Input,
   InputNumber,
@@ -20,12 +18,15 @@ import {
   Typography,
   Upload,
 } from 'antd';
-import { ArrowLeftOutlined, UploadOutlined, EyeOutlined, FileTextOutlined } from '@ant-design/icons';
+import { ArrowLeftOutlined, DeleteOutlined, UploadOutlined, EyeOutlined, FileTextOutlined, ReloadOutlined } from '@ant-design/icons';
 import type { UploadRequestOption } from 'rc-upload/lib/interface';
+import { createSHA256 } from 'hash-wasm';
 import { useNavigate, useParams } from 'react-router-dom';
 import { documentApi } from '../api/documents';
+import { uploadApi } from '../api/uploads';
 import { chunkApi } from '../api/chunks';
 import { kbApi } from '../api/knowledgeBases';
+import { useAuthStore } from '../store/auth';
 import type { Chunk, DocumentItem, KnowledgeBase } from '../api/types';
 
 const ALLOWED_EXT = ['.txt', '.md', '.pdf', '.docx', '.xlsx', '.png', '.jpg', '.jpeg'];
@@ -55,6 +56,7 @@ function stepOf(status: string, progress: number): number {
 
 /** 文档处理进度：阶段步骤条 + 百分比进度条。 */
 function DocProgress({ doc }: { doc: DocumentItem }) {
+  const stopped = doc.status === 'STOPPED';
   const failed = doc.status === 'FAILED';
   const done = doc.status === 'READY';
   return (
@@ -62,18 +64,18 @@ function DocProgress({ doc }: { doc: DocumentItem }) {
       <Steps
         size="small"
         current={stepOf(doc.status, doc.progress ?? 0)}
-        status={failed ? 'error' : done ? 'finish' : 'process'}
+        status={stopped || failed ? 'error' : done ? 'finish' : 'process'}
         items={PIPELINE_STEPS.map((t) => ({ title: t }))}
         style={{ marginBottom: 6 }}
       />
       <Progress
         percent={doc.progress ?? 0}
         size="small"
-        status={failed ? 'exception' : done ? 'success' : 'active'}
+        status={stopped || failed ? 'exception' : done ? 'success' : 'active'}
       />
-      {failed && doc.errorMsg && (
-        <Typography.Text type="danger" style={{ fontSize: 12 }}>
-          {doc.errorMsg.length > 40 ? `${doc.errorMsg.slice(0, 40)}…` : doc.errorMsg}
+      {(stopped || failed) && doc.errorMsg && (
+        <Typography.Text type="danger" style={{ fontSize: 12, display: 'block', marginTop: 4 }}>
+          {doc.errorMsg}
         </Typography.Text>
       )}
     </div>
@@ -81,6 +83,8 @@ function DocProgress({ doc }: { doc: DocumentItem }) {
 }
 
 const TERMINAL_STATUS = new Set(['READY', 'FAILED']);
+/** 处理中状态：仅这些状态需要轮询进度，UPLOADED/STOPPED 为静态状态 */
+const PROCESSING_STATUS = new Set(['PARSING', 'CHUNKING', 'EMBEDDING', 'INDEXING']);
 
 const formatSize = (bytes: number | null) => {
   if (bytes == null) return '-';
@@ -98,7 +102,8 @@ export default function KbDetailPage() {
   const [kb, setKb] = useState<KnowledgeBase | null>(null);
   const [docs, setDocs] = useState<DocumentItem[]>([]);
   const [loading, setLoading] = useState(false);
-  const [progressOpen, setProgressOpen] = useState(false);
+  /** 当前查看进度的文档；弹窗打开期间轮询 */
+  const [progressDoc, setProgressDoc] = useState<DocumentItem | null>(null);
 
   // 切片抽屉状态
   const [chunkDoc, setChunkDoc] = useState<DocumentItem | null>(null);
@@ -110,7 +115,11 @@ export default function KbDetailPage() {
   const [chunkDetailLoading, setChunkDetailLoading] = useState(false);
   const [chunkForm] = Form.useForm();
 
-  const timerRef = useRef<number | null>(null);
+  /** 本次上传会话内已处理的 SHA-256：相同内容文件只保留一个任务 */
+  const seenSha256Ref = useRef<Set<string>>(new Set());
+  /** 文档进度 WS 连接（弹窗打开期间持有） */
+  const wsRef = useRef<WebSocket | null>(null);
+  const token = useAuthStore((s) => s.token);
 
   const loadDocs = useCallback(
     async (showLoading = false) => {
@@ -131,21 +140,37 @@ export default function KbDetailPage() {
     loadDocs(true);
   }, [kbId, loadDocs]);
 
-  // 存在处理中的文档时 3s 轮询
+  // 弹窗打开期间：WebSocket 订阅该文档进度（Worker 经 Redis 推送），关闭即断开
   useEffect(() => {
-    const hasRunning = docs.some((d) => !TERMINAL_STATUS.has(d.status));
-    if (!hasRunning) {
-      if (timerRef.current) {
-        window.clearInterval(timerRef.current);
-        timerRef.current = null;
+    if (!progressDoc) return;
+    if (!PROCESSING_STATUS.has(progressDoc.status)) return;
+    const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+    const ws = new WebSocket(
+      `${proto}://${location.host}/ws/doc-progress?token=${encodeURIComponent(token ?? '')}`,
+    );
+    wsRef.current = ws;
+    ws.onopen = () => ws.send(JSON.stringify({ docId: progressDoc.id }));
+    ws.onmessage = (ev) => {
+      try {
+        const m = JSON.parse(ev.data) as { docId: number; status: string; progress: number };
+        if (m.docId !== progressDoc.id) return;
+        setProgressDoc((cur) =>
+          cur && cur.id === m.docId
+            ? { ...cur, status: m.status, progress: m.progress >= 0 ? m.progress : cur.progress }
+            : cur,
+        );
+        // 状态推进到终态后同步一次表格
+        if (!PROCESSING_STATUS.has(m.status)) loadDocs();
+      } catch {
+        // 忽略
       }
-      return;
-    }
-    timerRef.current = window.setInterval(() => loadDocs(), 3000);
-    return () => {
-      if (timerRef.current) window.clearInterval(timerRef.current);
     };
-  }, [docs, loadDocs]);
+    ws.onerror = () => ws.close();
+    return () => {
+      wsRef.current = null;
+      ws.close();
+    };
+  }, [progressDoc?.id, progressDoc?.status, token, loadDocs]);
 
   const customUpload = async (option: UploadRequestOption) => {
     const file = option.file as File;
@@ -160,13 +185,76 @@ export default function KbDetailPage() {
       option.onError?.(new Error('文件过大'));
       return;
     }
+    const sessKey = `upload-session:kb:${kbId}:${file.name}:${file.size}`;
+    let sha256Hex = '';
     try {
-      await documentApi.upload(kbId, file);
-      message.success(`文件「${file.name}」已上传，开始解析`);
+      // 秒传：流式分块计算 SHA-256（hash-wasm 增量模式，内存占用恒定）
+      const hasher = await createSHA256();
+      const CHUNK = 8 * 1024 * 1024;
+      for (let off = 0; off < file.size; off += CHUNK) {
+        const buf = await file.slice(off, Math.min(off + CHUNK, file.size)).arrayBuffer();
+        hasher.update(new Uint8Array(buf));
+      }
+      sha256Hex = hasher.digest('hex');
+
+      // 批内去重：同一 sha256 只保留第一个任务，其余直接跳过（进行中去重，完成后由后端秒传兜底）
+      if (seenSha256Ref.current.has(sha256Hex)) {
+        message.info(`文件「${file.name}」与本次上传中的另一文件内容相同，已跳过`);
+        option.onSuccess?.({}, new XMLHttpRequest());
+        return;
+      }
+      seenSha256Ref.current.add(sha256Hex);
+
+      // 断点续传：恢复本地会话
+      let sessionId = Number(localStorage.getItem(sessKey)) || 0;
+      let chunkSize = 0;
+      const done = new Set<number>();
+      if (sessionId) {
+        try {
+          const s = await uploadApi.session(sessionId);
+          if (s.status === 'UPLOADING') {
+            chunkSize = s.chunkSize;
+            s.uploadedParts.forEach((p) => done.add(p));
+          } else {
+            sessionId = 0;
+          }
+        } catch {
+          sessionId = 0;
+        }
+      }
+      if (!sessionId) {
+        const r = await uploadApi.init(file.name, file.size, file.type || 'application/octet-stream',
+          sha256Hex, 'KB_DOCUMENT', kbId);
+        if (r.instant) {
+          // 秒传命中：同知识库已有同内容文档，直接完成
+          localStorage.removeItem(sessKey);
+          message.success(`文件「${file.name}」秒传成功（文档已存在）`);
+          option.onSuccess?.({}, new XMLHttpRequest());
+          loadDocs(true);
+          return;
+        }
+        sessionId = r.sessionId;
+        chunkSize = r.chunkSize;
+        localStorage.setItem(sessKey, String(sessionId));
+      }
+      const total = Math.ceil(file.size / chunkSize);
+      for (let i = 0; i < total; i++) {
+        const part = i + 1;
+        if (done.has(part)) continue;
+        await uploadApi.uploadPart(sessionId, part, file.slice(i * chunkSize, (i + 1) * chunkSize));
+        done.add(part);
+      }
+      await uploadApi.complete(sessionId);
+      localStorage.removeItem(sessKey);
+      message.success(`文件「${file.name}」已上传，点击「开始处理」启动解析`);
       option.onSuccess?.({}, new XMLHttpRequest());
       loadDocs(true);
     } catch (e) {
+      message.error(`文件「${file.name}」上传失败，重新上传将自动从断点续传`);
       option.onError?.(e as Error);
+    } finally {
+      // 任务结束后从批内去重集合移除，允许用户删除后再次上传同一文件
+      if (sha256Hex) seenSha256Ref.current.delete(sha256Hex);
     }
   };
 
@@ -260,6 +348,24 @@ export default function KbDetailPage() {
     loadDocs();
   };
 
+  const reparseDocument = async (doc: DocumentItem) => {
+    await documentApi.reparse(doc.id);
+    message.success('已按当前策略重新解析并切片');
+    loadDocs();
+  };
+
+  const startProcessing = async (doc: DocumentItem) => {
+    await documentApi.start(doc.id);
+    message.success(doc.status === 'UPLOADED' ? '已开始处理' : '已从断点继续处理');
+    loadDocs();
+  };
+
+  const stopProcessing = async (doc: DocumentItem) => {
+    await documentApi.stop(doc.id);
+    message.success('停止指令已发送，将在当前阶段完成后停止');
+    loadDocs();
+  };
+
   const docColumns = [
     { title: 'ID', dataIndex: 'id', width: 70 },
     {
@@ -275,6 +381,50 @@ export default function KbDetailPage() {
     { title: '大小', dataIndex: 'fileSize', width: 100, render: formatSize },
     { title: '页数', dataIndex: 'pageCount', width: 80, render: (v: number | null) => v ?? 0 },
     {
+      title: '状态',
+      dataIndex: 'status',
+      width: 110,
+      render: (s: string, r: DocumentItem) => {
+        const label: Record<string, string> = {
+          UPLOADED: '待处理',
+          PARSING: '解析中',
+          CHUNKING: '切片中',
+          EMBEDDING: '向量化中',
+          INDEXING: '索引中',
+          READY: '就绪',
+          STOPPED: '已停止',
+          FAILED: '失败',
+        };
+        const color =
+          s === 'READY'
+            ? 'green'
+            : s === 'FAILED'
+              ? 'red'
+              : s === 'STOPPED'
+                ? 'orange'
+                : s === 'UPLOADED'
+                  ? 'default'
+                  : 'blue';
+        const tag = (
+          <Tag
+            color={color}
+            style={{ cursor: 'pointer' }}
+            onClick={() => setProgressDoc(r)}
+          >
+            {label[s] ?? s}
+          </Tag>
+        );
+        // 失败时悬浮展示完整错误原因
+        return s === 'FAILED' && r.errorMsg ? (
+          <Tooltip title={r.errorMsg} color="#ff4d4f">
+            {tag}
+          </Tooltip>
+        ) : (
+          tag
+        );
+      },
+    },
+    {
       title: '告警',
       dataIndex: 'warning',
       width: 140,
@@ -289,15 +439,44 @@ export default function KbDetailPage() {
     },
     {
       title: '操作',
-      width: 280,
+      width: 460,
       render: (_: unknown, r: DocumentItem) => (
         <Space>
+          {(r.status === 'UPLOADED' || r.status === 'STOPPED' || r.status === 'FAILED') && (
+            <Button size="small" type="primary" onClick={() => startProcessing(r)}>
+              {r.status === 'UPLOADED' ? '开始处理' : '继续处理'}
+            </Button>
+          )}
+          {PROCESSING_STATUS.has(r.status) && (
+            <Popconfirm
+              title="停止处理该文档？"
+              description="将在当前阶段完成后停止，已完成的解析/切片进度保留"
+              okText="停止"
+              cancelText="取消"
+              onConfirm={() => stopProcessing(r)}
+            >
+              <Button size="small" danger>
+                停止
+              </Button>
+            </Popconfirm>
+          )}
           <Button size="small" onClick={() => openChunks(r)}>
             切片
           </Button>
           <Button size="small" icon={<EyeOutlined />} onClick={() => openPreview(r)}>
             预览
           </Button>
+          <Popconfirm
+            title="重新解析该文档？"
+            description="将按当前策略重建自动切片并重新索引，人工切片保留"
+            okText="重新解析"
+            cancelText="取消"
+            onConfirm={() => reparseDocument(r)}
+          >
+            <Button size="small" icon={<ReloadOutlined />} disabled={!TERMINAL_STATUS.has(r.status)}>
+              重新解析
+            </Button>
+          </Popconfirm>
           <Popconfirm
             title="确认删除该文档？"
             description="将删除文档、全部切片、索引及原始文件，不可恢复"
@@ -306,8 +485,8 @@ export default function KbDetailPage() {
             cancelText="取消"
             onConfirm={() => deleteDocument(r)}
           >
-            <Button size="small" danger>
-              删除文档
+            <Button type="link" danger size="small" icon={<DeleteOutlined />}>
+              删除
             </Button>
           </Popconfirm>
         </Space>
@@ -361,21 +540,21 @@ export default function KbDetailPage() {
       title: '操作',
       width: 120,
       render: (_: unknown, r: Chunk) => (
-        <Space>
-          <Button size="small" onClick={() => openChunkEdit(r)}>
-            编辑
-          </Button>
-          <Popconfirm title="确认删除该切片？" onConfirm={() => deleteChunk(r)}>
-            <Button size="small" danger>
-              删除
+        r.chunkType === 'PARENT' ? <Typography.Text type="secondary">上下文切片</Typography.Text> : (
+          <Space>
+            <Button size="small" onClick={() => openChunkEdit(r)}>
+              编辑
             </Button>
-          </Popconfirm>
-        </Space>
+            <Popconfirm title="确认删除该切片？" onConfirm={() => deleteChunk(r)}>
+              <Button size="small" danger>
+                删除
+              </Button>
+            </Popconfirm>
+          </Space>
+        )
       ),
     },
   ];
-
-  const runningDocs = docs.filter((d) => !TERMINAL_STATUS.has(d.status));
 
   return (
     <div>
@@ -399,17 +578,12 @@ export default function KbDetailPage() {
           {kb?.description && <Typography.Text type="secondary">{kb.description}</Typography.Text>}
         </Space>
         <Space>
-          {runningDocs.length > 0 && (
-            <Badge count={runningDocs.length} size="small">
-              <Button onClick={() => setProgressOpen(true)}>处理进度</Button>
-            </Badge>
-          )}
           <Tooltip title="支持 txt / md / pdf / docx / xlsx / png / jpg / jpeg，单个文件 ≤ 100MB">
             <Upload
               accept={ALLOWED_EXT.join(',')}
               showUploadList={false}
               customRequest={customUpload}
-              multiple={false}
+              multiple
             >
               <Button type="primary" icon={<UploadOutlined />}>
                 上传文档
@@ -428,35 +602,17 @@ export default function KbDetailPage() {
         bordered
       />
 
-      {/* 处理进度弹窗：仅列处理中的文档 */}
+      {/* 单文档处理进度弹窗：点击状态列触发，打开期间轮询该文档 */}
       <Modal
-        title="处理进度"
-        open={progressOpen}
-        width={620}
+        title={`处理进度 - ${progressDoc?.fileName ?? ''}`}
+        open={!!progressDoc}
+        width={520}
         okText="关闭"
         cancelButtonProps={{ style: { display: 'none' } }}
-        onOk={() => setProgressOpen(false)}
-        onCancel={() => setProgressOpen(false)}
+        onOk={() => setProgressDoc(null)}
+        onCancel={() => setProgressDoc(null)}
       >
-        {runningDocs.length === 0 ? (
-          <Empty
-            image={Empty.PRESENTED_IMAGE_SIMPLE}
-            description="全部文档处理完成"
-            style={{ padding: '30px 0' }}
-          />
-        ) : (
-          <Space direction="vertical" size={20} style={{ width: '100%' }}>
-            {runningDocs.map((doc) => (
-              <div key={doc.id}>
-                <Space style={{ marginBottom: 6 }}>
-                  <FileTextOutlined style={{ color: '#1677ff' }} />
-                  <Typography.Text>{doc.fileName}</Typography.Text>
-                </Space>
-                <DocProgress doc={doc} />
-              </div>
-            ))}
-          </Space>
-        )}
+        {progressDoc && <DocProgress doc={progressDoc} />}
       </Modal>
 
       {/* 切片管理抽屉 */}
@@ -495,7 +651,7 @@ export default function KbDetailPage() {
         onOk={submitChunk}
         okText="保存"
         confirmLoading={chunkDetailLoading}
-        destroyOnClose
+        destroyOnHidden
       >
         <Spin spinning={chunkDetailLoading}>
           <Form form={chunkForm} layout="vertical">

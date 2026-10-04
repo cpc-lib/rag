@@ -3,6 +3,7 @@ package com.rag.api.interfaces;
 import com.rag.api.application.PromptTemplateService;
 import com.rag.api.application.UserManageService;
 import com.rag.api.common.ApiResult;
+import com.rag.api.common.BizException;
 import com.rag.api.common.TenantContext;
 import com.rag.api.infrastructure.persistence.entity.PromptTemplateEntity;
 import com.rag.api.interfaces.dto.Dtos;
@@ -55,5 +56,22 @@ public class PromptTemplateController {
         AuthGuard.requireTenantAdmin();
         promptTemplateService.delete(TenantContext.require().tenantId(), id);
         return ApiResult.ok(null);
+    }
+
+    // ---- 字幕翻译提示词（租户级，不属于知识库） ----
+
+    @GetMapping("/subtitle")
+    public ApiResult<PromptTemplateEntity> getSubtitle() {
+        return ApiResult.ok(promptTemplateService.getSubtitleTemplate(TenantContext.require().tenantId()));
+    }
+
+    @PutMapping("/subtitle")
+    public ApiResult<PromptTemplateEntity> updateSubtitle(@RequestBody @Valid Dtos.SubtitlePromptReq req) {
+        // 平台管理员与租户管理员均可编辑本租户的字幕翻译提示词
+        TenantContext.Session s = TenantContext.require();
+        if (s.userType() != 0 && s.userType() != 1) {
+            throw new BizException(com.rag.api.common.ErrorCode.FORBIDDEN, "仅管理员可操作");
+        }
+        return ApiResult.ok(promptTemplateService.updateSubtitleTemplate(s.tenantId(), req.content()));
     }
 }

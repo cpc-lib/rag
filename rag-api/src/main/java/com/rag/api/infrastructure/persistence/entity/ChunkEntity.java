@@ -2,6 +2,7 @@ package com.rag.api.infrastructure.persistence.entity;
 
 import com.baomidou.mybatisplus.annotation.IdType;
 import com.baomidou.mybatisplus.annotation.TableId;
+import com.baomidou.mybatisplus.annotation.TableLogic;
 import com.baomidou.mybatisplus.annotation.TableName;
 import lombok.Data;
 
@@ -22,8 +23,12 @@ public class ChunkEntity {
     private String status;
     /** PARENT/CHILD */
     private String chunkType;
+    private String contentType;
     private Long parentChunkId;
     private String sectionTitle;
     private String sectionPath;
     private String contentHash;
+    /** 逻辑删除：0=正常 1=已删除。 */
+    @TableLogic
+    private Integer deleted;
 }

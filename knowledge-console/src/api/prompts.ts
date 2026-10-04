@@ -11,4 +11,7 @@ export const promptApi = {
   update: (id: number, req: PromptReq) =>
     unwrap<PromptTemplate>(http.put(`/prompts/${id}`, req)),
   remove: (id: number) => unwrap<void>(http.delete(`/prompts/${id}`)),
+  getSubtitle: () => unwrap<PromptTemplate>(http.get('/prompts/subtitle')),
+  updateSubtitle: (content: string) =>
+    unwrap<PromptTemplate>(http.put('/prompts/subtitle', { content })),
 };

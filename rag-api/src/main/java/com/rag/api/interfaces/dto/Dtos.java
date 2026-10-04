@@ -3,6 +3,7 @@ package com.rag.api.interfaces.dto;
 import com.rag.api.application.RetrievalService;
 import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.NotNull;
+import jakarta.validation.constraints.Positive;
 
 import java.util.List;
 import java.time.LocalDateTime;
@@ -141,5 +142,103 @@ public final class Dtos {
 
     public record PromptReq(@NotNull Long kbId, @NotBlank String name, @NotBlank String content,
                             Boolean isDefault) {
+    }
+
+    // ---- 字幕转换 ----
+
+    /** 单条字幕：序号 + 起止时间轴（SRT 格式 HH:MM:SS,mmm）+ 原文 + 译文。时间轴不可改。 */
+    public record SubtitleCue(int index, String start, String end, String text, String translated) {
+    }
+
+    /** 字幕详情：含全部字幕条。 */
+    public record SubtitleView(long id, String originalName, String sourceLang, String targetLang,
+                               java.util.List<SubtitleCue> cues,
+                               java.time.LocalDateTime createdAt, java.time.LocalDateTime updatedAt) {
+    }
+
+    /** 字幕列表项。 */
+    public record SubtitleListItem(long id, String originalName, String sourceLang, String targetLang,
+                                   int cueCount, java.time.LocalDateTime updatedAt) {
+    }
+
+    /** 编辑字幕：只更新文本，时间轴取自已存记录。 */
+    public record SubtitleUpdateReq(@NotNull java.util.List<SubtitleCue> cues) {
+    }
+
+    /**
+     * 翻译请求：targetLang 为租户维护列表中的语言名；
+     * indices 为勾选的序号（1 起，与页面序号一致），为空时翻译全部条目。
+     */
+    public record SubtitleTranslateReq(@NotBlank String targetLang,
+                                       java.util.List<Integer> indices) {
+    }
+
+    /** 翻译目标语言（租户级维护）。 */
+    public record TranslateLangView(long id, String name) {
+    }
+
+    /** 新增翻译目标语言。 */
+    public record TranslateLangReq(@NotBlank String name) {
+    }
+
+    /**
+     * 文件库条目。
+     * bizType 业务类型：SUBTITLE=字幕文件（关联字幕记录，可用条目编辑器查看），OTHER=其他文件（只读预览）。
+     */
+    public record LibraryFileView(long id, String fileName, String contentType, long fileSize,
+                                  Long subtitleId, String bizType, boolean deletable,
+                                  String playbackStatus, Integer playbackProgress,
+                                  java.time.LocalDateTime updatedAt) {
+    }
+
+    /** 更新字幕翻译提示词内容。 */
+    public record SubtitlePromptReq(@NotBlank String content) {
+    }
+
+    /**
+     * 分片上传初始化请求：
+     * biz=LIBRARY（默认，文件库）/ KB_DOCUMENT（知识库文档，此时 kbId 必填）。
+     */
+    public record UploadInitReq(@NotBlank String fileName, @Positive long fileSize, String contentType,
+                                String sha256, String biz, Long kbId) {
+    }
+
+    /**
+     * 分片上传初始化响应：
+     * - 秒传命中时 instant=true，sessionId=-1，file 为已入库条目，前端无需再传分片；
+     * - 非秒传时 instant=false，返回 sessionId + chunkSize。
+     */
+    public record UploadInitResp(boolean instant, long sessionId, long chunkSize, LibraryFileView file) {
+    }
+
+    /** 分片会话视图：断点续传时前端按 uploadedParts 跳过已传分片。 */
+    public record UploadSessionView(long sessionId, String status, long chunkSize, int totalChunks,
+                                    List<Integer> uploadedParts) {
+    }
+
+    /** 分片上传响应。 */
+    public record UploadPartResp(int partNumber, String etag) {
+    }
+
+    /**
+     * 在线播放准备结果：
+     * status=NONE/PROCESSING/READY/FAILED/NATIVE；
+     * hls=true 表示产物为 HLS（走 /hls/ 接口）；
+     * progress 为转码进度 0-100；
+     * positionMs 为当前用户在该视频上的最新播放进度（毫秒，0 表示从头播放或无记录）；
+     * videoWidth/videoHeight 为视频分辨率（转码探测写入，READY 后有效）。
+     */
+    public record PlaybackResp(String status, boolean hls, Integer progress, Long positionMs,
+                               Integer videoWidth, Integer videoHeight) {
+    }
+
+    /** 保存视频播放进度请求：positionMs=当前播放位置（毫秒），durationMs=视频总时长（毫秒）。 */
+    public record PlaybackPositionReq(@NotNull Long positionMs, Long durationMs) {
+    }
+
+    /** 视频播放记录视图：每次播放会话一条记录，按用户维度展示。 */
+    public record PlaybackHistoryView(long id, long fileId, String fileName, long positionMs, long durationMs,
+                                      long fileSize, String playbackStatus,
+                                      java.time.LocalDateTime updatedAt) {
     }
 }

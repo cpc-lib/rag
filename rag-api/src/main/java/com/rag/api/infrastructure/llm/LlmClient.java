@@ -9,10 +9,12 @@ import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.HttpHeaders;
+import org.springframework.http.HttpStatusCode;
 import org.springframework.http.MediaType;
 import org.springframework.http.client.reactive.ReactorClientHttpConnector;
 import org.springframework.stereotype.Component;
 import org.springframework.web.reactive.function.client.WebClient;
+import org.springframework.web.reactive.function.client.WebClientResponseException;
 import reactor.netty.http.client.HttpClient;
 import reactor.netty.resources.ConnectionProvider;
 
@@ -80,6 +82,20 @@ public class LlmClient {
         return s;
     }
 
+    /** 从 WebClientResponseException 中提取 HTTP 状态与响应体，便于定位上游 4xx/5xx 根因。 */
+    private String upstreamError(WebClientResponseException e) {
+        HttpStatusCode code = e.getStatusCode();
+        String body = e.getResponseBodyAsString();
+        if (body == null || body.isBlank()) {
+            return "HTTP " + code.value() + " " + e.getStatusText();
+        }
+        // 响应体可能很长，截断到 2KB 避免日志/异常膨胀
+        if (body.length() > 2048) {
+            body = body.substring(0, 2048) + "...(truncated)";
+        }
+        return "HTTP " + code.value() + " " + e.getStatusText() + ", response body: " + body;
+    }
+
     /** 非流式对话（用于工具循环），返回 choices[0].message 节点。 */
     public JsonNode chatOnce(String baseUrl, String apiKey, String model, List<LlmMessage> messages,
                              JsonNode tools, ChatParams params, int timeoutSeconds) {
@@ -96,6 +112,8 @@ public class LlmClient {
                 throw new IllegalStateException("LLM 响应缺少 choices");
             }
             return resp.path("choices").get(0).path("message");
+        } catch (WebClientResponseException e) {
+            throw new IllegalStateException("LLM 调用失败: " + upstreamError(e), e);
         } catch (Exception e) {
             throw new IllegalStateException("LLM 调用失败: " + e.getMessage(), e);
         }
@@ -117,6 +135,8 @@ public class LlmClient {
                 .bodyValue(body)
                 .retrieve()
                 .bodyToFlux(String.class)
+                .onErrorMap(WebClientResponseException.class,
+                        e -> new IllegalStateException("LLM 调用失败: " + upstreamError(e), e))
                 .flatMap(payload0 -> {
                     // bodyToFlux(String) 对 text/event-stream 由 SSE reader 解码，元素已剥掉 "data:" 前缀
                     String payload = payload0.trim();
@@ -161,13 +181,20 @@ public class LlmClient {
         body.put("model", model);
         ArrayNode input = body.putArray("input");
         texts.forEach(input::add);
-        JsonNode resp = build(baseUrl, apiKey, timeoutSeconds).post()
-                .uri("/embeddings")
-                .contentType(MediaType.APPLICATION_JSON)
-                .bodyValue(body)
-                .retrieve()
-                .bodyToMono(JsonNode.class)
-                .block();
+        JsonNode resp;
+        try {
+            resp = build(baseUrl, apiKey, timeoutSeconds).post()
+                    .uri("/embeddings")
+                    .contentType(MediaType.APPLICATION_JSON)
+                    .bodyValue(body)
+                    .retrieve()
+                    .bodyToMono(JsonNode.class)
+                    .block();
+        } catch (WebClientResponseException e) {
+            throw new IllegalStateException("Embedding 调用失败: " + upstreamError(e), e);
+        } catch (Exception e) {
+            throw new IllegalStateException("Embedding 调用失败: " + e.getMessage(), e);
+        }
         List<JsonNode> items = new ArrayList<>();
         resp.path("data").forEach(items::add);
         items.sort(Comparator.comparingInt(n -> n.path("index").asInt()));
@@ -226,9 +253,10 @@ public class LlmClient {
         }
         if (tools != null && tools.isArray() && !tools.isEmpty()) {
             body.set("tools", tools);
-        }
-        if (toolChoice != null) {
-            body.put("tool_choice", toolChoice);
+            // tool_choice 必须与 tools 成对出现：无 tools 时发送 tool_choice 会被上游 400 拒绝
+            if (toolChoice != null) {
+                body.put("tool_choice", toolChoice);
+            }
         }
         return body;
     }

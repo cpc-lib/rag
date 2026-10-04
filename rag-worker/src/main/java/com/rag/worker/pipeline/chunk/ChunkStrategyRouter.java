@@ -10,9 +10,8 @@ import java.util.Locale;
 import java.util.Map;
 
 /**
- * 策略路由（指南 §35/42）：显式策略直接取对应 bean；AUTO 按文件类型解析：
- * txt→RECURSIVE，md→MARKDOWN，html→HTML，docx→STRUCTURE，xlsx/csv→TABLE，
- * pdf→PDF_LAYOUT，代码文件→CODE，图片(OCR)→RECURSIVE。
+ * 策略路由：显式策略直接取对应 bean；AUTO 默认使用结构化 Parent/Child，
+ * PDF 先做版式与页眉页脚处理，代码文件保留专用策略。
  */
 @Component
 @RequiredArgsConstructor
@@ -51,14 +50,9 @@ public class ChunkStrategyRouter {
         int dot = fileName.lastIndexOf('.');
         ext = dot < 0 ? "" : fileName.substring(dot + 1).toLowerCase(Locale.ROOT);
         return switch (ext) {
-            case "md", "markdown" -> ChunkMode.MARKDOWN;
-            case "html", "htm" -> ChunkMode.HTML;
-            case "doc", "docx" -> ChunkMode.STRUCTURE;
-            case "xls", "xlsx", "csv" -> ChunkMode.TABLE;
             case "pdf" -> ChunkMode.PDF_LAYOUT;
             case "java", "py", "go", "js", "jsx", "ts", "tsx" -> ChunkMode.CODE;
-            // txt/log/图片 OCR 文本及其余类型：递归切片
-            default -> ChunkMode.RECURSIVE;
+            default -> ChunkMode.PARENT_CHILD;
         };
     }
 }

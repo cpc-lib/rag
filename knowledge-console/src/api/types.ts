@@ -178,11 +178,13 @@ export type KbUpdateReq = Partial<Omit<KbCreateReq, 'name'>> & { name?: string }
 
 // ---- 文档 ----
 export type DocumentStatus =
+  | 'UPLOADED'
   | 'PARSING'
   | 'CHUNKING'
   | 'EMBEDDING'
   | 'INDEXING'
   | 'READY'
+  | 'STOPPED'
   | 'FAILED';
 
 export interface DocumentItem {
@@ -224,6 +226,7 @@ export interface Chunk {
 export interface ToolConfigMasked {
   weatherEnabled: boolean | null;
   tavilyEnabled: boolean | null;
+  tavilyApiKey: string | null;
   tavilyApiKeyConfigured: boolean;
 }
 
@@ -266,19 +269,19 @@ export interface QuotaUsage {
   storageMaxMb: number | null;
   tokensUsedThisMonth: number;
   tokensMaxThisMonth: number | null;
-  sseCurrentConnections: number;
-  sseMaxConnections: number | null;
-  mqConcurrencyMax: number | null;
 }
 
 // ---- SSE 问答 ----
 export interface Citation {
   seq: number;
   chunkId: number;
+  parentChunkId: number | null;
   documentId: number;
   documentName: string;
   page: number;
-  previewUrl: string;
+  sectionPath: string | null;
+  contentType: string | null;
+  previewUrl: string | null;
   content: string;
 }
 
@@ -315,7 +318,10 @@ export interface ChatSessionDetail {
 
 export interface PromptTemplate {
   id: number;
-  kbId: number;
+  /** 知识库ID，非知识库模板（如字幕翻译）为 null */
+  kbId: number | null;
+  /** 模板分类：null=知识库问答，SUBTITLE=字幕翻译 */
+  category: string | null;
   name: string;
   content: string;
   isDefault: boolean;
@@ -349,4 +355,107 @@ export interface GeneratedImage {
   createdAt: string | null;
   /** 文件字节大小，历史行首次加载后由后端懒回填 */
   fileSize: number | null;
+}
+
+// ---- 字幕转换 ----
+export interface SubtitleCue {
+  index: number;
+  /** SRT 时间轴，HH:MM:SS,mmm */
+  start: string;
+  end: string;
+  text: string;
+  /** 翻译后的文本，未翻译为 null */
+  translated?: string | null;
+}
+
+export interface Subtitle {
+  id: number;
+  originalName: string;
+  sourceLang: string | null;
+  targetLang: string | null;
+  cues: SubtitleCue[];
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface SubtitleListItem {
+  id: number;
+  originalName: string;
+  sourceLang: string | null;
+  targetLang: string | null;
+  cueCount: number;
+  updatedAt: string;
+}
+
+export interface SubtitleUpdateReq {
+  cues: SubtitleCue[];
+}
+
+/** 翻译请求：targetLang 为维护列表中的语言名，indices 为勾选的序号（1 起），为空时翻译全部条目 */
+export interface SubtitleTranslateReq {
+  targetLang: string;
+  indices?: number[];
+}
+
+/** 翻译目标语言（租户级维护） */
+export interface TranslateLang {
+  id: number;
+  name: string;
+}
+
+/** 文件库条目 */
+export interface LibraryFile {
+  id: number;
+  fileName: string;
+  contentType: string | null;
+  fileSize: number;
+  subtitleId: number | null;
+  /** 业务类型：SUBTITLE=字幕文件（条目编辑器），IMAGE=AI图片（图片预览），OTHER=其他文件（只读文本） */
+  bizType: 'SUBTITLE' | 'IMAGE' | 'OTHER' | string;
+  /** 文件库中是否允许删除（字幕翻译保存归档与直接上传可删，其余不可删） */
+  deletable: boolean;
+  /** 转码状态：NONE/PROCESSING/READY/FAILED（仅视频文件有值） */
+  playbackStatus: string | null;
+  /** 转码进度 0-100（PROCESSING 时有效） */
+  playbackProgress: number | null;
+  updatedAt: string;
+}
+
+/** 分片上传初始化响应：instant=true 表示秒传命中（file 为已入库条目），无需再传分片 */
+export interface UploadInitResp {
+  instant: boolean;
+  sessionId: number;
+  chunkSize: number;
+  file: LibraryFile | null;
+}
+
+/** 在线播放准备结果：status=NONE/PROCESSING/READY/FAILED/NATIVE；hls=true 表示产物为 HLS；progress 为转码进度；positionMs 为当前用户播放进度（毫秒）；videoWidth/videoHeight 为分辨率 */
+export interface PlaybackState {
+  status: 'NONE' | 'PROCESSING' | 'READY' | 'FAILED' | 'NATIVE';
+  hls: boolean;
+  progress: number | null;
+  positionMs: number | null;
+  videoWidth: number | null;
+  videoHeight: number | null;
+}
+
+/** 视频播放记录视图（每次播放会话一条记录） */
+export interface PlaybackHistory {
+  id: number;
+  fileId: number;
+  fileName: string;
+  positionMs: number;
+  durationMs: number;
+  fileSize: number;
+  playbackStatus: string;
+  updatedAt: string;
+}
+
+/** 分片会话视图（断点续传：按 uploadedParts 跳过已传分片） */
+export interface UploadSessionView {
+  sessionId: number;
+  status: string;
+  chunkSize: number;
+  totalChunks: number;
+  uploadedParts: number[];
 }

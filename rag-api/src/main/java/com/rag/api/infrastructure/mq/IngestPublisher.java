@@ -17,7 +17,11 @@ import org.springframework.stereotype.Component;
 @RequiredArgsConstructor
 public class IngestPublisher {
 
-    public record IngestMessage(long taskId, String type, String tenantId, long kbId, long documentId, String objectKey) {
+    /**
+     * @param resume true 表示断点续跑：已有切片时 Worker 跳过解析/切片，直接从向量化继续
+     */
+    public record IngestMessage(long taskId, String type, String tenantId, long kbId, long documentId,
+                                String objectKey, boolean resume) {
     }
 
     private final RabbitTemplate rabbitTemplate;

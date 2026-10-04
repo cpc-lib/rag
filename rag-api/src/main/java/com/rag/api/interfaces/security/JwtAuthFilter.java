@@ -58,11 +58,17 @@ public class JwtAuthFilter extends OncePerRequestFilter {
                                     HttpServletResponse response,
                                     FilterChain chain) throws ServletException, IOException {
         String header = request.getHeader("Authorization");
-        if (header == null || !header.startsWith("Bearer ")) {
-            writeError(response, ErrorCode.UNAUTHORIZED.httpStatus, "缺少 Bearer Token");
-            return;
+        String token;
+        if (header != null && header.startsWith("Bearer ")) {
+            token = header.substring(7);
+        } else {
+            // 媒体标签（<video>/<audio>）无法携带 Header，允许 ?token= 查询参数兜底
+            token = request.getParameter("token");
+            if (token == null || token.isBlank()) {
+                writeError(response, ErrorCode.UNAUTHORIZED.httpStatus, "缺少 Bearer Token");
+                return;
+            }
         }
-        String token = header.substring(7);
         try {
             Claims claims = Jwts.parser().verifyWith(key).build().parseSignedClaims(token).getPayload();
             String jti = claims.getId();

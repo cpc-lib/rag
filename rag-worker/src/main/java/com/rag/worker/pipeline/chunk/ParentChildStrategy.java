@@ -43,22 +43,20 @@ public class ParentChildStrategy implements ChunkStrategy {
             }
             for (ChunkSupport.Block block : support.extractBlocks(page.page(), text)) {
                 if (block.kind() == ChunkSupport.Kind.HEADING) {
+                    if (unitBlocks.stream().anyMatch(b -> b.kind() != ChunkSupport.Kind.HEADING)) {
+                        plans.add(finalizeUnit(ctx, unitPage, unitTitle, unitPath,
+                                unitBlocks, childSize, childOverlap));
+                    }
+                    unitBlocks.clear();
                     while (!levelStack.isEmpty() && levelStack.get(levelStack.size() - 1) >= block.level()) {
                         levelStack.remove(levelStack.size() - 1);
                         titleStack.remove(titleStack.size() - 1);
                     }
                     levelStack.add(block.level());
                     titleStack.add(support.headingTitle(block.text()));
-                    if (block.level() <= 2 && !unitBlocks.isEmpty()) {
-                        plans.add(finalizeUnit(ctx, unitPage, unitTitle, unitPath,
-                                unitBlocks, childSize, childOverlap));
-                        unitBlocks.clear();
-                    }
-                    if (unitBlocks.isEmpty()) {
-                        unitPage = block.page();
-                        unitPath = String.join(" > ", titleStack);
-                        unitTitle = titleStack.get(titleStack.size() - 1);
-                    }
+                    unitPage = block.page();
+                    unitPath = String.join(" > ", titleStack);
+                    unitTitle = titleStack.get(titleStack.size() - 1);
                     unitBlocks.add(block);
                     continue;
                 }
@@ -66,8 +64,10 @@ public class ParentChildStrategy implements ChunkStrategy {
                 for (ChunkSupport.Block piece : splitOversized(block, parentSize, ctx.params().separators())) {
                     if (!unitBlocks.isEmpty()
                             && support.tokens(support.joinBlocks(unitBlocks)) + support.tokens(piece.text()) > parentSize) {
-                        plans.add(finalizeUnit(ctx, unitPage, unitTitle, unitPath,
-                                unitBlocks, childSize, childOverlap));
+                        if (unitBlocks.stream().anyMatch(b -> b.kind() != ChunkSupport.Kind.HEADING)) {
+                            plans.add(finalizeUnit(ctx, unitPage, unitTitle, unitPath,
+                                    unitBlocks, childSize, childOverlap));
+                        }
                         unitBlocks.clear();
                     }
                     if (unitBlocks.isEmpty()) {
@@ -79,7 +79,7 @@ public class ParentChildStrategy implements ChunkStrategy {
                 }
             }
         }
-        if (!unitBlocks.isEmpty()) {
+        if (unitBlocks.stream().anyMatch(b -> b.kind() != ChunkSupport.Kind.HEADING)) {
             plans.add(finalizeUnit(ctx, unitPage, unitTitle, unitPath,
                     unitBlocks, childSize, childOverlap));
         }

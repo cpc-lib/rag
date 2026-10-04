@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+﻿import { useEffect, useState } from 'react';
 import {
   Button,
   Form,
@@ -215,7 +215,7 @@ export default function TenantsPage() {
         onOk={handleCreate}
         confirmLoading={saving}
         okText="创建"
-        destroyOnClose
+        destroyOnHidden
       >
         <Form form={createForm} layout="vertical" initialValues={{ maxMqConcurrency: 4, maxSseConnections: 20 }}>
           <Form.Item name="name" label="租户名称" rules={[{ required: true, message: '请输入租户名称' }]}>
@@ -250,7 +250,7 @@ export default function TenantsPage() {
         onOk={handleEdit}
         confirmLoading={saving}
         okText="保存"
-        destroyOnClose
+        destroyOnHidden
       >
         <Form form={editForm} layout="vertical">
           <Form.Item name="name" label="租户名称" rules={[{ required: true }]}>
@@ -270,7 +270,7 @@ export default function TenantsPage() {
         onCancel={() => setResetTarget(null)}
         onOk={handleResetAdmin}
         okText="确认重置"
-        destroyOnClose
+        destroyOnHidden
       >
         <Typography.Paragraph type="secondary">
           重置后原管理员密码立即失效，新初始密码仅展示一次。

@@ -4,13 +4,11 @@ import com.baomidou.mybatisplus.core.conditions.query.QueryWrapper;
 import com.rag.api.common.BizException;
 import com.rag.api.common.ErrorCode;
 import com.rag.api.infrastructure.persistence.entity.ChatMessageEntity;
-import com.rag.api.infrastructure.persistence.entity.DocumentEntity;
 import com.rag.api.infrastructure.persistence.entity.TenantEntity;
 import com.rag.api.infrastructure.persistence.mapper.ChatMessageMapper;
-import com.rag.api.infrastructure.persistence.mapper.DocumentMapper;
 import com.rag.api.infrastructure.persistence.mapper.TenantMapper;
-import com.rag.api.interfaces.guard.SseConnectionGuard;
 import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 
 import java.time.LocalDate;
@@ -19,16 +17,17 @@ import java.util.LinkedHashMap;
 import java.util.Map;
 
 /**
- * 配额（spec 3.1）：MinIO 存储量、Token 月度消耗、SSE 并发。
+ * 配额（spec 3.1）：MinIO 存储量、Token 月度消耗。
  */
+@Slf4j
 @Service
 @RequiredArgsConstructor
 public class QuotaService {
 
-    private final DocumentMapper documentMapper;
     private final ChatMessageMapper chatMessageMapper;
     private final TenantMapper tenantMapper;
-    private final SseConnectionGuard sseGuard;
+    private final com.rag.api.infrastructure.storage.MinioStorage minioStorage;
+    private final com.rag.api.infrastructure.persistence.mapper.LibraryFileMapper libraryFileMapper;
 
     public Map<String, Object> usage(String tenantId) {
         TenantEntity tenant = tenantMapper.selectById(tenantId);
@@ -42,18 +41,23 @@ public class QuotaService {
         map.put("storageMaxMb", tenant.getMaxStorageMb());
         map.put("tokensUsedThisMonth", tokensUsed);
         map.put("tokensMaxThisMonth", tenant.getMaxLlmTokensMonth());
-        map.put("sseCurrentConnections", sseGuard.current(tenantId));
-        map.put("sseMaxConnections", tenant.getMaxSseConnections());
-        map.put("mqConcurrencyMax", tenant.getMaxMqConcurrency());
         return map;
     }
 
     public long storageUsedBytes(String tenantId) {
-        QueryWrapper<DocumentEntity> qw = new QueryWrapper<DocumentEntity>()
-                .select("COALESCE(SUM(file_size),0) AS total")
-                .eq("tenant_id", tenantId);
-        Object v = documentMapper.selectObjs(qw).stream().findFirst().orElse(0);
-        return v instanceof Number n ? n.longValue() : 0L;
+        // 优先 MinIO 真实用量（含文件库直传、AI 图片、字幕归档、HLS 转码产物等）
+        try {
+            return minioStorage.sumSizeByPrefix(tenantId + "/");
+        } catch (Exception e) {
+            log.warn("MinIO 用量统计失败，回退到 DB 求和: {}", e.getMessage());
+        }
+        // 回退：仅 library_file（document 上传时已双写到 library_file，避免重复计数；
+        // 不含转码产物与 MinIO 残留对象）
+        QueryWrapper<com.rag.api.infrastructure.persistence.entity.LibraryFileEntity> qwLib =
+                new QueryWrapper<com.rag.api.infrastructure.persistence.entity.LibraryFileEntity>()
+                        .select("COALESCE(SUM(file_size),0) AS total").eq("tenant_id", tenantId);
+        Object vLib = libraryFileMapper.selectObjs(qwLib).stream().findFirst().orElse(0);
+        return vLib instanceof Number n ? n.longValue() : 0L;
     }
 
     public long tokensUsedThisMonth(String tenantId) {
