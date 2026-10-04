@@ -62,6 +62,17 @@ public class RabbitConfig {
         return BindingBuilder.bind(dlqQueue).to(ragIngestExchange).with("dlq");
     }
 
+    /** 媒体转码队列：文件库视频 → 本 Worker 转 HLS（与 API 幂等同构声明）。 */
+    @Bean
+    public Queue mediaTranscodeQueue(@Value("${rag.mq.media-queue}") String queue) {
+        return QueueBuilder.durable(queue).build();
+    }
+
+    @Bean
+    public Binding mediaTranscodeBinding(DirectExchange ragIngestExchange, Queue mediaTranscodeQueue) {
+        return BindingBuilder.bind(mediaTranscodeQueue).to(ragIngestExchange).with("media.transcode");
+    }
+
     @Bean
     public SimpleRabbitListenerContainerFactory ingestFactory(ConnectionFactory connectionFactory) {
         SimpleRabbitListenerContainerFactory factory = new SimpleRabbitListenerContainerFactory();

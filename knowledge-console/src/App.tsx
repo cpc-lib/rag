@@ -12,6 +12,9 @@ import ToolConfigPage from './pages/ToolConfigPage';
 import QuotaPage from './pages/QuotaPage';
 import ChatPage from './pages/ChatPage';
 import ImageStudioPage from './pages/ImageStudioPage';
+import SubtitlePage from './pages/SubtitlePage';
+import FileLibraryPage from './pages/FileLibraryPage';
+import TranslateLangPage from './pages/TranslateLangPage';
 import UsersPage from './pages/UsersPage';
 
 function RequireAuth({ children }: { children: ReactNode }) {
@@ -148,6 +151,30 @@ export default function App() {
             element={
               <RequireMenu code="image-studio">
                 <ImageStudioPage />
+              </RequireMenu>
+            }
+          />
+          <Route
+            path="subtitle"
+            element={
+              <RequireMenu code="subtitle">
+                <SubtitlePage />
+              </RequireMenu>
+            }
+          />
+          <Route
+            path="library"
+            element={
+              <RequireMenu code="library">
+                <FileLibraryPage />
+              </RequireMenu>
+            }
+          />
+          <Route
+            path="translate-langs"
+            element={
+              <RequireMenu code="translate-lang">
+                <TranslateLangPage />
               </RequireMenu>
             }
           />

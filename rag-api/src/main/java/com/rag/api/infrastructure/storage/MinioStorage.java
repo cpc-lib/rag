@@ -69,6 +69,19 @@ public class MinioStorage {
         }
     }
 
+    /** 范围下载：offset 起始字节，length 字节数（null 读到末尾），用于媒体流 Range 请求。 */
+    public InputStream downloadRange(String objectKey, long offset, Long length) {
+        try {
+            GetObjectArgs.Builder b = GetObjectArgs.builder().bucket(bucket).object(objectKey).offset(offset);
+            if (length != null) {
+                b.length(length);
+            }
+            return minioClient.getObject(b.build());
+        } catch (Exception e) {
+            throw new BizException(ErrorCode.UPSTREAM, "文件存储读取失败: " + e.getMessage());
+        }
+    }
+
     public String presignUrl(String objectKey) {
         try {
             return minioClient.getPresignedObjectUrl(GetPresignedObjectUrlArgs.builder()

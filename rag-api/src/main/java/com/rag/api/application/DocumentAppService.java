@@ -30,7 +30,8 @@ import java.util.Set;
 import java.util.UUID;
 
 /**
- * 文档上传编排：配额校验 → MinIO 落盘 → 建 task → 发 MQ（spec 4.1）。
+ * 文档上传编排：配额校验 → MinIO 落盘 → 落库为 UPLOADED（待处理）。
+ * 处理流水线由用户手动触发：开始处理（startProcessing）/ 停止（stopProcessing）/ 断点续跑。
  */
 @Slf4j
 @Service
@@ -44,11 +45,13 @@ public class DocumentAppService {
     private final PipelineTaskMapper taskMapper;
     private final KnowledgeBaseService knowledgeBaseService;
     private final QuotaService quotaService;
+    private final ModelService modelService;
     private final MinioStorage minio;
     private final EsSearchClient es;
     private final MilvusClientWrapper milvus;
     private final IngestPublisher publisher;
     private final ObjectMapper objectMapper;
+    private final FileLibraryService fileLibraryService;
 
     public DocumentEntity upload(long kbId, MultipartFile file) {
         TenantContext.Session s = TenantContext.require();
@@ -74,6 +77,7 @@ public class DocumentAppService {
             throw new BizException(ErrorCode.UPSTREAM, "文件读取失败: " + e.getMessage());
         }
 
+        // 上传后不自动进入流水线，等待用户点击「开始处理」
         DocumentEntity doc = new DocumentEntity();
         doc.setKbId(kbId);
         doc.setTenantId(s.tenantId());
@@ -81,27 +85,105 @@ public class DocumentAppService {
         doc.setObjectKey(objectKey);
         doc.setFileSize(file.getSize());
         doc.setMimeType(file.getContentType());
-        doc.setStatus("PARSING");
+        doc.setStatus("UPLOADED");
+        doc.setProgress(0);
         doc.setPageCount(0);
         documentMapper.insert(doc);
+        log.info("文档已上传（待处理） doc={} file={}", doc.getId(), fileName);
+        // 文件库登记：与文档共用同一 MinIO 对象，失败不阻断上传
+        try {
+            fileLibraryService.archiveDocument(s.tenantId(), s.userId(), doc.getId(), fileName,
+                    objectKey, file.getContentType(), file.getSize());
+        } catch (Exception ex) {
+            log.warn("文档归档到文件库失败 doc={} err={}", doc.getId(), ex.getMessage());
+        }
+        return doc;
+    }
+
+    /**
+     * 开始/继续处理：UPLOADED 从头解析；STOPPED/FAILED 且已有切片时从向量化断点续跑。
+     * 前置校验向量模型：未启用时快速失败，不投递必然失败的任务。
+     */
+    public DocumentEntity startProcessing(long documentId) {
+        TenantContext.Session s = TenantContext.require();
+        if (s.userType() != 1) {
+            throw BizException.forbidden("仅租户管理员可处理文档");
+        }
+        DocumentEntity doc = documentMapper.selectById(documentId);
+        if (doc == null) {
+            throw BizException.notFound("文档不存在");
+        }
+        knowledgeBaseService.getOwned(doc.getKbId());
+        modelService.requireEnabled(doc.getTenantId(), ModelService.EMBEDDING);
+
+        // 断点续跑：切片已落库说明解析/切片已完成，直接从向量化继续
+        boolean resume = chunkMapper.selectCount(new QueryWrapper<ChunkEntity>()
+                .eq("document_id", doc.getId()).ne("status", "DELETED")) > 0;
+        String nextStatus = resume ? "EMBEDDING" : "PARSING";
+        int nextProgress = resume ? 45 : 0;
+        int updated = documentMapper.update(null, new UpdateWrapper<DocumentEntity>()
+                .eq("id", doc.getId())
+                .in("status", "UPLOADED", "STOPPED", "FAILED")
+                .set("status", nextStatus)
+                .set("progress", nextProgress)
+                .set("error_msg", null)
+                .set("stop_requested", 0));
+        if (updated != 1) {
+            throw BizException.badRequest("文档正在处理中，请勿重复开始");
+        }
 
         PipelineTaskEntity task = new PipelineTaskEntity();
-        task.setTenantId(s.tenantId());
-        task.setKbId(kbId);
+        task.setTenantId(doc.getTenantId());
+        task.setKbId(doc.getKbId());
         task.setDocumentId(doc.getId());
         task.setType("PARSE");
         task.setStatus("PENDING");
         task.setRetryCount(0);
         taskMapper.insert(task);
 
-        var msg = new IngestPublisher.IngestMessage(task.getId(), "PARSE", s.tenantId(), kbId, doc.getId(), objectKey);
+        var msg = new IngestPublisher.IngestMessage(task.getId(), "PARSE", doc.getTenantId(),
+                doc.getKbId(), doc.getId(), doc.getObjectKey(), resume);
         try {
             task.setPayload(objectMapper.writeValueAsString(msg));
             taskMapper.updateById(task);
         } catch (Exception ignored) {
         }
         publisher.publish(msg);
-        log.info("文档已上传并投递解析任务 doc={} task={} file={}", doc.getId(), task.getId(), fileName);
+        doc.setStatus(nextStatus);
+        doc.setProgress(nextProgress);
+        doc.setErrorMsg(null);
+        log.info("文档处理任务已投递 doc={} task={} resume={}", doc.getId(), task.getId(), resume);
+        return doc;
+    }
+
+    /**
+     * 停止处理：置停止标记，Worker 在阶段边界/向量化批次间检测到后置为 STOPPED；
+     * 若任务仍在排队（PENDING）未被执行，直接取消并立即置为 STOPPED。
+     */
+    public DocumentEntity stopProcessing(long documentId) {
+        TenantContext.Session s = TenantContext.require();
+        if (s.userType() != 1) {
+            throw BizException.forbidden("仅租户管理员可停止处理");
+        }
+        DocumentEntity doc = documentMapper.selectById(documentId);
+        if (doc == null) {
+            throw BizException.notFound("文档不存在");
+        }
+        knowledgeBaseService.getOwned(doc.getKbId());
+        if (!Set.of("PARSING", "CHUNKING", "EMBEDDING", "INDEXING").contains(doc.getStatus())) {
+            throw BizException.badRequest("文档当前不在处理中");
+        }
+        documentMapper.update(null, new UpdateWrapper<DocumentEntity>()
+                .eq("id", doc.getId()).set("stop_requested", 1));
+        int cancelled = taskMapper.update(null, new UpdateWrapper<PipelineTaskEntity>()
+                .eq("document_id", doc.getId()).eq("status", "PENDING")
+                .set("status", "CANCELLED"));
+        if (cancelled > 0) {
+            documentMapper.update(null, new UpdateWrapper<DocumentEntity>()
+                    .eq("id", doc.getId()).set("status", "STOPPED"));
+            doc.setStatus("STOPPED");
+        }
+        log.info("文档停止请求已受理 doc={} 排队任务直接取消={}", doc.getId(), cancelled > 0);
         return doc;
     }
 
@@ -125,6 +207,8 @@ public class DocumentAppService {
         if (!("READY".equals(doc.getStatus()) || "FAILED".equals(doc.getStatus()))) {
             throw BizException.badRequest("文档正在处理，请完成后再重新解析");
         }
+        // 与上传一致：未启用向量模型时快速失败，不投递必然失败的任务
+        modelService.requireEnabled(doc.getTenantId(), ModelService.EMBEDDING);
 
         int updated = documentMapper.update(null, new UpdateWrapper<DocumentEntity>()
                 .eq("id", doc.getId())
@@ -149,7 +233,7 @@ public class DocumentAppService {
         taskMapper.insert(task);
 
         var msg = new IngestPublisher.IngestMessage(task.getId(), "PARSE", doc.getTenantId(),
-                doc.getKbId(), doc.getId(), doc.getObjectKey());
+                doc.getKbId(), doc.getId(), doc.getObjectKey(), false);
         try {
             task.setPayload(objectMapper.writeValueAsString(msg));
             taskMapper.updateById(task);
@@ -192,6 +276,7 @@ public class DocumentAppService {
         chunkMapper.delete(new QueryWrapper<ChunkEntity>().eq("document_id", doc.getId()));
         taskMapper.delete(new QueryWrapper<PipelineTaskEntity>().eq("document_id", doc.getId()));
         documentMapper.deleteById(doc.getId());
+        fileLibraryService.removeByDocument(doc.getId());
         log.info("文档已删除 doc={} kb={}", doc.getId(), kb.getId());
     }
 

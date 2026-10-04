@@ -171,7 +171,7 @@ public class ChunkAppService {
         task.setRetryCount(0);
         taskMapper.insert(task);
         publisher.publish(new IngestPublisher.IngestMessage(
-                task.getId(), "REINDEX", doc.getTenantId(), doc.getKbId(), doc.getId(), doc.getObjectKey()));
+                task.getId(), "REINDEX", doc.getTenantId(), doc.getKbId(), doc.getId(), doc.getObjectKey(), false));
         log.info("REINDEX 任务已投递 doc={} task={}", doc.getId(), task.getId());
     }
 }

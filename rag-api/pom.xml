@@ -27,9 +27,11 @@
         <jetcd.version>0.7.7</jetcd.version>
         <jjwt.version>0.12.6</jjwt.version>
         <minio.version>8.5.12</minio.version>
+        <awssdk.version>2.25.70</awssdk.version>
         <!-- 统一 grpc 版本，避免 jetcd 与 milvus-sdk 传递依赖冲突 -->
         <grpc.version>1.64.0</grpc.version>
         <dashscope.version>2.22.30</dashscope.version>
+        <flyway.version>10.21.0</flyway.version>
     </properties>
 
     <dependencyManagement>
@@ -61,6 +63,11 @@
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-data-redis</artifactId>
         </dependency>
+        <!-- WebSocket：转码进度实时推送 -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-websocket</artifactId>
+        </dependency>
         <dependency>
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-amqp</artifactId>
@@ -68,6 +75,17 @@
         <dependency>
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-actuator</artifactId>
+        </dependency>
+        <!-- Flyway 10.x：MySQL 支持拆分到独立模块 flyway-mysql -->
+        <dependency>
+            <groupId>org.flywaydb</groupId>
+            <artifactId>flyway-core</artifactId>
+            <version>${flyway.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>org.flywaydb</groupId>
+            <artifactId>flyway-mysql</artifactId>
+            <version>${flyway.version}</version>
         </dependency>
 
         <dependency>
@@ -84,6 +102,17 @@
             <groupId>io.minio</groupId>
             <artifactId>minio</artifactId>
             <version>${minio.version}</version>
+        </dependency>
+        <!-- MinIO 原生 Multipart（S3 兼容接口）：大文件分片上传；minio-java 未暴露分片 API，故用 AWS SDK v2 -->
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
+            <artifactId>s3</artifactId>
+            <version>${awssdk.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
+            <artifactId>url-connection-client</artifactId>
+            <version>${awssdk.version}</version>
         </dependency>
         <dependency>
             <groupId>io.milvus</groupId>

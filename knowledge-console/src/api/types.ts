@@ -178,11 +178,13 @@ export type KbUpdateReq = Partial<Omit<KbCreateReq, 'name'>> & { name?: string }
 
 // ---- 文档 ----
 export type DocumentStatus =
+  | 'UPLOADED'
   | 'PARSING'
   | 'CHUNKING'
   | 'EMBEDDING'
   | 'INDEXING'
   | 'READY'
+  | 'STOPPED'
   | 'FAILED';
 
 export interface DocumentItem {
@@ -318,7 +320,10 @@ export interface ChatSessionDetail {
 
 export interface PromptTemplate {
   id: number;
-  kbId: number;
+  /** 知识库ID，非知识库模板（如字幕翻译）为 null */
+  kbId: number | null;
+  /** 模板分类：null=知识库问答，SUBTITLE=字幕翻译 */
+  category: string | null;
   name: string;
   content: string;
   isDefault: boolean;
@@ -352,4 +357,90 @@ export interface GeneratedImage {
   createdAt: string | null;
   /** 文件字节大小，历史行首次加载后由后端懒回填 */
   fileSize: number | null;
+}
+
+// ---- 字幕转换 ----
+export interface SubtitleCue {
+  index: number;
+  /** SRT 时间轴，HH:MM:SS,mmm */
+  start: string;
+  end: string;
+  text: string;
+  /** 翻译后的文本，未翻译为 null */
+  translated?: string | null;
+}
+
+export interface Subtitle {
+  id: number;
+  originalName: string;
+  sourceLang: string | null;
+  targetLang: string | null;
+  cues: SubtitleCue[];
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface SubtitleListItem {
+  id: number;
+  originalName: string;
+  sourceLang: string | null;
+  targetLang: string | null;
+  cueCount: number;
+  updatedAt: string;
+}
+
+export interface SubtitleUpdateReq {
+  cues: SubtitleCue[];
+}
+
+/** 翻译请求：targetLang 为维护列表中的语言名，indices 为勾选的序号（1 起），为空时翻译全部条目 */
+export interface SubtitleTranslateReq {
+  targetLang: string;
+  indices?: number[];
+}
+
+/** 翻译目标语言（租户级维护） */
+export interface TranslateLang {
+  id: number;
+  name: string;
+}
+
+/** 文件库条目 */
+export interface LibraryFile {
+  id: number;
+  fileName: string;
+  contentType: string | null;
+  fileSize: number;
+  subtitleId: number | null;
+  /** 业务类型：SUBTITLE=字幕文件（条目编辑器），IMAGE=AI图片（图片预览），OTHER=其他文件（只读文本） */
+  bizType: 'SUBTITLE' | 'IMAGE' | 'OTHER' | string;
+  /** 文件库中是否允许删除（字幕翻译保存归档与直接上传可删，其余不可删） */
+  deletable: boolean;
+  /** 转码状态：NONE/PROCESSING/READY/FAILED（仅视频文件有值） */
+  playbackStatus: string | null;
+  /** 转码进度 0-100（PROCESSING 时有效） */
+  playbackProgress: number | null;
+  updatedAt: string;
+}
+
+/** 分片上传初始化响应 */
+export interface UploadInitResp {
+  sessionId: number;
+  chunkSize: number;
+}
+
+/** 在线播放准备结果：status=NONE/PROCESSING/READY/FAILED/NATIVE；hls=true 表示产物为 HLS；progress 为转码进度 */
+export interface PlaybackState {
+  status: 'NONE' | 'PROCESSING' | 'READY' | 'FAILED' | 'NATIVE';
+  hls: boolean;
+  progress: number | null;
+}
+
+/** 分片会话视图（断点续传：按 uploadedParts 跳过已传分片） */
+export interface UploadSessionView {
+  sessionId: number;
+  status: string;
+  chunkSize: number;
+  totalChunks: number;
+  uploadedParts: number[];
 }

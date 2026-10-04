@@ -5,6 +5,7 @@ import com.rabbitmq.client.Channel;
 import com.rag.worker.mq.RetryPublisher;
 import com.rag.worker.mq.TenantMqSemaphore;
 import com.rag.worker.pipeline.PipelineProcessor;
+import com.rag.worker.pipeline.StoppedException;
 import com.rag.worker.infrastructure.persistence.entity.DocumentEntity;
 import com.rag.worker.infrastructure.persistence.entity.PipelineTaskEntity;
 import com.rag.worker.infrastructure.persistence.mapper.DocumentMapper;
@@ -79,6 +80,12 @@ public class IngestConsumer {
             taskMapper.updateById(task);
             channel.basicAck(tag, false);
             log.info("任务成功 task={}", msg.taskId());
+        } catch (StoppedException e) {
+            // 用户主动停止：任务置 CANCELLED，直接 ack，不进入重试
+            task.setStatus("CANCELLED");
+            taskMapper.updateById(task);
+            channel.basicAck(tag, false);
+            log.info("任务已被用户停止 task={}", msg.taskId());
         } catch (Exception e) {
             handleFailure(msg, task, e, channel, tag);
         } finally {

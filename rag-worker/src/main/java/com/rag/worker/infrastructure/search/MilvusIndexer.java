@@ -106,6 +106,12 @@ public class MilvusIndexer {
         return null;
     }
 
+    /**
+     * 单批写入上限：1024 维单向量约 4KB，500 条约 2MB，
+     * 避免一次性写入过多向量超过 gRPC 默认 64MB 消息上限（RESOURCE_EXHAUSTED）。
+     */
+    private static final int INSERT_BATCH = 500;
+
     public void insert(String collection, List<long[]> ids, List<float[]> vectors) {
         List<JsonObject> rows = new ArrayList<>(ids.size());
         for (int i = 0; i < ids.size(); i++) {
@@ -119,7 +125,11 @@ public class MilvusIndexer {
             row.add("vector", vec);
             rows.add(row);
         }
-        client().insert(InsertReq.builder().collectionName(collection).data(rows).build());
+        for (int from = 0; from < rows.size(); from += INSERT_BATCH) {
+            int to = Math.min(from + INSERT_BATCH, rows.size());
+            client().insert(InsertReq.builder().collectionName(collection)
+                    .data(rows.subList(from, to)).build());
+        }
     }
 
     public void deleteByDocument(String collection, long documentId) {

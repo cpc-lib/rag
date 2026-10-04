@@ -1,10 +1,15 @@
 spring:
+  servlet:
+    multipart:
+      enabled: true
+      max-file-size: 500MB
+      max-request-size: 500MB
   application:
     name: rag-worker
   main:
     web-application-type: none
   datasource:
-    url: jdbc:mysql://${MYSQL_HOST:192.168.1.200}:${MYSQL_PORT:3306}/${MYSQL_DB:rag_demo}?serverTimezone=Asia/Shanghai&useUnicode=true&characterEncoding=UTF-8&useSSL=false&allowPublicKeyRetrieval=true
+    url: jdbc:mysql://${MYSQL_HOST:192.168.1.200}:${MYSQL_PORT:3306}/${MYSQL_DB:rag}?serverTimezone=Asia/Shanghai&useUnicode=true&characterEncoding=UTF-8&useSSL=false&allowPublicKeyRetrieval=true
     username: ${MYSQL_USER:root}
     password: ${MYSQL_PASSWORD:rag123456}
     driver-class-name: com.mysql.cj.jdbc.Driver
@@ -36,6 +41,11 @@ rag:
     queue: rag.ingest.parse
     retry-queue: rag.ingest.retry
     dlq-queue: rag.ingest.dlq
+    media-queue: rag.media.transcode
+  media:
+    # ffmpeg 可执行文件路径（文件库视频转 HLS；ffprobe 取同目录）。
+    # 固定用 7.1 构建：9.x 要求 NVENC API 13.1（驱动 610+），M4000 驱动最高 582 只提供 13.0，会报 "Function not implemented"
+    ffmpeg-path: ${FFMPEG_PATH:D:\release\rag\tools\ffmpeg-7.1\bin\ffmpeg.exe}
   minio:
     endpoint: http://${MIDDLEWARE_HOST:192.168.1.200}:${MINIO_PORT:9000}
     access-key: ${MINIO_USER:minioadmin}

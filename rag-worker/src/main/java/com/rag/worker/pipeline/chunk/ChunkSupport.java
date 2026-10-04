@@ -176,6 +176,9 @@ public class ChunkSupport {
             i++;
         }
         flushParagraphs(page, para, out);
+        // flush 后必须清空：extractBlocks 在每个代码围栏前都会调用本方法，
+        // 不清空会导致历史行在下一次 flush 时被重复输出（前缀雪崩）
+        lines.clear();
     }
 
     private void flushParagraphs(int page, List<String> lines, List<Block> out) {

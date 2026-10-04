@@ -47,6 +47,7 @@ public class ImageGenerationService {
     private final ZImageClient zImageClient;
     private final MinioStorage minio;
     private final UserManageService userManageService;
+    private final FileLibraryService fileLibraryService;
 
     public ImageView generate(String prompt, String size, Long seed) {
         TenantContext.Session s = TenantContext.require();
@@ -81,6 +82,14 @@ public class ImageGenerationService {
         e.setFileSize((long) bytes.length);
         e.setStatus("SUCCESS");
         imageMapper.insert(e);
+
+        // 同步登记到文件库（复用同一 MinIO 对象，不重复存储）；归档失败不阻断生成结果
+        try {
+            fileLibraryService.archiveImage(s.tenantId(), s.userId(), e.getId(),
+                    "ai-image-" + e.getId() + ".png", objectKey, "image/png", (long) bytes.length);
+        } catch (Exception ex) {
+            log.warn("图片归档文件库失败（不影响生成结果）: {}", ex.getMessage());
+        }
         return toView(e);
     }
 
