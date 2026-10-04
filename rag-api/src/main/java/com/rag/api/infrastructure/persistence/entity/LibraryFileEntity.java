@@ -3,6 +3,7 @@ package com.rag.api.infrastructure.persistence.entity;
 import com.baomidou.mybatisplus.annotation.IdType;
 import com.baomidou.mybatisplus.annotation.TableId;
 import com.baomidou.mybatisplus.annotation.TableName;
+import com.baomidou.mybatisplus.annotation.TableLogic;
 import lombok.Data;
 
 import java.time.LocalDateTime;
@@ -33,8 +34,17 @@ public class LibraryFileEntity {
     private String playbackStatus;
     /** 转码进度 0-100（PROCESSING 时有效）。 */
     private Integer playbackProgress;
+    /** 视频宽度（像素，转码探测写入）。 */
+    private Integer videoWidth;
+    /** 视频高度（像素，转码探测写入）。 */
+    private Integer videoHeight;
     private String contentType;
     private Long fileSize;
+    /** 文件内容 SHA-256（hex），秒传匹配依据。 */
+    private String sha256;
     private LocalDateTime createdAt;
     private LocalDateTime updatedAt;
+    /** 逻辑删除：0=正常 1=已删除。 */
+    @TableLogic
+    private Integer deleted;
 }

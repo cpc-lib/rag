@@ -40,7 +40,7 @@ export default function ToolConfigPage() {
       form.setFieldsValue({
         weatherEnabled: !!cfg.weatherEnabled,
         tavilyEnabled: !!cfg.tavilyEnabled,
-        tavilyApiKey: '',
+        tavilyApiKey: cfg.tavilyApiKey ?? '',
       });
     } finally {
       setLoading(false);
@@ -77,22 +77,21 @@ export default function ToolConfigPage() {
     tavilyApiKey?: string;
   }) => {
     // 前端提前校验（后端同样强校验）
-    if (v.tavilyEnabled && !v.tavilyApiKey?.trim() && !masked?.tavilyApiKeyConfigured) {
+    if (v.tavilyEnabled && !v.tavilyApiKey?.trim()) {
       message.warning('启用 Tavily 前请先配置 API Key');
       return;
     }
     const req: ToolConfigReq = {
       weatherEnabled: v.weatherEnabled,
       tavilyEnabled: v.tavilyEnabled,
+      // 回填了真实值，原样提交；用户清空则表示删除 Key
+      tavilyApiKey: v.tavilyApiKey?.trim() ?? '',
     };
-    const key = v.tavilyApiKey?.trim();
-    if (key) req.tavilyApiKey = key;
 
     setSaving(true);
     try {
       const updated = await toolConfigApi.update(req);
       setMasked(updated);
-      form.setFieldValue('tavilyApiKey', '');
       message.success('工具配置已保存');
     } finally {
       setSaving(false);
@@ -182,7 +181,8 @@ export default function ToolConfigPage() {
                   style={{ marginTop: 16, marginBottom: 0 }}
                 >
                   <Input.Password
-                    placeholder={masked?.tavilyApiKeyConfigured ? '已配置，留空不修改' : '请输入 Tavily API Key'}
+                    placeholder="请输入 Tavily API Key"
+                    visibilityToggle
                   />
                 </Form.Item>
               )}

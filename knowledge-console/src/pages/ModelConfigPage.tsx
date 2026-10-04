@@ -14,6 +14,7 @@ import {
   Tag,
   Typography,
 } from 'antd';
+import { ReloadOutlined } from '@ant-design/icons';
 import type { TableProps } from 'antd';
 import { modelApi } from '../api/modelConfig';
 import type { ModelItem, ModelReq, ModelType } from '../api/types';
@@ -224,9 +225,14 @@ export default function ModelConfigPage() {
         <Typography.Title level={4} style={{ margin: 0 }}>
           模型参数
         </Typography.Title>
-        <Button type="primary" onClick={openCreate}>
-          新增模型
-        </Button>
+        <Space size={8}>
+          <Button icon={<ReloadOutlined />} loading={loading} onClick={() => refresh()}>
+            刷新
+          </Button>
+          <Button type="primary" onClick={openCreate}>
+            新增模型
+          </Button>
+        </Space>
       </Space>
 
       <Table<ModelItem>

@@ -13,10 +13,11 @@ import org.springframework.amqp.rabbit.annotation.RabbitListener;
 import org.springframework.stereotype.Component;
 
 import java.io.IOException;
+import java.util.concurrent.Executor;
 
 /**
- * 媒体转码消费者：文件库视频 → FFmpeg 转 HLS。
- * 手动 ack；失败置 FAILED 不重试（用户重新点击播放会再次投递）。
+ * 媒体转码消费者：收到消息立即 ack，提交 mediaTranscodeExecutor 异步执行；
+ * 文件库视频 → FFmpeg 转 HLS。失败置 FAILED 不重试（用户重新点击播放会再次投递）。
  */
 @Slf4j
 @Component
@@ -31,6 +32,7 @@ public class MediaTranscodeConsumer {
     private final MediaTranscodeService transcodeService;
     private final LibraryFileMapper libraryFileMapper;
     private final MediaProgressPublisher progressPublisher;
+    private final Executor mediaTranscodeExecutor;
 
     @RabbitListener(queues = "${rag.mq.media-queue}", containerFactory = "ingestFactory")
     public void onMessage(Message message, Channel channel) throws IOException {
@@ -43,24 +45,29 @@ public class MediaTranscodeConsumer {
             channel.basicAck(tag, false);
             return;
         }
-        log.info("收到媒体转码任务 fileId={}", msg.fileId());
+        // 立即 ack：ffmpeg 转码是分钟级阻塞操作，若等转码完再 ack 会触发 RabbitMQ
+        // consumer_timeout（默认 30 分钟）关闭通道并重新投递，导致任务从头重复执行。
+        // 幂等性由 DB 状态保证（PROCESSING 状态下重复投递会被忽略）。
+        channel.basicAck(tag, false);
+        log.info("收到媒体转码任务 fileId={}，已确认，异步执行", msg.fileId());
+        mediaTranscodeExecutor.execute(() -> doTranscode(msg.fileId()));
+    }
+
+    private void doTranscode(long fileId) {
         try {
-            transcodeService.transcode(msg.fileId());
-            channel.basicAck(tag, false);
+            transcodeService.transcode(fileId);
         } catch (MediaTranscodeService.StoppedException e) {
             // 用户主动停止：状态已由 API 置 NONE，只广播事件同步界面，不置 FAILED
-            log.info("转码已被用户停止 fileId={}", msg.fileId());
-            progressPublisher.publish(msg.fileId(), "NONE", 0);
-            channel.basicAck(tag, false);
+            log.info("转码已被用户停止 fileId={}", fileId);
+            progressPublisher.publish(fileId, "NONE", 0);
         } catch (Exception e) {
-            log.error("媒体转码失败 fileId={}: {}", msg.fileId(), e.getMessage(), e);
-            LibraryFileEntity entity = libraryFileMapper.selectById(msg.fileId());
+            log.error("媒体转码失败 fileId={}: {}", fileId, e.getMessage(), e);
+            LibraryFileEntity entity = libraryFileMapper.selectById(fileId);
             if (entity != null) {
                 entity.setPlaybackStatus("FAILED");
                 libraryFileMapper.updateById(entity);
-                progressPublisher.publish(msg.fileId(), "FAILED", null);
+                progressPublisher.publish(fileId, "FAILED", null);
             }
-            channel.basicAck(tag, false);
         }
     }
 }

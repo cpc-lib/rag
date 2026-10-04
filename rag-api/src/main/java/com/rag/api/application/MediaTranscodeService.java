@@ -40,21 +40,22 @@ public class MediaTranscodeService {
         this.objectMapper = objectMapper;
     }
 
-    /** 查询播放状态（纯查询，不触发转码）：NONE/PROCESSING/READY/FAILED，非视频返回 NATIVE。 */
+    /** 查询播放状态（纯查询，不触发转码）：NONE/PROCESSING/READY/FAILED，非视频返回 NATIVE。positionMs 由 FileLibraryService 填充。 */
     public Dtos.PlaybackResp playbackStatus(LibraryFileEntity e) {
         if (!isVideo(e.getFileName())) {
-            return new Dtos.PlaybackResp("NATIVE", false, null);
+            return new Dtos.PlaybackResp("NATIVE", false, null, null, null, null);
         }
         String status = e.getPlaybackStatus() == null ? "NONE" : e.getPlaybackStatus();
         boolean hls = ST_READY.equals(status) && e.getPlaybackKey() != null
                 && e.getPlaybackKey().endsWith(".m3u8");
-        return new Dtos.PlaybackResp(status, hls, e.getPlaybackProgress());
+        return new Dtos.PlaybackResp(status, hls, e.getPlaybackProgress(), null,
+                e.getVideoWidth(), e.getVideoHeight());
     }
 
     /** 开始/重新转码（幂等）：视频且非 PROCESSING 时置 PROCESSING 并投递 MQ。 */
     public Dtos.PlaybackResp startTranscode(LibraryFileEntity e) {
         if (!isVideo(e.getFileName())) {
-            return new Dtos.PlaybackResp("NATIVE", false, null);
+            return new Dtos.PlaybackResp("NATIVE", false, null, null, null, null);
         }
         if (!ST_PROCESSING.equals(e.getPlaybackStatus())) {
             e.setPlaybackStatus(ST_PROCESSING);

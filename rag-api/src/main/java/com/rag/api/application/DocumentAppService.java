@@ -8,6 +8,7 @@ import com.rag.api.common.BizException;
 import com.rag.api.common.ErrorCode;
 import com.rag.api.common.TenantContext;
 import com.rag.api.infrastructure.mq.IngestPublisher;
+import com.rag.api.infrastructure.mq.Sha256Publisher;
 import com.rag.api.infrastructure.persistence.entity.ChunkEntity;
 import com.rag.api.infrastructure.persistence.entity.DocumentEntity;
 import com.rag.api.infrastructure.persistence.entity.KnowledgeBaseEntity;
@@ -52,6 +53,65 @@ public class DocumentAppService {
     private final IngestPublisher publisher;
     private final ObjectMapper objectMapper;
     private final FileLibraryService fileLibraryService;
+    private final Sha256Publisher sha256Publisher;
+
+
+    /**
+     * 知识库文档上传前置校验：租户管理员权限 + 扩展名白名单 + 存储配额。
+     * 返回 kb 归属校验后的实体（供 objectKey 生成）。
+     */
+    public KnowledgeBaseEntity checkKbUpload(long kbId, String fileName, long fileSize) {
+        TenantContext.Session s = TenantContext.require();
+        if (s.userType() != 1) {
+            throw BizException.forbidden("仅租户管理员可上传文档");
+        }
+        KnowledgeBaseEntity kb = knowledgeBaseService.getOwned(kbId);
+        String ext = extOf(fileName);
+        if (!ALLOWED_EXT.contains(ext)) {
+            throw BizException.badRequest("不支持的文件类型: " + ext + "（允许: txt/md/html/pdf/docx/xlsx/png/jpg/jpeg）");
+        }
+        quotaService.checkStorage(s.tenantId(), fileSize);
+        return kb;
+    }
+
+    /** 秒传查询：同租户同知识库下相同 SHA-256 的文档（取最新一条），命中则无需重复上传。 */
+    public DocumentEntity findKbDocBySha256(String tenantId, long kbId, String sha256) {
+        return documentMapper.selectOne(new QueryWrapper<DocumentEntity>()
+                .eq("tenant_id", tenantId)
+                .eq("kb_id", kbId)
+                .eq("sha256", sha256)
+                .orderByDesc("id")
+                .last("LIMIT 1"));
+    }
+
+    /**
+     * 分片上传完成后登记文档（对象已在 MinIO 合并完成）：创建 document 记录 + 归档到文件库。
+     */
+    public DocumentEntity completeKbChunkUpload(long kbId, String fileName, String objectKey,
+                                                String contentType, long fileSize, String sha256) {
+        TenantContext.Session s = TenantContext.require();
+        KnowledgeBaseEntity kb = knowledgeBaseService.getOwned(kbId);
+        DocumentEntity doc = new DocumentEntity();
+        doc.setKbId(kb.getId());
+        doc.setTenantId(s.tenantId());
+        doc.setFileName(fileName);
+        doc.setObjectKey(objectKey);
+        doc.setFileSize(fileSize);
+        doc.setSha256(sha256);
+        doc.setMimeType(contentType);
+        doc.setStatus("UPLOADED");
+        doc.setProgress(0);
+        doc.setPageCount(0);
+        documentMapper.insert(doc);
+        log.info("文档已分片上传（待处理） doc={} file={}", doc.getId(), fileName);
+        try {
+            fileLibraryService.archiveDocument(s.tenantId(), s.userId(), doc.getId(), fileName,
+                    objectKey, contentType, fileSize, sha256);
+        } catch (Exception ex) {
+            log.warn("文档归档到文件库失败 doc={} err={}", doc.getId(), ex.getMessage());
+        }
+        return doc;
+    }
 
     public DocumentEntity upload(long kbId, MultipartFile file) {
         TenantContext.Session s = TenantContext.require();
@@ -90,10 +150,12 @@ public class DocumentAppService {
         doc.setPageCount(0);
         documentMapper.insert(doc);
         log.info("文档已上传（待处理） doc={} file={}", doc.getId(), fileName);
-        // 文件库登记：与文档共用同一 MinIO 对象，失败不阻断上传
+        // 异步计算 SHA-256 指纹（大文件不阻塞上传响应），Worker 回写后支持秒传
+        sha256Publisher.publish(new Sha256Publisher.Sha256Message("DOCUMENT", doc.getId(), objectKey));
+        // 文件库登记：与文档共用同一 MinIO 对象，失败不阻断上传；sha256 由 MQ 异步回填
         try {
             fileLibraryService.archiveDocument(s.tenantId(), s.userId(), doc.getId(), fileName,
-                    objectKey, file.getContentType(), file.getSize());
+                    objectKey, file.getContentType(), file.getSize(), null);
         } catch (Exception ex) {
             log.warn("文档归档到文件库失败 doc={} err={}", doc.getId(), ex.getMessage());
         }

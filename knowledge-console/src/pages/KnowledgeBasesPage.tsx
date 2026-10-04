@@ -13,7 +13,7 @@ import {
   Tag,
   Typography,
 } from 'antd';
-import { PlusOutlined, ArrowRightOutlined } from '@ant-design/icons';
+import { PlusOutlined, ArrowRightOutlined, ReloadOutlined } from '@ant-design/icons';
 import { useNavigate } from 'react-router-dom';
 import { kbApi } from '../api/knowledgeBases';
 import type { KbCreateReq, KnowledgeBase } from '../api/types';
@@ -243,9 +243,14 @@ export default function KnowledgeBasesPage() {
         <Typography.Title level={4} style={{ margin: 0 }}>
           知识库管理
         </Typography.Title>
-        <Button type="primary" icon={<PlusOutlined />} onClick={() => setCreateOpen(true)}>
-          新建知识库
-        </Button>
+        <Space size={8}>
+          <Button icon={<ReloadOutlined />} loading={loading} onClick={load}>
+            刷新
+          </Button>
+          <Button type="primary" icon={<PlusOutlined />} onClick={() => setCreateOpen(true)}>
+            新建知识库
+          </Button>
+        </Space>
       </Space>
       <Table rowKey="id" loading={loading} columns={columns} dataSource={data} pagination={false} bordered />
 
@@ -256,7 +261,7 @@ export default function KnowledgeBasesPage() {
         onOk={handleCreate}
         confirmLoading={saving}
         okText="创建"
-        destroyOnClose
+        destroyOnHidden
       >
         <Form
           form={createForm}
@@ -286,7 +291,7 @@ export default function KnowledgeBasesPage() {
         onOk={handleEdit}
         confirmLoading={saving}
         okText="保存"
-        destroyOnClose
+        destroyOnHidden
       >
         <Form form={editForm} layout="vertical">
           <Form.Item name="name" label="名称" rules={[{ required: true }]}>

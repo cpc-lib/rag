@@ -56,6 +56,7 @@ public class PipelineProcessor {
     private final KnowledgeBaseMapper kbMapper;
     private final ModelMapper modelMapper;
     private final ObjectMapper objectMapper;
+    private final DocProgressPublisher docProgressPublisher;
 
     public void process(RetryPublisher.IngestMessage msg, PipelineTaskEntity task) {
         DocumentEntity doc = documentMapper.selectById(msg.documentId());
@@ -328,5 +329,6 @@ public class PipelineProcessor {
         doc.setStatus(status);
         doc.setProgress(progress);
         documentMapper.updateById(doc);
+        docProgressPublisher.publish(doc.getId(), status, progress);
     }
 }

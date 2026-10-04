@@ -2,10 +2,11 @@ import { http, unwrap } from './client';
 import type { Subtitle, SubtitleListItem, SubtitleTranslateReq, SubtitleUpdateReq, TranslateLang } from './types';
 
 export const subtitleApi = {
-  /** 上传字幕文件（.vtt/.srt/.ass，服务端先做格式规范校验），返回解析后的 SRT 视图 */
-  upload: (file: File) => {
+  /** 上传字幕文件（.vtt/.srt/.ass，服务端先做格式规范校验），sha256 用于秒传去重 */
+  upload: (file: File, sha256?: string) => {
     const form = new FormData();
     form.append('file', file);
+    if (sha256) form.append('sha256', sha256);
     return unwrap<Subtitle>(
       http.post('/subtitles', form, {
         headers: { 'Content-Type': 'multipart/form-data' },

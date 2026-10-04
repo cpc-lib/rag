@@ -226,6 +226,7 @@ export interface Chunk {
 export interface ToolConfigMasked {
   weatherEnabled: boolean | null;
   tavilyEnabled: boolean | null;
+  tavilyApiKey: string | null;
   tavilyApiKeyConfigured: boolean;
 }
 
@@ -268,9 +269,6 @@ export interface QuotaUsage {
   storageMaxMb: number | null;
   tokensUsedThisMonth: number;
   tokensMaxThisMonth: number | null;
-  sseCurrentConnections: number;
-  sseMaxConnections: number | null;
-  mqConcurrencyMax: number | null;
 }
 
 // ---- SSE 问答 ----
@@ -423,17 +421,34 @@ export interface LibraryFile {
   updatedAt: string;
 }
 
-/** 分片上传初始化响应 */
+/** 分片上传初始化响应：instant=true 表示秒传命中（file 为已入库条目），无需再传分片 */
 export interface UploadInitResp {
+  instant: boolean;
   sessionId: number;
   chunkSize: number;
+  file: LibraryFile | null;
 }
 
-/** 在线播放准备结果：status=NONE/PROCESSING/READY/FAILED/NATIVE；hls=true 表示产物为 HLS；progress 为转码进度 */
+/** 在线播放准备结果：status=NONE/PROCESSING/READY/FAILED/NATIVE；hls=true 表示产物为 HLS；progress 为转码进度；positionMs 为当前用户播放进度（毫秒）；videoWidth/videoHeight 为分辨率 */
 export interface PlaybackState {
   status: 'NONE' | 'PROCESSING' | 'READY' | 'FAILED' | 'NATIVE';
   hls: boolean;
   progress: number | null;
+  positionMs: number | null;
+  videoWidth: number | null;
+  videoHeight: number | null;
+}
+
+/** 视频播放记录视图（每次播放会话一条记录） */
+export interface PlaybackHistory {
+  id: number;
+  fileId: number;
+  fileName: string;
+  positionMs: number;
+  durationMs: number;
+  fileSize: number;
+  playbackStatus: string;
+  updatedAt: string;
 }
 
 /** 分片会话视图（断点续传：按 uploadedParts 跳过已传分片） */

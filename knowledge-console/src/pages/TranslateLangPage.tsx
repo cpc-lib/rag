@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { App, AutoComplete, Button, Card, Popconfirm, Space, Table, Typography } from 'antd';
-import { DeleteOutlined, PlusOutlined } from '@ant-design/icons';
+import { DeleteOutlined, PlusOutlined, ReloadOutlined } from '@ant-design/icons';
 import { subtitleApi } from '../api/subtitles';
 import type { TranslateLang } from '../api/types';
 
@@ -58,10 +58,18 @@ export default function TranslateLangPage() {
   };
 
   return (
-    <Card title="目标语言管理" style={{ minHeight: '100%' }}>
+    <Card
+      title="目标语言管理"
+      style={{ minHeight: '100%' }}
+      extra={
+        <Button icon={<ReloadOutlined />} loading={loading} onClick={load}>
+          刷新
+        </Button>
+      }
+    >
       <Space direction="vertical" size={16} style={{ width: '100%' }}>
         <Text type="secondary">
-          维护字幕转换可用的翻译目标语言（租户级）。语言名将直接作为翻译提示词的目标语言传参，至少保留一项。
+          维护字幕转换可用的翻译目标语言（租户级）。语言名将直接作为翻译提示词的目标语言传参。
         </Text>
         <Space.Compact style={{ width: 360, display: 'flex' }}>
           <AutoComplete
@@ -88,7 +96,7 @@ export default function TranslateLangPage() {
               width: 110,
               render: (_, record) => (
                 <Popconfirm title="确认删除该语言？" onConfirm={() => handleDelete(record)}>
-                  <Button type="text" danger size="small" icon={<DeleteOutlined />}>
+                  <Button type="link" danger size="small" icon={<DeleteOutlined />}>
                     删除
                   </Button>
                 </Popconfirm>

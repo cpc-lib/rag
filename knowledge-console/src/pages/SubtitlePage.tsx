@@ -22,6 +22,7 @@ import {
   DeleteOutlined,
   DownloadOutlined,
   FileTextOutlined,
+  ReloadOutlined,
   SaveOutlined,
   SearchOutlined,
   TranslationOutlined,
@@ -29,6 +30,7 @@ import {
 } from '@ant-design/icons';
 import { subtitleApi } from '../api/subtitles';
 import type { Subtitle, SubtitleCue, SubtitleListItem, TranslateLang } from '../api/types';
+import { createSHA256 } from 'hash-wasm';
 
 const { Dragger } = Upload;
 const { Text } = Typography;
@@ -58,6 +60,8 @@ export default function SubtitlePage() {
   /** 右侧字幕条搜索关键字与范围（文本内容/翻译内容） */
   const [cueKw, setCueKw] = useState('');
   const [cueScope, setCueScope] = useState<'text' | 'translated'>('text');
+  /** 正在编辑的字幕条序号：过滤状态下该行即使改后不再命中也保留，避免输入时行突然消失 */
+  const [editingIndex, setEditingIndex] = useState<number | null>(null);
 
   const loadList = async () => {
     setLoadingList(true);
@@ -98,9 +102,11 @@ export default function SubtitlePage() {
     const kw = cueKw.trim().toLowerCase();
     if (!kw) return current.cues;
     return current.cues.filter((c) =>
+      // 正在编辑的行豁免过滤：否则译文/正文一改得不再命中关键字，行会立刻从列表消失
+      c.index === editingIndex ||
       (cueScope === 'text' ? c.text : c.translated ?? '').toLowerCase().includes(kw),
     );
-  }, [current, cueKw, cueScope]);
+  }, [current, cueKw, cueScope, editingIndex]);
 
   const handleUpload = async (file: File) => {
     if (!/\.(vtt|srt|ass)$/i.test(file.name)) {
@@ -109,7 +115,10 @@ export default function SubtitlePage() {
     }
     setUploading(true);
     try {
-      const view = await subtitleApi.upload(file);
+      // 秒传：计算 SHA-256，同文件已存在时后端直接复用
+      const hasher = await createSHA256();
+      hasher.update(new Uint8Array(await file.arrayBuffer()));
+      const view = await subtitleApi.upload(file, hasher.digest('hex'));
       setCurrent(view);
       setSelected(new Set());
       setPage(1);
@@ -268,8 +277,18 @@ export default function SubtitlePage() {
         <Card
           size="small"
           title="历史记录"
+          extra={
+            <Button
+              size="small"
+              icon={<ReloadOutlined />}
+              loading={loadingList}
+              onClick={loadList}
+            >
+              刷新
+            </Button>
+          }
           style={{ flex: 1, overflow: 'auto' }}
-          bodyStyle={{ padding: 0 }}
+          styles={{ body: { padding: 0 } }}
         >
           <div style={{ padding: '8px 12px', borderBottom: '1px solid #f0f0f0' }}>
             <Input
@@ -323,7 +342,7 @@ export default function SubtitlePage() {
                   />
                   <Popconfirm
                     title="删除该字幕记录？"
-                    description="将删除全部字幕条，不可恢复；已归档到文件库的文件会保留"
+                    description="将删除全部字幕条及原始上传文件，不可恢复；翻译后保存到文件库的文件会保留"
                     okText="删除"
                     okButtonProps={{ danger: true }}
                     cancelText="取消"
@@ -331,11 +350,13 @@ export default function SubtitlePage() {
                   >
                     <Button
                       size="small"
-                      type="text"
+                      type="link"
                       danger
                       icon={<DeleteOutlined />}
                       onClick={(e) => e.stopPropagation()}
-                    />
+                    >
+                      删除
+                    </Button>
                   </Popconfirm>
                 </List.Item>
               )}
@@ -390,7 +411,7 @@ export default function SubtitlePage() {
               </Space>
             }
             style={{ height: '100%', overflow: 'auto' }}
-            bodyStyle={{ padding: 0 }}
+            styles={{ body: { padding: 0 } }}
           >
             <div style={{ position: 'sticky', top: 0, zIndex: 2, background: '#fff' }}>
               <div
@@ -471,6 +492,8 @@ export default function SubtitlePage() {
                     onChange={(text) => handleCueTextChange(cue.index, text)}
                     onTranslatedChange={(text) => handleTranslatedChange(cue.index, text)}
                     onCheck={(checked) => handleToggleCue(cue.index, checked)}
+                    onEditFocus={() => setEditingIndex(cue.index)}
+                    onEditBlur={() => setEditingIndex(null)}
                   />
                 ))
             )}
@@ -508,12 +531,16 @@ function CueRow({
   onChange,
   onTranslatedChange,
   onCheck,
+  onEditFocus,
+  onEditBlur,
 }: {
   cue: SubtitleCue;
   checked: boolean;
   onChange: (text: string) => void;
   onTranslatedChange: (text: string) => void;
   onCheck: (checked: boolean) => void;
+  onEditFocus: () => void;
+  onEditBlur: () => void;
 }) {
   return (
     <div
@@ -551,6 +578,8 @@ function CueRow({
         <Input.TextArea
           value={cue.text}
           onChange={(e) => onChange(e.target.value)}
+          onFocus={onEditFocus}
+          onBlur={onEditBlur}
           autoSize={{ minRows: 1, maxRows: 6 }}
           placeholder="字幕文本"
         />
@@ -559,6 +588,8 @@ function CueRow({
         <Input.TextArea
           value={cue.translated ?? ''}
           onChange={(e) => onTranslatedChange(e.target.value)}
+          onFocus={onEditFocus}
+          onBlur={onEditBlur}
           autoSize={{ minRows: 1, maxRows: 6 }}
           placeholder="未翻译"
           style={{ background: '#f6ffed', borderColor: '#b7eb8f' }}

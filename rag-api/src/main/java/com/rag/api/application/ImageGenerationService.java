@@ -5,6 +5,7 @@ import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import com.rag.api.common.BizException;
 import com.rag.api.common.TenantContext;
 import com.rag.api.infrastructure.image.ZImageClient;
+import com.rag.api.infrastructure.mq.Sha256Publisher;
 import com.rag.api.infrastructure.persistence.entity.GeneratedImageEntity;
 import com.rag.api.infrastructure.persistence.entity.ModelEntity;
 import com.rag.api.infrastructure.persistence.mapper.GeneratedImageMapper;
@@ -48,6 +49,7 @@ public class ImageGenerationService {
     private final MinioStorage minio;
     private final UserManageService userManageService;
     private final FileLibraryService fileLibraryService;
+    private final Sha256Publisher sha256Publisher;
 
     public ImageView generate(String prompt, String size, Long seed) {
         TenantContext.Session s = TenantContext.require();
@@ -90,16 +92,20 @@ public class ImageGenerationService {
         } catch (Exception ex) {
             log.warn("图片归档文件库失败（不影响生成结果）: {}", ex.getMessage());
         }
+        // 异步计算 SHA-256 指纹（大文件不阻塞生成响应）
+        sha256Publisher.publish(new Sha256Publisher.Sha256Message(
+                "GENERATED_IMAGE", e.getId(), objectKey));
         return toView(e);
     }
 
-    /** 个人生成历史分页（仅本人可见）。 */
-    public Page<ImageView> page(long current, long size) {
+    /** 个人生成历史分页（仅本人可见）；keyword 非空时按画面描述模糊查询。 */
+    public Page<ImageView> page(long current, long size, String keyword) {
         TenantContext.Session s = TenantContext.require();
         Page<GeneratedImageEntity> p = new Page<>(current, size);
         imageMapper.selectPage(p, new QueryWrapper<GeneratedImageEntity>()
                 .eq("tenant_id", s.tenantId())
                 .eq("user_id", s.userId())
+                .like(keyword != null && !keyword.isBlank(), "prompt", keyword == null ? null : keyword.trim())
                 .orderByDesc("id"));
         Page<ImageView> views = new Page<>(p.getCurrent(), p.getSize(), p.getTotal());
         views.setRecords(p.getRecords().stream().map(e -> {
@@ -109,6 +115,22 @@ public class ImageGenerationService {
             return toView(e);
         }).toList());
         return views;
+    }
+
+    /** 删除本人作品：MinIO 对象 + 作品记录 + 文件库关联条目一并清理。 */
+    public void delete(long id) {
+        TenantContext.Session s = TenantContext.require();
+        GeneratedImageEntity e = imageMapper.selectById(id);
+        if (e == null || !s.tenantId().equals(e.getTenantId()) || e.getUserId() != s.userId()) {
+            throw BizException.notFound("图片不存在");
+        }
+        try {
+            minio.deleteObject(e.getObjectKey());
+        } catch (Exception ex) {
+            log.warn("删除 MinIO 图片失败 key={} err={}", e.getObjectKey(), ex.getMessage());
+        }
+        imageMapper.deleteById(id);
+        fileLibraryService.removeByImage(id);
     }
 
     /** 历史行无大小：查 MinIO 后回写（失败静默，不阻塞列表）。 */

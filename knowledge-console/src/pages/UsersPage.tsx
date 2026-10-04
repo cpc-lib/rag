@@ -283,9 +283,14 @@ export default function UsersPage() {
         <Typography.Title level={4} style={{ margin: 0 }}>
           用户管理
         </Typography.Title>
-        <Button type="primary" icon={<PlusOutlined />} onClick={() => setCreateOpen(true)}>
-          新建用户
-        </Button>
+        <Space size={8}>
+          <Button icon={<ReloadOutlined />} loading={loading} onClick={load}>
+            刷新
+          </Button>
+          <Button type="primary" icon={<PlusOutlined />} onClick={() => setCreateOpen(true)}>
+            新建用户
+          </Button>
+        </Space>
       </Space>
       <Table
         rowKey="id"
@@ -304,7 +309,7 @@ export default function UsersPage() {
         confirmLoading={saving}
         onOk={handleCreate}
         onCancel={() => setCreateOpen(false)}
-        destroyOnClose
+        destroyOnHidden
       >
         <Input
           placeholder="登录账号，2 ~ 50 位"
@@ -325,7 +330,7 @@ export default function UsersPage() {
         confirmLoading={saving}
         onOk={handleMenuSave}
         onCancel={() => setMenuTarget(null)}
-        destroyOnClose
+        destroyOnHidden
       >
         <Checkbox.Group
           value={menuChecked}
@@ -362,7 +367,7 @@ export default function UsersPage() {
         confirmLoading={saving}
         onOk={handleToolSave}
         onCancel={() => setToolTarget(null)}
-        destroyOnClose
+        destroyOnHidden
       >
         <Checkbox.Group
           value={toolChecked}
@@ -402,7 +407,7 @@ export default function UsersPage() {
         confirmLoading={saving}
         onOk={handleGrant}
         onCancel={() => setGrantTarget(null)}
-        destroyOnClose
+        destroyOnHidden
       >
         {kbs.length === 0 ? (
           <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="本租户暂无知识库" />

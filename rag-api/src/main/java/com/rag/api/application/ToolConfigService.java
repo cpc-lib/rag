@@ -66,6 +66,7 @@ public class ToolConfigService {
         Map<String, Object> map = new java.util.LinkedHashMap<>();
         map.put("weatherEnabled", cfg.getWeatherEnabled());
         map.put("tavilyEnabled", cfg.getTavilyEnabled());
+        map.put("tavilyApiKey", cfg.getTavilyApiKey());
         map.put("tavilyApiKeyConfigured", cfg.getTavilyApiKey() != null && !cfg.getTavilyApiKey().isBlank());
         return map;
     }

@@ -1,11 +1,12 @@
-import { useEffect, useState } from 'react';
-import { Card, Col, Progress, Row, Spin, Typography } from 'antd';
+import { useCallback, useEffect, useState } from 'react';
+import { Button, Card, Col, Progress, Row, Spin, Typography } from 'antd';
+import { ReloadOutlined } from '@ant-design/icons';
 import { quotaApi } from '../api/quotas';
 import type { QuotaUsage } from '../api/types';
 
 function percent(used: number, max: number | null): number {
   if (max == null || max <= 0) return 0;
-  return Math.min(100, Math.round((used / max) * 100));
+  return Math.min(100, (used / max) * 100);
 }
 
 const formatNumber = (n: number | null | undefined) =>
@@ -16,70 +17,57 @@ export default function QuotaPage() {
   const [usage, setUsage] = useState<QuotaUsage | null>(null);
   const [loading, setLoading] = useState(true);
 
-  useEffect(() => {
+  const load = useCallback(() => {
+    setLoading(true);
     quotaApi
       .usage()
       .then(setUsage)
       .finally(() => setLoading(false));
   }, []);
 
-  if (loading || !usage) {
+  useEffect(() => {
+    load();
+  }, [load]);
+
+  if (loading && !usage) {
     return <Spin style={{ width: '100%', marginTop: 120 }} size="large" />;
+  }
+
+  if (!usage) {
+    return null;
   }
 
   return (
     <div>
-      <Typography.Title level={4}>配额用量</Typography.Title>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+        <Typography.Title level={4}>配额用量</Typography.Title>
+        <Button icon={<ReloadOutlined />} loading={loading} onClick={load}>
+          刷新
+        </Button>
+      </div>
       <Row gutter={[16, 16]}>
-        <Col xs={24} sm={12} xl={6}>
+        <Col xs={24} sm={12}>
           <Card title="对象存储" size="small">
             <Progress
               type="dashboard"
               percent={percent(usage.storageUsedMb, usage.storageMaxMb)}
-              format={() => `${percent(usage.storageUsedMb, usage.storageMaxMb)}%`}
+              format={() => `${percent(usage.storageUsedMb, usage.storageMaxMb).toFixed(4)}%`}
             />
             <Typography.Paragraph type="secondary" style={{ marginTop: 12, marginBottom: 0 }}>
               {usage.storageUsedMb} MB / {formatNumber(usage.storageMaxMb)} MB
             </Typography.Paragraph>
           </Card>
         </Col>
-        <Col xs={24} sm={12} xl={6}>
+        <Col xs={24} sm={12}>
           <Card title="LLM Token（本月）" size="small">
             <Progress
               type="dashboard"
               percent={percent(usage.tokensUsedThisMonth, usage.tokensMaxThisMonth)}
               strokeColor="#52c41a"
-              format={() => `${percent(usage.tokensUsedThisMonth, usage.tokensMaxThisMonth)}%`}
+              format={() => `${percent(usage.tokensUsedThisMonth, usage.tokensMaxThisMonth).toFixed(4)}%`}
             />
             <Typography.Paragraph type="secondary" style={{ marginTop: 12, marginBottom: 0 }}>
               {formatNumber(usage.tokensUsedThisMonth)} / {formatNumber(usage.tokensMaxThisMonth)}
-            </Typography.Paragraph>
-          </Card>
-        </Col>
-        <Col xs={24} sm={12} xl={6}>
-          <Card title="SSE 并发连接" size="small">
-            <Progress
-              type="dashboard"
-              percent={percent(usage.sseCurrentConnections, usage.sseMaxConnections)}
-              strokeColor="#faad14"
-              format={() => `${usage.sseCurrentConnections}`}
-            />
-            <Typography.Paragraph type="secondary" style={{ marginTop: 12, marginBottom: 0 }}>
-              当前 {usage.sseCurrentConnections} / 上限 {formatNumber(usage.sseMaxConnections)}
-            </Typography.Paragraph>
-          </Card>
-        </Col>
-        <Col xs={24} sm={12} xl={6}>
-          <Card title="MQ 任务并发额度" size="small">
-            <Progress
-              type="dashboard"
-              percent={100}
-              strokeColor="#722ed1"
-              showInfo={false}
-              format={() => ''}
-            />
-            <Typography.Paragraph type="secondary" style={{ marginTop: 12, marginBottom: 0 }}>
-              最大并发：{formatNumber(usage.mqConcurrencyMax)}
             </Typography.Paragraph>
           </Card>
         </Col>

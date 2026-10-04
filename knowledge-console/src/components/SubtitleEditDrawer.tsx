@@ -2,7 +2,6 @@ import { useEffect, useMemo, useState } from 'react';
 import { App, Button, Drawer, Empty, Input, Pagination, Select, Spin, Typography } from 'antd';
 import { CopyOutlined, SaveOutlined, SearchOutlined } from '@ant-design/icons';
 import { libraryApi } from '../api/library';
-import { subtitleApi } from '../api/subtitles';
 import type { Subtitle, SubtitleCue } from '../api/types';
 
 const { Text } = Typography;
@@ -43,7 +42,6 @@ const GRID_COLS = '56px 190px 1fr 1fr';
 export default function SubtitleEditDrawer({
   open,
   fileId,
-  subtitleId,
   title,
   onClose,
   onSaved,
@@ -51,7 +49,6 @@ export default function SubtitleEditDrawer({
   open: boolean;
   /** 被查看/覆盖保存的文件库归档文件 ID */
   fileId: number;
-  subtitleId: number;
   title: string;
   onClose: () => void;
   onSaved?: () => void;
@@ -75,10 +72,21 @@ export default function SubtitleEditDrawer({
     setDirty(false);
     setKw('');
     setPage(1);
-    subtitleApi
-      .get(subtitleId)
-      .then((v) => {
-        if (!cancelled) setDetail(v);
+    // 统一走归档文件接口：后端优先返回字幕条备份（字幕主记录删除后仍在），无备份则解析文件自身
+    libraryApi
+      .cues(fileId)
+      .then((cues) => {
+        if (!cancelled) {
+          setDetail({
+            id: fileId,
+            originalName: title,
+            sourceLang: null,
+            targetLang: null,
+            cues,
+            createdAt: '',
+            updatedAt: '',
+          });
+        }
       })
       .finally(() => {
         if (!cancelled) setLoading(false);
@@ -86,7 +94,7 @@ export default function SubtitleEditDrawer({
     return () => {
       cancelled = true;
     };
-  }, [open, subtitleId]);
+  }, [open, fileId, title]);
 
   /** 按检索范围过滤条目，分页作用于过滤结果 */
   const filtered = useMemo(() => {
@@ -144,7 +152,7 @@ export default function SubtitleEditDrawer({
       width="92%"
       open={open}
       onClose={onClose}
-      destroyOnClose
+      destroyOnHidden
       extra={
         <Button
           type={dirty ? 'primary' : 'default'}

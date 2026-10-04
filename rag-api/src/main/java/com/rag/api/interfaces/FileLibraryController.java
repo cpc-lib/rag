@@ -10,8 +10,6 @@ import jakarta.servlet.http.HttpServletResponse;
 import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
 import org.springframework.http.HttpHeaders;
-import org.springframework.http.MediaType;
-import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
@@ -62,6 +60,12 @@ public class FileLibraryController {
         return ApiResult.ok(fileLibraryService.content(id));
     }
 
+    /** 读取归档字幕的可编辑条目：优先字幕条备份（字幕主记录删除后仍可用），无备份则解析文件自身。 */
+    @GetMapping("/{id}/cues")
+    public ApiResult<List<Dtos.SubtitleCue>> cues(@PathVariable long id) {
+        return ApiResult.ok(fileLibraryService.cueViews(id));
+    }
+
     /** 直接编辑归档文件：条目覆盖写回该文件本身（不新增版本）。 */
     @PutMapping("/{id}/content")
     public ApiResult<Dtos.LibraryFileView> saveContent(@PathVariable long id,
@@ -87,6 +91,20 @@ public class FileLibraryController {
         return ApiResult.ok(fileLibraryService.stopTranscode(id));
     }
 
+    /** 保存视频播放进度（当前租户+用户+文件维度 upsert），关闭弹窗或定期上报时调用。 */
+    @PostMapping("/{id}/playback-position")
+    public ApiResult<Void> savePlaybackPosition(@PathVariable long id,
+                                                @RequestBody @Valid Dtos.PlaybackPositionReq req) {
+        fileLibraryService.savePlaybackPosition(id, req.positionMs(), req.durationMs());
+        return ApiResult.ok(null);
+    }
+
+    /** 当前用户的视频播放记录列表（按最近播放倒序，最多 100 条）。 */
+    @GetMapping("/playback-history")
+    public ApiResult<List<Dtos.PlaybackHistoryView>> playbackHistory() {
+        return ApiResult.ok(fileLibraryService.listPlaybackHistory());
+    }
+
     /**
      * HLS 播放产物：master.m3u8 / 子播放列表 / ts 分片，按对象前缀 {objectKey}.hls/ 直读 MinIO。
      * hls.js 经 xhrSetup 注入 Authorization 头鉴权，URL 无需 token 参数。
@@ -105,10 +123,19 @@ public class FileLibraryController {
         }
         response.setContentType(rel.endsWith(".m3u8") ? "application/vnd.apple.mpegurl"
                 : rel.endsWith(".ts") ? "video/mp2t" : "application/octet-stream");
+        // 显式声明分片总长度：避免 chunked 传输下播放器无法预知大小，慢网络中误判加载失败
+        response.setContentLengthLong(minioStorage.statSize(e.getObjectKey() + ".hls/" + rel));
         try (InputStream in = minioStorage.download(e.getObjectKey() + ".hls/" + rel)) {
             in.transferTo(response.getOutputStream());
-        } catch (java.io.IOException ignored) {
-            // hls.js 切换清晰度/暂停/关闭弹窗会主动中断连接，属正常播放行为，静默吞掉
+        } catch (java.io.IOException ex) {
+            // 客户端主动中断（hls.js 切清晰度/跳转/关闭弹窗）属正常行为
+            if (ex.getClass().getSimpleName().contains("ClientAbort")) {
+                return;
+            }
+            // 上游读取中途失败要可见：否则播放器只会拿到被截断的分片并卡在播放中途
+            // （响应已开始写出，状态码无法再改，只能记录日志并结束连接）
+            org.slf4j.LoggerFactory.getLogger(FileLibraryController.class)
+                    .warn("HLS 产物读取中断 file={} rel={}: {}", id, rel, ex.getMessage());
         } catch (Exception ex) {
             // 产物不存在（转码未完成/已清理）
             response.setStatus(HttpServletResponse.SC_NOT_FOUND);
@@ -181,17 +208,21 @@ public class FileLibraryController {
         };
     }
 
+    /** 下载原文件：流式输出（MinIO → 响应流直通，大文件不进内存）。 */
     @GetMapping("/{id}/download")
-    public ResponseEntity<byte[]> download(@PathVariable long id) {
+    public void download(@PathVariable long id, HttpServletResponse response) throws java.io.IOException {
         Dtos.LibraryFileView view = fileLibraryService.get(id);
-        byte[] bytes = fileLibraryService.download(id);
         String encoded = URLEncoder.encode(view.fileName(), StandardCharsets.UTF_8).replace("+", "%20");
-        return ResponseEntity.ok()
-                .header(HttpHeaders.CONTENT_DISPOSITION,
-                        "attachment; filename=\"" + encoded + "\"; filename*=UTF-8''" + encoded)
-                .header(HttpHeaders.CACHE_CONTROL, "no-store")
-                .contentType(MediaType.parseMediaType(
-                        view.contentType() == null ? "application/octet-stream" : view.contentType()))
-                .body(bytes);
+        response.setHeader(HttpHeaders.CONTENT_DISPOSITION,
+                "attachment; filename=\"" + encoded + "\"; filename*=UTF-8''" + encoded);
+        response.setHeader(HttpHeaders.CACHE_CONTROL, "no-store");
+        response.setContentType(view.contentType() == null ? "application/octet-stream" : view.contentType());
+        // 显式声明总大小：否则流式写出走 chunked 传输，浏览器无法显示文件总大小与下载进度
+        response.setContentLengthLong(view.fileSize());
+        try (InputStream in = fileLibraryService.downloadStream(id)) {
+            in.transferTo(response.getOutputStream());
+        } catch (java.io.IOException | IllegalStateException ignored) {
+            // 客户端中途取消下载（ClientAbort/SocketTimeout）属正常行为，静默吞掉
+        }
     }
 }

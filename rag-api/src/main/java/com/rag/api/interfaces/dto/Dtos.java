@@ -195,12 +195,20 @@ public final class Dtos {
     public record SubtitlePromptReq(@NotBlank String content) {
     }
 
-    /** 分片上传初始化请求。 */
-    public record UploadInitReq(@NotBlank String fileName, @Positive long fileSize, String contentType) {
+    /**
+     * 分片上传初始化请求：
+     * biz=LIBRARY（默认，文件库）/ KB_DOCUMENT（知识库文档，此时 kbId 必填）。
+     */
+    public record UploadInitReq(@NotBlank String fileName, @Positive long fileSize, String contentType,
+                                String sha256, String biz, Long kbId) {
     }
 
-    /** 分片上传初始化响应。 */
-    public record UploadInitResp(long sessionId, long chunkSize) {
+    /**
+     * 分片上传初始化响应：
+     * - 秒传命中时 instant=true，sessionId=-1，file 为已入库条目，前端无需再传分片；
+     * - 非秒传时 instant=false，返回 sessionId + chunkSize。
+     */
+    public record UploadInitResp(boolean instant, long sessionId, long chunkSize, LibraryFileView file) {
     }
 
     /** 分片会话视图：断点续传时前端按 uploadedParts 跳过已传分片。 */
@@ -212,7 +220,25 @@ public final class Dtos {
     public record UploadPartResp(int partNumber, String etag) {
     }
 
-    /** 在线播放准备结果：status=NONE/PROCESSING/READY/FAILED/NATIVE；hls=true 表示产物为 HLS（走 /hls/ 接口）；progress 为转码进度 0-100。 */
-    public record PlaybackResp(String status, boolean hls, Integer progress) {
+    /**
+     * 在线播放准备结果：
+     * status=NONE/PROCESSING/READY/FAILED/NATIVE；
+     * hls=true 表示产物为 HLS（走 /hls/ 接口）；
+     * progress 为转码进度 0-100；
+     * positionMs 为当前用户在该视频上的最新播放进度（毫秒，0 表示从头播放或无记录）；
+     * videoWidth/videoHeight 为视频分辨率（转码探测写入，READY 后有效）。
+     */
+    public record PlaybackResp(String status, boolean hls, Integer progress, Long positionMs,
+                               Integer videoWidth, Integer videoHeight) {
+    }
+
+    /** 保存视频播放进度请求：positionMs=当前播放位置（毫秒），durationMs=视频总时长（毫秒）。 */
+    public record PlaybackPositionReq(@NotNull Long positionMs, Long durationMs) {
+    }
+
+    /** 视频播放记录视图：每次播放会话一条记录，按用户维度展示。 */
+    public record PlaybackHistoryView(long id, long fileId, String fileName, long positionMs, long durationMs,
+                                      long fileSize, String playbackStatus,
+                                      java.time.LocalDateTime updatedAt) {
     }
 }

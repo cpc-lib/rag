@@ -154,4 +154,18 @@ public class MinioStorage {
             log.warn("MinIO 删除对象失败: {}", objectKey, e);
         }
     }
+
+    /** 按前缀递归统计真实占用字节数（配额用量展示），异常抛给调用方回退。 */
+    public long sumSizeByPrefix(String prefix) {
+        long[] total = {0};
+        minioClient.listObjects(ListObjectsArgs.builder()
+                        .bucket(bucket).prefix(prefix).recursive(true).build())
+                .forEach(result -> {
+                    try {
+                        total[0] += result.get().size();
+                    } catch (Exception ignored) {
+                    }
+                });
+        return total[0];
+    }
 }

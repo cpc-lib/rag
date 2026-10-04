@@ -3,6 +3,7 @@ package com.rag.api.infrastructure.persistence.entity;
 import com.baomidou.mybatisplus.annotation.IdType;
 import com.baomidou.mybatisplus.annotation.TableId;
 import com.baomidou.mybatisplus.annotation.TableName;
+import com.baomidou.mybatisplus.annotation.TableLogic;
 import lombok.Data;
 
 import java.time.LocalDateTime;
@@ -23,4 +24,7 @@ public class ChatMessageEntity {
     private String citations;
     private Integer tokenUsage;
     private LocalDateTime createdAt;
+    /** 逻辑删除：0=正常 1=已删除。 */
+    @TableLogic
+    private Integer deleted;
 }

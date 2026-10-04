@@ -3,8 +3,13 @@ package com.rag.api.application;
 import com.baomidou.mybatisplus.core.conditions.query.QueryWrapper;
 import com.rag.api.common.BizException;
 import com.rag.api.common.TenantContext;
+import com.rag.api.infrastructure.mq.Sha256Publisher;
 import com.rag.api.infrastructure.persistence.entity.LibraryFileEntity;
+import com.rag.api.infrastructure.persistence.entity.SubtitleCueBackupEntity;
+import com.rag.api.infrastructure.persistence.entity.VideoPlaybackHistoryEntity;
 import com.rag.api.infrastructure.persistence.mapper.LibraryFileMapper;
+import com.rag.api.infrastructure.persistence.mapper.SubtitleCueBackupMapper;
+import com.rag.api.infrastructure.persistence.mapper.VideoPlaybackHistoryMapper;
 import com.rag.api.infrastructure.storage.MinioStorage;
 import com.rag.api.interfaces.dto.Dtos;
 import lombok.RequiredArgsConstructor;
@@ -15,6 +20,8 @@ import org.springframework.web.multipart.MultipartFile;
 import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
 import java.util.List;
+import java.util.Map;
+import java.util.stream.Collectors;
 
 /**
  * 文件库：字幕保存等操作产出的文件归档到 MinIO，元数据落 library_file。
@@ -42,21 +49,28 @@ public class FileLibraryService {
     public static final String SRC_DIRECT = "DIRECT";
 
     private final LibraryFileMapper libraryFileMapper;
+    private final SubtitleCueBackupMapper cueBackupMapper;
+    private final VideoPlaybackHistoryMapper playbackHistoryMapper;
     private final MinioStorage minioStorage;
     private final UserManageService userManageService;
     private final MediaTranscodeService mediaTranscodeService;
+    private final Sha256Publisher sha256Publisher;
 
     /**
      * 字幕保存时归档：每次保存新增一条记录，保留历史版本；MinIO 故障由调用方降级处理。
+     * 保存产物为小文本，后端直接计算 SHA-256 指纹。
      */
     public void saveFromSubtitle(String tenantId, long userId, long subtitleId, String fileName, String srt) {
         archive(tenantId, userId, subtitleId, fileName, "application/x-subrip", SRC_SUBTITLE_SAVE,
-                srt.getBytes(StandardCharsets.UTF_8));
+                srt.getBytes(StandardCharsets.UTF_8), null);
     }
 
-    /** 通用归档：来源文件（原始上传、保存产物等）存 MinIO + 元数据落库，每次新增一条记录，保留历史版本。 */
+    /**
+     * 通用归档：来源文件（原始上传、保存产物等）存 MinIO + 元数据落库，每次新增一条记录，保留历史版本。
+     * sha256 非空（前端已算）直接落库；为空则投递 Worker MQ 异步计算回写。
+     */
     public void archive(String tenantId, long userId, long subtitleId, String fileName, String contentType,
-                        String archiveSource, byte[] bytes) {
+                        String archiveSource, byte[] bytes, String sha256) {
         int dot = fileName.lastIndexOf('.');
         String ext = dot >= 0 ? fileName.substring(dot) : "";
         String objectKey = tenantId + "/library/" + subtitleId + "/" + System.currentTimeMillis() + ext;
@@ -71,7 +85,11 @@ public class FileLibraryService {
         e.setObjectKey(objectKey);
         e.setContentType(contentType);
         e.setFileSize((long) bytes.length);
+        e.setSha256(sha256);
         libraryFileMapper.insert(e);
+        if (sha256 == null || sha256.isBlank()) {
+            sha256Publisher.publish(new Sha256Publisher.Sha256Message("LIBRARY_FILE", e.getId(), objectKey));
+        }
     }
 
     /**
@@ -96,7 +114,7 @@ public class FileLibraryService {
      * 内部调用，不校验文件库菜单（仅有知识库功能的用户也可能产出）。
      */
     public void archiveDocument(String tenantId, long userId, long documentId, String fileName,
-                                String objectKey, String contentType, long fileSize) {
+                                String objectKey, String contentType, long fileSize, String sha256) {
         LibraryFileEntity e = new LibraryFileEntity();
         e.setTenantId(tenantId);
         e.setUserId(userId);
@@ -105,12 +123,46 @@ public class FileLibraryService {
         e.setObjectKey(objectKey);
         e.setContentType(contentType);
         e.setFileSize(fileSize);
+        e.setSha256(sha256);
         libraryFileMapper.insert(e);
     }
 
     /** 文档删除时级联清理文件库条目（MinIO 对象由文档侧删除，条目残留会成为死数据）。 */
     public void removeByDocument(long documentId) {
         libraryFileMapper.delete(new QueryWrapper<LibraryFileEntity>().eq("document_id", documentId));
+    }
+
+    /** 知识库删除时级联清理该库所有文档归档的文件库条目。 */
+    public void removeByDocuments(List<Long> documentIds) {
+        if (documentIds == null || documentIds.isEmpty()) {
+            return;
+        }
+        libraryFileMapper.delete(new QueryWrapper<LibraryFileEntity>().in("document_id", documentIds));
+    }
+
+    /** AI 图片删除时级联清理文件库条目（MinIO 对象由图片侧删除）。 */
+    public void removeByImage(long imageId) {
+        libraryFileMapper.delete(new QueryWrapper<LibraryFileEntity>().eq("image_id", imageId));
+    }
+
+    /**
+     * 字幕记录删除时级联清理"原始上传归档"（SUBTITLE_UPLOAD）：删除其 MinIO 对象与文件库条目；
+     * 翻译/编辑保存产生的归档（SUBTITLE_SAVE）保留，由文件库独立管理。
+     * MinIO 删除失败仅告警，不阻断元数据与字幕主记录的删除。
+     */
+    public void removeSubtitleUpload(long subtitleId) {
+        List<LibraryFileEntity> uploads = libraryFileMapper.selectList(
+                new QueryWrapper<LibraryFileEntity>()
+                        .eq("subtitle_id", subtitleId)
+                        .eq("archive_source", SRC_SUBTITLE_UPLOAD));
+        for (LibraryFileEntity f : uploads) {
+            try {
+                minioStorage.deleteObject(f.getObjectKey());
+            } catch (Exception ex) {
+                log.warn("字幕原始归档 MinIO 对象删除失败 id={} err={}", f.getId(), ex.getMessage());
+            }
+            libraryFileMapper.deleteById(f.getId());
+        }
     }
 
     /** 文件库直接上传：任意文件存 MinIO + 元数据落库（bizType=OTHER，可删除）。 */
@@ -144,12 +196,39 @@ public class FileLibraryService {
         e.setFileSize(file.getSize());
         libraryFileMapper.insert(e);
         log.info("文件库直接上传 file={} size={}", fileName, file.getSize());
+        // 异步计算 SHA-256 指纹（大文件不阻塞上传响应）
+        sha256Publisher.publish(new Sha256Publisher.Sha256Message(
+                "LIBRARY_FILE", e.getId(), objectKey));
         return toView(e);
+    }
+
+    /** 秒传查询：同租户同 SHA-256 且已存在的文件条目（取最早一条），命中则无需重复上传。 */
+    public Dtos.LibraryFileView findBySha256(String tenantId, String sha256) {
+        LibraryFileEntity e = libraryFileMapper.selectOne(new QueryWrapper<LibraryFileEntity>()
+                .eq("tenant_id", tenantId)
+                .eq("sha256", sha256)
+                .isNull("subtitle_id").isNull("image_id").isNull("document_id")
+                .orderByAsc("id")
+                .last("LIMIT 1"));
+        return e == null ? null : toView(e);
+    }
+
+    /** 字幕秒传查询：同租户同 SHA-256 的原始上传归档（SUBTITLE_UPLOAD），取最新一条 subtitle_id。 */
+    public Long findSubtitleIdBySha256(String tenantId, String sha256) {
+        LibraryFileEntity e = libraryFileMapper.selectOne(new QueryWrapper<LibraryFileEntity>()
+                .eq("tenant_id", tenantId)
+                .eq("sha256", sha256)
+                .eq("archive_source", SRC_SUBTITLE_UPLOAD)
+                .isNotNull("subtitle_id")
+                .orderByDesc("id")
+                .last("LIMIT 1"));
+        return e == null ? null : e.getSubtitleId();
     }
 
     /** 分片上传完成后登记文件库条目（对象已在 MinIO 合并完成，来源=直接上传，可删除）。 */
     public Dtos.LibraryFileView completeDirectUpload(String tenantId, long userId, String fileName,
-                                                     String objectKey, String contentType, long fileSize) {
+                                                     String objectKey, String contentType, long fileSize,
+                                                     String sha256) {
         LibraryFileEntity e = new LibraryFileEntity();
         e.setTenantId(tenantId);
         e.setUserId(userId);
@@ -158,6 +237,7 @@ public class FileLibraryService {
         e.setObjectKey(objectKey);
         e.setContentType(contentType);
         e.setFileSize(fileSize);
+        e.setSha256(sha256);
         libraryFileMapper.insert(e);
         log.info("分片上传完成归档 file={} size={}", fileName, fileSize);
         return toView(e);
@@ -223,10 +303,69 @@ public class FileLibraryService {
         return requireOwned(id);
     }
 
-    /** 查询播放状态（纯查询）：NONE/PROCESSING/READY/FAILED + 转码进度。 */
+    /** 查询播放状态（纯查询）：NONE/PROCESSING/READY/FAILED + 转码进度 + 当前用户播放进度。 */
     public Dtos.PlaybackResp playback(long id) {
         userManageService.requireMenu("library");
-        return mediaTranscodeService.playbackStatus(requireOwned(id));
+        LibraryFileEntity e = requireOwned(id);
+        Dtos.PlaybackResp base = mediaTranscodeService.playbackStatus(e);
+        Long positionMs = queryPositionMs(id);
+        return new Dtos.PlaybackResp(base.status(), base.hls(), base.progress(), positionMs,
+                base.videoWidth(), base.videoHeight());
+    }
+
+    /** 保存视频播放进度：每次播放会话创建一条新记录（不 upsert），positionMs 小于 1 秒不保存。 */
+    public void savePlaybackPosition(long id, long positionMs, Long durationMs) {
+        userManageService.requireMenu("library");
+        LibraryFileEntity e = requireOwned(id);
+        if (positionMs < 1000) return;
+        TenantContext.Session s = TenantContext.require();
+        VideoPlaybackHistoryEntity h = new VideoPlaybackHistoryEntity();
+        h.setTenantId(s.tenantId());
+        h.setUserId(s.userId());
+        h.setFileId(id);
+        h.setFileName(e.getFileName());
+        h.setPositionMs(positionMs);
+        h.setDurationMs(durationMs == null ? 0L : durationMs);
+        playbackHistoryMapper.insert(h);
+    }
+
+    /** 播放记录列表（当前租户+用户），按最近播放时间倒序，最多 100 条。 */
+    public List<Dtos.PlaybackHistoryView> listPlaybackHistory() {
+        userManageService.requireMenu("library");
+        TenantContext.Session s = TenantContext.require();
+        List<VideoPlaybackHistoryEntity> histories = playbackHistoryMapper.selectList(
+                new QueryWrapper<VideoPlaybackHistoryEntity>()
+                        .eq("tenant_id", s.tenantId())
+                        .eq("user_id", s.userId())
+                        .orderByDesc("updated_at")
+                        .last("LIMIT 100"));
+        if (histories.isEmpty()) return List.of();
+        List<Long> fileIds = histories.stream().map(VideoPlaybackHistoryEntity::getFileId).toList();
+        Map<Long, LibraryFileEntity> fileMap = libraryFileMapper.selectBatchIds(fileIds).stream()
+                .collect(Collectors.toMap(LibraryFileEntity::getId, f -> f, (a, b) -> a));
+        return histories.stream().map(h -> {
+            LibraryFileEntity f = fileMap.get(h.getFileId());
+            // 文件已删除时，fileSize 取 0，playbackStatus 取 "DELETED"，仍可展示记录与续播进度
+            long fileSize = f != null && f.getFileSize() != null ? f.getFileSize() : 0L;
+            String status = f != null && f.getPlaybackStatus() != null ? f.getPlaybackStatus() : "DELETED";
+            return new Dtos.PlaybackHistoryView(h.getId(), h.getFileId(), h.getFileName(),
+                    h.getPositionMs() == null ? 0L : h.getPositionMs(),
+                    h.getDurationMs() == null ? 0L : h.getDurationMs(),
+                    fileSize, status, h.getUpdatedAt());
+        }).toList();
+    }
+
+    /** 查询当前用户在指定视频上的最新播放进度（毫秒），无记录返回 null。 */
+    private Long queryPositionMs(long fileId) {
+        TenantContext.Session s = TenantContext.require();
+        VideoPlaybackHistoryEntity h = playbackHistoryMapper.selectOne(
+                new QueryWrapper<VideoPlaybackHistoryEntity>()
+                        .eq("tenant_id", s.tenantId())
+                        .eq("user_id", s.userId())
+                        .eq("file_id", fileId)
+                        .orderByDesc("updated_at")
+                        .last("LIMIT 1"));
+        return h == null ? null : h.getPositionMs();
     }
 
     /** 开始/重新转码（幂等）：视频且非转码中时投递 MQ。 */
@@ -252,14 +391,49 @@ public class FileLibraryService {
         }
     }
 
-    public byte[] download(long id) {
+    /** 下载：返回 MinIO 原始对象流（调用方负责关闭），供 Controller 流式输出，避免大文件进内存 OOM。 */
+    public InputStream downloadStream(long id) {
         userManageService.requireMenu("library");
         LibraryFileEntity e = requireOwned(id);
-        try (InputStream is = minioStorage.download(e.getObjectKey())) {
-            return is.readAllBytes();
-        } catch (Exception ex) {
-            throw new BizException(com.rag.api.common.ErrorCode.UPSTREAM, "读取文件失败: " + ex.getMessage());
+        return minioStorage.download(e.getObjectKey());
+    }
+
+    /**
+     * 读取归档文件可编辑的字幕条（原文/译文双列）：
+     * 优先取 subtitle_cue_backup 备份（字幕主记录删除后备份仍保留）；
+     * 备份不存在（备份功能上线前的旧归档等）时，从归档文件自身解析，译文列为空。
+     */
+    public List<Dtos.SubtitleCue> cueViews(long id) {
+        userManageService.requireMenu("library");
+        LibraryFileEntity e = requireOwned(id);
+        if (e.getSubtitleId() != null) {
+            List<SubtitleCueBackupEntity> rows = cueBackupMapper.selectList(
+                    new QueryWrapper<SubtitleCueBackupEntity>()
+                            .eq("subtitle_id", e.getSubtitleId())
+                            .orderByAsc("seq"));
+            if (!rows.isEmpty()) {
+                return rows.stream()
+                        .map(r -> new Dtos.SubtitleCue(r.getSeq(), r.getStartTime(), r.getEndTime(),
+                                r.getContent(), r.getTranslatedText()))
+                        .toList();
+            }
         }
+        // 兜底：直接解析归档文件（SRT/VTT/ASS），单列文本
+        String content = content(id);
+        String ext = SubtitleCodec.extOf(e.getFileName());
+        List<SubtitleCodec.Cue> cues;
+        try {
+            cues = "srt".equals(ext) ? SubtitleCodec.parseSrt(content) : SubtitleCodec.parse(ext, content);
+        } catch (Exception ex) {
+            throw new BizException(com.rag.api.common.ErrorCode.BAD_REQUEST,
+                    "解析归档字幕失败: " + ex.getMessage());
+        }
+        List<Dtos.SubtitleCue> views = new java.util.ArrayList<>(cues.size());
+        for (int i = 0; i < cues.size(); i++) {
+            SubtitleCodec.Cue c = cues.get(i);
+            views.add(new Dtos.SubtitleCue(i + 1, c.start(), c.end(), c.text(), null));
+        }
+        return views;
     }
 
     /**

@@ -13,6 +13,7 @@ import com.rag.api.interfaces.dto.Dtos;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
 
 import java.time.LocalDateTime;
 import java.util.ArrayList;
@@ -47,6 +48,16 @@ public class ChatSessionService {
     public Dtos.ChatSessionDetail detail(String tenantId, long userId, long id) {
         return new Dtos.ChatSessionDetail(toView(requireOwned(tenantId, userId, id)),
                 messageViews(loadMessages(tenantId, id)));
+    }
+
+    /** 删除会话：校验归属（租户+用户）后级联删除其全部问答消息，跨租户访问返回不存在。 */
+    @Transactional
+    public void delete(String tenantId, long userId, long id) {
+        requireOwned(tenantId, userId, id);
+        messageMapper.delete(new QueryWrapper<ChatMessageEntity>()
+                .eq("tenant_id", tenantId).eq("session_id", id));
+        sessionMapper.deleteById(id);
+        log.info("问答会话已删除 tenant={} user={} session={}", tenantId, userId, id);
     }
 
     /** 会话归属校验（租户 + 用户双重隔离）。 */

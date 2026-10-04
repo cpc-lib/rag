@@ -34,10 +34,11 @@ public class SubtitleController {
 
     private final SubtitleService subtitleService;
 
-    /** 上传 VTT 字幕，解析为 SRT 并落库。 */
+    /** 上传字幕，前端已算 SHA-256 时可秒传。 */
     @PostMapping
-    public ApiResult<Dtos.SubtitleView> upload(@RequestParam("file") MultipartFile file) {
-        return ApiResult.ok(subtitleService.upload(file));
+    public ApiResult<Dtos.SubtitleView> upload(@RequestParam("file") MultipartFile file,
+                                               @RequestParam(name = "sha256", required = false) String sha256) {
+        return ApiResult.ok(subtitleService.upload(file, sha256));
     }
 
     /** 当前用户的字幕记录列表。 */

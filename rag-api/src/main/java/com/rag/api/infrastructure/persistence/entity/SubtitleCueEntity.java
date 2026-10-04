@@ -3,6 +3,7 @@ package com.rag.api.infrastructure.persistence.entity;
 import com.baomidou.mybatisplus.annotation.IdType;
 import com.baomidou.mybatisplus.annotation.TableId;
 import com.baomidou.mybatisplus.annotation.TableName;
+import com.baomidou.mybatisplus.annotation.TableLogic;
 import lombok.Data;
 
 /** 字幕详情行：一条字幕记录被解析出的单条字幕（原文 + 译文分离）。 */
@@ -23,4 +24,7 @@ public class SubtitleCueEntity {
     private String content;
     /** 翻译后文本，null 表示未翻译。 */
     private String translatedText;
+    /** 逻辑删除：0=正常 1=已删除。 */
+    @TableLogic
+    private Integer deleted;
 }

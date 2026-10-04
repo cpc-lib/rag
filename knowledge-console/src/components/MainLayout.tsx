@@ -1,4 +1,4 @@
-import { useEffect, useState, type ReactNode } from 'react';
+﻿import { useEffect, useState, type ReactNode } from 'react';
 import { Layout, Menu, Dropdown, Typography, Space, App, Form, Input, Modal } from 'antd';
 import {
   TeamOutlined,
@@ -179,7 +179,7 @@ export default function MainLayout() {
           setPwdOpen(false);
           pwdForm.resetFields();
         }}
-        destroyOnClose
+        destroyOnHidden
       >
         <Form form={pwdForm} layout="vertical" style={{ marginTop: 8 }}>
           <Form.Item

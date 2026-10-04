@@ -11,6 +11,7 @@ import {
   Input,
   InputNumber,
   Modal,
+  Popconfirm,
   Row,
   Select,
   Space,
@@ -19,7 +20,7 @@ import {
   Tag,
   Typography,
 } from 'antd';
-import { DownloadOutlined } from '@ant-design/icons';
+import { DeleteOutlined, DownloadOutlined, ReloadOutlined, SearchOutlined } from '@ant-design/icons';
 import { imageApi } from '../api/images';
 import type { GeneratedImage } from '../api/types';
 
@@ -65,11 +66,14 @@ export default function ImageStudioPage() {
   const [loadingHistory, setLoadingHistory] = useState(false);
   const [downloadingId, setDownloadingId] = useState<number | null>(null);
   const [detailImg, setDetailImg] = useState<GeneratedImage | null>(null);
+  /** 画面描述模糊查询关键词 */
+  const [kw, setKw] = useState('');
+  const [deletingId, setDeletingId] = useState<number | null>(null);
 
-  const loadHistory = async (p: number) => {
+  const loadHistory = async (p: number, keyword = kw) => {
     setLoadingHistory(true);
     try {
-      const res = await imageApi.list(p, PAGE_SIZE);
+      const res = await imageApi.list(p, PAGE_SIZE, keyword);
       setHistory(res.records);
       setTotal(res.total);
       setPage(p);
@@ -82,6 +86,25 @@ export default function ImageStudioPage() {
     loadHistory(1);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // 关键词防抖查询
+  useEffect(() => {
+    const t = setTimeout(() => loadHistory(1), 300);
+    return () => clearTimeout(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [kw]);
+
+  const handleDelete = async (img: GeneratedImage) => {
+    setDeletingId(img.id);
+    try {
+      await imageApi.remove(img.id);
+      message.success('已删除');
+      if (detailImg?.id === img.id) setDetailImg(null);
+      loadHistory(page);
+    } finally {
+      setDeletingId(null);
+    }
+  };
 
   const handleGenerate = async () => {
     const v = await form.validateFields();
@@ -213,7 +236,32 @@ export default function ImageStudioPage() {
         </Col>
       </Row>
 
-      <Card title="我的作品" size="small" style={{ marginTop: 20 }}>
+      <Card
+        title={
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+            <span>我的作品</span>
+            <Space size={8}>
+              <Input.Search
+                placeholder="画面描述关键词"
+                allowClear
+                value={kw}
+                onChange={(e) => setKw(e.target.value)}
+                style={{ width: 240 }}
+                prefix={<SearchOutlined />}
+              />
+              <Button
+                icon={<ReloadOutlined />}
+                loading={loadingHistory}
+                onClick={() => loadHistory(page)}
+              >
+                刷新
+              </Button>
+            </Space>
+          </div>
+        }
+        size="small"
+        style={{ marginTop: 20 }}
+      >
         <Table<GeneratedImage>
           rowKey="id"
           size="middle"
@@ -227,27 +275,48 @@ export default function ImageStudioPage() {
             {
               title: '文件大小',
               dataIndex: 'fileSize',
-              width: 120,
+              width: 100,
               render: (v: number | null) => formatSize(v),
             },
             {
               title: '时间',
               dataIndex: 'createdAt',
-              width: 180,
+              width: 160,
               render: (v: string | null) => formatTime(v),
             },
             {
               title: '操作',
-              width: 90,
+              width: 120,
               render: (_, img) => (
-                <a
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    setDetailImg(img);
-                  }}
-                >
-                  详情
-                </a>
+                <Space size={8}>
+                  <a
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setDetailImg(img);
+                    }}
+                  >
+                    详情
+                  </a>
+                  <Popconfirm
+                    title="确认删除该作品？"
+                    description="将删除图片原文件与文件库关联记录，不可恢复"
+                    okText="删除"
+                    okButtonProps={{ danger: true, loading: deletingId === img.id }}
+                    cancelText="取消"
+                    onConfirm={() => handleDelete(img)}
+                  >
+                    <Button
+                      type="link"
+                      danger
+                      size="small"
+                      icon={<DeleteOutlined />}
+                      loading={deletingId === img.id}
+                      onClick={(e) => e.stopPropagation()}
+                    >
+                      删除
+                    </Button>
+                  </Popconfirm>
+                </Space>
               ),
             },
           ]}
@@ -258,7 +327,7 @@ export default function ImageStudioPage() {
             pageSize: PAGE_SIZE,
             total,
             showSizeChanger: false,
-            onChange: loadHistory,
+            onChange: (p) => loadHistory(p),
           }}
           onRow={(img) => ({
             onClick: () => setDetailImg(img),

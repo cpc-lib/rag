@@ -3,6 +3,7 @@ package com.rag.worker.infrastructure.persistence.entity;
 import com.baomidou.mybatisplus.annotation.IdType;
 import com.baomidou.mybatisplus.annotation.TableId;
 import com.baomidou.mybatisplus.annotation.TableName;
+import com.baomidou.mybatisplus.annotation.TableLogic;
 import lombok.Data;
 
 /** 文件库条目（Worker 侧仅读取源对象键、回写转码产物字段）。 */
@@ -12,6 +13,10 @@ public class LibraryFileEntity {
 
     @TableId(type = IdType.AUTO)
     private Long id;
+
+    /** 逻辑删除：0=正常 1=已删除。 */
+    @TableLogic
+    private Integer deleted;
 
     private String tenantId;
     private String fileName;
@@ -24,4 +29,10 @@ public class LibraryFileEntity {
     private String playbackStatus;
     /** 转码进度 0-100（PROCESSING 时有效）。 */
     private Integer playbackProgress;
+    /** 视频宽度（像素，转码探测写入）。 */
+    private Integer videoWidth;
+    /** 视频高度（像素，转码探测写入）。 */
+    private Integer videoHeight;
+    /** 文件内容 SHA-256（hex，Worker 异步计算回写）。 */
+    private String sha256;
 }

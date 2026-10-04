@@ -3,9 +3,13 @@ import type { LibraryFile, UploadInitResp, UploadSessionView } from './types';
 
 /** 分片上传（大文件）：init → 逐片上传 → complete；会话落库，支持断点续传 */
 export const uploadApi = {
-  /** 初始化分片会话 */
-  init: (fileName: string, fileSize: number, contentType: string) =>
-    unwrap<UploadInitResp>(http.post('/uploads/init', { fileName, fileSize, contentType })),
+  /**
+   * 初始化分片会话；sha256 非空时后端做秒传匹配，命中则 instant=true。
+   * biz=LIBRARY（默认，文件库）/ KB_DOCUMENT（知识库文档，需传 kbId）。
+   */
+  init: (fileName: string, fileSize: number, contentType: string, sha256?: string,
+         biz?: 'LIBRARY' | 'KB_DOCUMENT', kbId?: number) =>
+    unwrap<UploadInitResp>(http.post('/uploads/init', { fileName, fileSize, contentType, sha256, biz, kbId })),
 
   /** 查询会话（断点续传：返回已传分片号与分片大小） */
   session: (sessionId: number) =>

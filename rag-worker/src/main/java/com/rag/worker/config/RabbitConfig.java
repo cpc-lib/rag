@@ -73,6 +73,17 @@ public class RabbitConfig {
         return BindingBuilder.bind(mediaTranscodeQueue).to(ragIngestExchange).with("media.transcode");
     }
 
+    /** SHA-256 计算队列：大文件指纹 → Worker 异步计算回写。 */
+    @Bean
+    public Queue sha256Queue(@Value("${rag.mq.sha256-queue}") String queue) {
+        return QueueBuilder.durable(queue).build();
+    }
+
+    @Bean
+    public Binding sha256Binding(DirectExchange ragIngestExchange, Queue sha256Queue) {
+        return BindingBuilder.bind(sha256Queue).to(ragIngestExchange).with("sha256");
+    }
+
     @Bean
     public SimpleRabbitListenerContainerFactory ingestFactory(ConnectionFactory connectionFactory) {
         SimpleRabbitListenerContainerFactory factory = new SimpleRabbitListenerContainerFactory();

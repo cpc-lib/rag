@@ -36,38 +36,70 @@ public class ChunkUploadService {
     private static final String STATUS_ABORTED = "ABORTED";
     /** 会话用途：文件库直接上传。 */
     private static final String BIZ_LIBRARY = "LIBRARY";
+    /** 会话用途：知识库文档上传。 */
+    private static final String BIZ_KB_DOCUMENT = "KB_DOCUMENT";
 
     private final UploadSessionMapper sessionMapper;
     private final MinioMultipart multipart;
     private final FileLibraryService fileLibraryService;
-    private final UserManageService userManageService;
+    private final DocumentAppService documentAppService;
     private final ObjectMapper objectMapper;
 
     /** 已传分片记录（持久化在 upload_session.uploaded_parts JSON）。 */
     private record Part(int partNumber, String etag) {
     }
 
-    /** 初始化分片会话：创建 MinIO Multipart Upload，落库会话。 */
+    /** 初始化分片会话：秒传命中时直接复用已有条目；否则创建 MinIO Multipart Upload 并落库会话。 */
     public Dtos.UploadInitResp init(Dtos.UploadInitReq req) {
-        userManageService.requireMenu("library");
         TenantContext.Session s = TenantContext.require();
+        String biz = BIZ_KB_DOCUMENT.equals(req.biz()) ? BIZ_KB_DOCUMENT : BIZ_LIBRARY;
+        String sha = req.sha256();
+        String objectKey;
+        Long kbId = null;
+        if (BIZ_KB_DOCUMENT.equals(biz)) {
+            if (req.kbId() == null) {
+                throw BizException.badRequest("kbId 不能为空");
+            }
+            kbId = req.kbId();
+            documentAppService.checkKbUpload(kbId, req.fileName(), req.fileSize());
+            if (sha != null && !sha.isBlank()
+                    && documentAppService.findKbDocBySha256(s.tenantId(), kbId, sha) != null) {
+                log.info("秒传命中（知识库文档） tenant={} kb={} file={} sha={}", s.tenantId(), kbId, req.fileName(), sha);
+                return new Dtos.UploadInitResp(true, -1, 0, null);
+            }
+            int dot = req.fileName().lastIndexOf('.');
+            String ext = dot >= 0 ? req.fileName().substring(dot + 1).toLowerCase() : "";
+            objectKey = "%s/%d/%s/%s.%s".formatted(s.tenantId(), kbId,
+                    java.time.LocalDate.now().format(java.time.format.DateTimeFormatter.ISO_DATE),
+                    java.util.UUID.randomUUID(), ext);
+        } else {
+            if (sha != null && !sha.isBlank()) {
+                Dtos.LibraryFileView existing = fileLibraryService.findBySha256(s.tenantId(), sha);
+                if (existing != null) {
+                    log.info("秒传命中 tenant={} file={} sha={}", s.tenantId(), req.fileName(), sha);
+                    return new Dtos.UploadInitResp(true, -1, 0, existing);
+                }
+            }
+            int dot = req.fileName().lastIndexOf('.');
+            String ext = dot >= 0 ? req.fileName().substring(dot) : "";
+            objectKey = s.tenantId() + "/library/direct/" + System.currentTimeMillis() + ext;
+        }
         long chunkSize = DEFAULT_CHUNK;
         long total = (req.fileSize() + chunkSize - 1) / chunkSize;
         if (total > MAX_CHUNKS) {
             throw BizException.badRequest("文件过大，超出分片数上限");
         }
-        int dot = req.fileName().lastIndexOf('.');
-        String ext = dot >= 0 ? req.fileName().substring(dot) : "";
-        String objectKey = s.tenantId() + "/library/direct/" + System.currentTimeMillis() + ext;
         String uploadId = multipart.createUpload(objectKey, req.contentType());
 
         UploadSessionEntity e = new UploadSessionEntity();
         e.setTenantId(s.tenantId());
         e.setUserId(s.userId());
-        e.setBiz(BIZ_LIBRARY);
+        e.setBiz(biz);
+        e.setKbId(kbId);
         e.setFileName(req.fileName());
         e.setFileSize(req.fileSize());
         e.setContentType(req.contentType());
+        e.setSha256(sha);
         e.setChunkSize(chunkSize);
         e.setTotalChunks((int) total);
         e.setUploadedChunks(0);
@@ -76,13 +108,12 @@ public class ChunkUploadService {
         e.setUploadId(uploadId);
         e.setStatus(STATUS_UPLOADING);
         sessionMapper.insert(e);
-        log.info("分片会话创建 session={} file={} size={} chunks={}", e.getId(), req.fileName(), req.fileSize(), total);
-        return new Dtos.UploadInitResp(e.getId(), chunkSize);
+        log.info("分片会话创建 session={} biz={} file={} size={} chunks={}", e.getId(), biz, req.fileName(), req.fileSize(), total);
+        return new Dtos.UploadInitResp(false, e.getId(), chunkSize, null);
     }
 
     /** 上传一个分片：幂等（同 partNumber 重复传会覆盖 ETag），失败可安全重试。 */
     public Dtos.UploadPartResp uploadPart(long sessionId, int partNumber, byte[] body) {
-        userManageService.requireMenu("library");
         UploadSessionEntity e = requireOwned(sessionId);
         if (!STATUS_UPLOADING.equals(e.getStatus())) {
             throw BizException.badRequest("会话已结束，无法继续上传");
@@ -109,15 +140,13 @@ public class ChunkUploadService {
 
     /** 查询会话：断点续传时前端据此跳过已传分片。 */
     public Dtos.UploadSessionView session(long sessionId) {
-        userManageService.requireMenu("library");
         UploadSessionEntity e = requireOwned(sessionId);
         return new Dtos.UploadSessionView(e.getId(), e.getStatus(), e.getChunkSize(), e.getTotalChunks(),
                 readParts(e).stream().map(Part::partNumber).sorted().toList());
     }
 
-    /** 合并分片：全部传完后调用，登记文件库条目并返回视图。 */
-    public Dtos.LibraryFileView complete(long sessionId) {
-        userManageService.requireMenu("library");
+    /** 合并分片：全部传完后调用，按 biz 分流登记文档或文件库条目。 */
+    public Object complete(long sessionId) {
         UploadSessionEntity e = requireOwned(sessionId);
         if (!STATUS_UPLOADING.equals(e.getStatus())) {
             throw BizException.badRequest("会话已结束");
@@ -134,14 +163,17 @@ public class ChunkUploadService {
 
         e.setStatus(STATUS_COMPLETED);
         sessionMapper.updateById(e);
-        log.info("分片合并完成 session={} file={}", e.getId(), e.getFileName());
+        log.info("分片合并完成 session={} biz={} file={}", e.getId(), e.getBiz(), e.getFileName());
+        if (BIZ_KB_DOCUMENT.equals(e.getBiz())) {
+            return documentAppService.completeKbChunkUpload(e.getKbId(), e.getFileName(),
+                    e.getObjectKey(), e.getContentType(), e.getFileSize(), e.getSha256());
+        }
         return fileLibraryService.completeDirectUpload(e.getTenantId(), e.getUserId(), e.getFileName(),
-                e.getObjectKey(), e.getContentType(), e.getFileSize());
+                e.getObjectKey(), e.getContentType(), e.getFileSize(), e.getSha256());
     }
 
     /** 中止会话：清理 MinIO 已传分片。 */
     public void abort(long sessionId) {
-        userManageService.requireMenu("library");
         UploadSessionEntity e = requireOwned(sessionId);
         if (STATUS_UPLOADING.equals(e.getStatus())) {
             try {

@@ -17,11 +17,15 @@ public class UploadSessionEntity {
 
     private String tenantId;
     private Long userId;
-    /** 会话用途：LIBRARY=文件库直接上传。 */
+    /** 会话用途：LIBRARY=文件库直接上传 / KB_DOCUMENT=知识库文档上传。 */
     private String biz;
+    /** 业务关联知识库ID（biz=KB_DOCUMENT 时必填）。 */
+    private Long kbId;
     private String fileName;
     private Long fileSize;
     private String contentType;
+    /** 文件内容 SHA-256（hex，init 时前端上送，complete 时转写 library_file）。 */
+    private String sha256;
     private Long chunkSize;
     private Integer totalChunks;
     private Integer uploadedChunks;

@@ -41,9 +41,9 @@ public class ChunkUploadController {
         return ApiResult.ok(chunkUploadService.uploadPart(sessionId, partNumber, body));
     }
 
-    /** 全部传完后合并分片，返回文件库条目。 */
+    /** 全部传完后合并分片：LIBRARY 返回文件库条目，KB_DOCUMENT 返回文档记录。 */
     @PostMapping("/{sessionId}/complete")
-    public ApiResult<Dtos.LibraryFileView> complete(@PathVariable long sessionId) {
+    public ApiResult<Object> complete(@PathVariable long sessionId) {
         return ApiResult.ok(chunkUploadService.complete(sessionId));
     }
 

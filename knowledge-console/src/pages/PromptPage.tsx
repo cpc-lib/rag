@@ -3,6 +3,7 @@ import {
   App,
   Button,
   Card,
+  Drawer,
   Form,
   Input,
   Modal,
@@ -14,7 +15,7 @@ import {
   Tag,
   Typography,
 } from 'antd';
-import { PlusOutlined } from '@ant-design/icons';
+import { PlusOutlined, ReloadOutlined } from '@ant-design/icons';
 import type { ColumnsType } from 'antd/es/table';
 import { promptApi } from '../api/prompts';
 import { kbApi } from '../api/knowledgeBases';
@@ -34,6 +35,7 @@ export default function PromptPage() {
   // 字幕翻译提示词
   const [subtitleContent, setSubtitleContent] = useState('');
   const [subtitleSaving, setSubtitleSaving] = useState(false);
+  const [subtitleDrawerOpen, setSubtitleDrawerOpen] = useState(false);
 
   const load = async () => {
     setLoading(true);
@@ -69,6 +71,7 @@ export default function PromptPage() {
     try {
       await promptApi.updateSubtitle(subtitleContent);
       message.success('字幕翻译提示词已保存');
+      setSubtitleDrawerOpen(false);
     } finally {
       setSubtitleSaving(false);
     }
@@ -181,14 +184,50 @@ export default function PromptPage() {
         <Typography.Title level={4} style={{ margin: 0 }}>
           提示词管理
         </Typography.Title>
-        <Button type="primary" icon={<PlusOutlined />} onClick={openCreate}>
-          新建模板
-        </Button>
+        <Space size={8}>
+          <Button
+            icon={<ReloadOutlined />}
+            loading={loading}
+            onClick={() => {
+              load();
+              loadSubtitle();
+            }}
+          >
+            刷新
+          </Button>
+          <Button type="primary" icon={<PlusOutlined />} onClick={openCreate}>
+            新建模板
+          </Button>
+        </Space>
       </Space>
 
       <Card
         title="字幕翻译提示词"
         style={{ marginBottom: 24 }}
+        extra={
+          <Button type="primary" onClick={() => setSubtitleDrawerOpen(true)}>
+            编辑
+          </Button>
+        }
+      >
+        <Typography.Paragraph type="secondary" style={{ marginTop: 0 }}>
+          用于字幕转换应用的翻译系统提示词，支持占位符 <Tag color="blue">{`{{目标语言}}`}</Tag>
+        </Typography.Paragraph>
+        <Typography.Paragraph
+          type="secondary"
+          ellipsis={{ rows: 2 }}
+          style={{ marginBottom: 0, whiteSpace: 'pre-wrap' }}
+        >
+          {subtitleContent || '尚未配置，点击右上角「编辑」进行设置'}
+        </Typography.Paragraph>
+      </Card>
+
+      <Drawer
+        title="编辑字幕翻译提示词"
+        open={subtitleDrawerOpen}
+        onClose={() => setSubtitleDrawerOpen(false)}
+        width={720}
+        destroyOnHidden
         extra={
           <Button type="primary" onClick={saveSubtitle} loading={subtitleSaving}>
             保存
@@ -201,17 +240,21 @@ export default function PromptPage() {
         <Input.TextArea
           value={subtitleContent}
           onChange={(e) => setSubtitleContent(e.target.value)}
-          autoSize={{ minRows: 8, maxRows: 20 }}
+          autoSize={{ minRows: 16, maxRows: 30 }}
           placeholder="字幕翻译师的系统提示词，可使用 {{目标语言}} 占位符"
         />
-      </Card>
+      </Drawer>
 
       <Table
         rowKey="id"
         loading={loading}
         columns={columns}
         dataSource={list}
-        pagination={false}
+        pagination={{
+          pageSize: 10,
+          showSizeChanger: true,
+          showTotal: (total) => `共 ${total} 条`,
+        }}
       />
       <Modal
         title={editing ? '编辑提示词模板' : '新建提示词模板'}
@@ -222,7 +265,7 @@ export default function PromptPage() {
         okText="保存"
         cancelText="取消"
         width={720}
-        destroyOnClose
+        destroyOnHidden
       >
         <Form form={form} layout="vertical">
           <Form.Item

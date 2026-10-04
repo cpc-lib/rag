@@ -9,9 +9,11 @@ import com.rag.api.common.TenantContext;
 import com.rag.api.infrastructure.llm.LlmClient;
 import com.rag.api.infrastructure.persistence.entity.ModelEntity;
 import com.rag.api.infrastructure.persistence.entity.SubtitleCueEntity;
+import com.rag.api.infrastructure.persistence.entity.SubtitleCueBackupEntity;
 import com.rag.api.infrastructure.persistence.entity.SubtitleEntity;
 import com.rag.api.infrastructure.persistence.entity.TranslateLangEntity;
 import com.rag.api.infrastructure.persistence.mapper.SubtitleCueMapper;
+import com.rag.api.infrastructure.persistence.mapper.SubtitleCueBackupMapper;
 import com.rag.api.infrastructure.persistence.mapper.SubtitleMapper;
 import com.rag.api.infrastructure.persistence.mapper.TranslateLangMapper;
 import com.rag.api.interfaces.dto.Dtos;
@@ -43,6 +45,7 @@ public class SubtitleService {
 
     private final SubtitleMapper subtitleMapper;
     private final SubtitleCueMapper cueMapper;
+    private final SubtitleCueBackupMapper cueBackupMapper;
     private final TranslateLangMapper langMapper;
     private final ModelService modelService;
     private final LlmClient llmClient;
@@ -53,9 +56,26 @@ public class SubtitleService {
 
     // ---------------- 上传 ----------------
 
-    public Dtos.SubtitleView upload(MultipartFile file) {
+    public Dtos.SubtitleView upload(MultipartFile file, String sha256) {
         TenantContext.Session s = TenantContext.require();
         userManageService.requireMenu("subtitle");
+        // 秒传：前端已算 SHA-256，同租户同 hash 的原始上传已存在则直接复用
+        if (sha256 != null && !sha256.isBlank()) {
+            Long existingId = fileLibraryService.findSubtitleIdBySha256(s.tenantId(), sha256);
+            if (existingId != null) {
+                // 防御：字幕记录可能已被逻辑删除（library_file 归档残留），此时不能复用
+                try {
+                    SubtitleEntity check = subtitleMapper.selectById(existingId);
+                    if (check != null) {
+                        log.info("字幕秒传命中 tenant={} sha={} -> subtitle={}", s.tenantId(), sha256, existingId);
+                        return get(existingId);
+                    }
+                    log.info("秒传命中但字幕已删除，重新上传 tenant={} sha={} -> subtitle={}", s.tenantId(), sha256, existingId);
+                } catch (Exception ignored) {
+                    // 查询失败按未命中处理，继续正常上传流程
+                }
+            }
+        }
         if (file == null || file.isEmpty()) {
             throw BizException.badRequest("上传文件为空");
         }
@@ -100,14 +120,14 @@ public class SubtitleService {
         };
         try {
             fileLibraryService.archive(s.tenantId(), s.userId(), e.getId(), fileName, contentType,
-                    FileLibraryService.SRC_SUBTITLE_UPLOAD, content.getBytes(StandardCharsets.UTF_8));
+                    FileLibraryService.SRC_SUBTITLE_UPLOAD, content.getBytes(StandardCharsets.UTF_8), sha256);
         } catch (Exception ex) {
             log.warn("原始文件归档失败（不影响字幕上传）: {}", ex.getMessage());
         }
         return get(e.getId());
     }
 
-    /** 详情行落库：逐条写入 subtitle_cue，translated 为空表示未翻译。 */
+    /** 详情行落库：逐条写入 subtitle_cue，translated 为空表示未翻译；同时写一份备份行（删除字幕后供文件库归档编辑）。 */
     private void insertCues(String tenantId, long subtitleId,
                             List<SubtitleCodec.Cue> cues, List<String> translated) {
         for (int i = 0; i < cues.size(); i++) {
@@ -122,6 +142,18 @@ public class SubtitleService {
                 row.setTranslatedText(translated.get(i));
             }
             cueMapper.insert(row);
+
+            SubtitleCueBackupEntity backup = new SubtitleCueBackupEntity();
+            backup.setTenantId(tenantId);
+            backup.setSubtitleId(subtitleId);
+            backup.setSeq(i + 1);
+            backup.setStartTime(cues.get(i).start());
+            backup.setEndTime(cues.get(i).end());
+            backup.setContent(cues.get(i).text());
+            if (translated != null) {
+                backup.setTranslatedText(translated.get(i));
+            }
+            cueBackupMapper.insert(backup);
         }
     }
 
@@ -197,8 +229,13 @@ public class SubtitleService {
 
         for (int k = 0; k < selected.size(); k++) {
             SubtitleCueEntity row = rows.get(selected.get(k));
-            row.setTranslatedText(translated.get(k));
+            String translatedText = translated.get(k);
+            row.setTranslatedText(translatedText);
             cueMapper.updateById(row);
+            // 同步备份表，保证删除字幕后文件库归档仍能还原最新译文
+            cueBackupMapper.update(null, new UpdateWrapper<SubtitleCueBackupEntity>()
+                    .eq("subtitle_id", e.getId()).eq("seq", row.getSeq())
+                    .set("translated_text", translatedText));
         }
         e.setTargetLang(lang);
         subtitleMapper.updateById(e);
@@ -207,21 +244,10 @@ public class SubtitleService {
 
     // ---------------- 翻译语言维护 ----------------
 
-    /** 语言列表（租户级）；首次访问懒播种默认两项，与历史行为一致。 */
+    /** 语言列表（租户级）；默认两项由 Flyway 种子数据负责，删光即为空不再懒播种。 */
     public List<Dtos.TranslateLangView> listLangs() {
         userManageService.requireMenu("subtitle");
         String tenantId = TenantContext.require().tenantId();
-        if (langMapper.selectCount(new QueryWrapper<TranslateLangEntity>()
-                .eq("tenant_id", tenantId)) == 0) {
-            String[] defaults = {"简体中文", "繁體中文"};
-            for (int i = 0; i < defaults.length; i++) {
-                TranslateLangEntity row = new TranslateLangEntity();
-                row.setTenantId(tenantId);
-                row.setName(defaults[i]);
-                row.setSortNo(i + 1);
-                langMapper.insert(row);
-            }
-        }
         return langMapper.selectList(new QueryWrapper<TranslateLangEntity>()
                         .eq("tenant_id", tenantId)
                         .orderByAsc("sort_no", "id"))
@@ -249,17 +275,13 @@ public class SubtitleService {
         return listLangs();
     }
 
-    /** 删除语言：至少保留一个，避免目标语言下拉为空。 */
+    /** 删除语言。 */
     public void deleteLang(long id) {
         userManageService.requireMenu("subtitle");
         String tenantId = TenantContext.require().tenantId();
         TranslateLangEntity row = langMapper.selectById(id);
         if (row == null || !row.getTenantId().equals(tenantId)) {
             throw BizException.notFound("语言不存在");
-        }
-        if (langMapper.selectCount(new QueryWrapper<TranslateLangEntity>()
-                .eq("tenant_id", tenantId)) <= 1) {
-            throw BizException.badRequest("至少保留一个翻译语言");
         }
         langMapper.deleteById(id);
     }
@@ -307,13 +329,13 @@ public class SubtitleService {
                     translated = callTranslate(batchTexts, before, after, m, targetLabel, translated.size());
                 }
             } catch (BizException be) {
-                // 整批失败（超时/返回格式异常等）：降级逐条，不阻断整体
-                log.warn("整批翻译失败，降级为逐条翻译: {}", be.getMessage());
+                // 整批调用失败（超时/返回格式异常等）：降级逐条，不阻断整体
+                log.warn("整批翻译调用失败，降级为逐条翻译: {}", be.getMessage());
                 translated = List.of();
             }
             if (translated.size() != batchTexts.size()) {
-                // 重试仍不匹配：逐条翻译兜底，保证条数严格对齐（个别失败保留原文）
-                log.warn("重试后仍不匹配（{} != {}），降级为逐条翻译", translated.size(), batchTexts.size());
+                // 反馈重试后仍不匹配（或整批调用失败）：逐条翻译兜底，保证条数严格对齐（个别失败保留原文）
+                log.warn("批量翻译条数不符（{} != {}），降级为逐条翻译", translated.size(), batchTexts.size());
                 translated = translateOneByOne(batchTexts, m, targetLabel);
             }
             result.addAll(translated);
@@ -339,7 +361,7 @@ public class SubtitleService {
             }
             user.append("\n");
         }
-        user.append("[待翻译·请逐条对应输出]\n");
+        user.append("[待翻译·请逐条对应输出]（以下共 ").append(texts.size()).append(" 条）\n");
         for (int i = 0; i < texts.size(); i++) {
             user.append(i + 1).append(". ").append(texts.get(i)).append("\n");
         }
@@ -349,7 +371,13 @@ public class SubtitleService {
                 user.append("- ").append(after.get(i)).append("\n");
             }
         }
-        user.append("\n仅返回待翻译部分的 JSON 字符串数组。");
+        user.append("\n输出格式：只允许输出一个 JSON 字符串数组，不要 markdown 代码围栏、序号或任何解释文字。")
+                .append("数组必须恰好包含 ").append(texts.size())
+                .append(" 个字符串元素，与上面 ").append(texts.size())
+                .append(" 条输入顺序一一对应；每条字幕即使本身含多句话，也只能产出一个元素，禁止合并或拆分。")
+                .append("元素只能是字符串；字符串内双引号用 \\\" 转义、换行用 \\n 表示，空条目输出 \"\"。")
+                .append("示例（输入 2 条）：[")
+                .append("\"译文1\",\"译文2\"]");
         if (prevCount != null) {
             user.append("\n注意：你上次返回了 ").append(prevCount).append(" 条，但待翻译输入是 ")
                     .append(texts.size()).append(" 条。请严格逐条对应，恰好返回 ")
@@ -365,7 +393,7 @@ public class SubtitleService {
                             java.math.BigDecimal.valueOf(0.95), 4096),
                     120);
             String content = msg.path("content").asText("");
-            return parseJsonArray(content, texts.size());
+            return parseJsonArray(content, texts);
         } catch (BizException be) {
             throw be;
         } catch (Exception ex) {
@@ -387,8 +415,9 @@ public class SubtitleService {
         return out;
     }
 
-    /** 从模型输出中提取 JSON 字符串数组，校验长度。 */
-    private List<String> parseJsonArray(String content, int expected) {
+    /** 从模型输出中提取 JSON 字符串数组；单条场景严格校验并容错"原文+译文"双元素，批量场景条数交由上层校验以支持纠错重试。 */
+    private List<String> parseJsonArray(String content, List<String> texts) {
+        int expected = texts.size();
         if (content == null || content.isBlank()) {
             throw new BizException(com.rag.api.common.ErrorCode.UPSTREAM, "模型返回空内容");
         }
@@ -414,10 +443,19 @@ public class SubtitleService {
         String json = s.substring(start, end + 1);
         try {
             List<String> arr = objectMapper.readValue(json, new TypeReference<List<String>>() {});
-            if (arr.size() != expected) {
+            if (expected == 1) {
+                // 单条场景严格校验：容错 [原文, 译文] 双元素（取与原文不同的那条），其余条数异常抛出由逐条兜底保留原文
+                if (arr.size() == 1) {
+                    return arr;
+                }
+                if (arr.size() == 2) {
+                    String src = texts.get(0);
+                    return List.of(arr.get(0).trim().equals(src.trim()) ? arr.get(1) : arr.get(0));
+                }
                 throw new BizException(com.rag.api.common.ErrorCode.UPSTREAM,
-                        "翻译条数不匹配（" + arr.size() + " != " + expected + "）");
+                        "翻译条数不匹配（" + arr.size() + " != 1）");
             }
+            // 批量场景不在此校验条数：原样返回，由上层做"带反馈纠错重试"，避免直接降级逐条
             return arr;
         } catch (IOException e) {
             throw new BizException(com.rag.api.common.ErrorCode.UPSTREAM,
@@ -431,12 +469,17 @@ public class SubtitleService {
 
     // ---------------- 删除 ----------------
 
-    /** 删除字幕记录：级联删除字幕条；已归档到文件库的文件保留，可在文件库中单独管理。 */
+    /**
+     * 删除字幕记录：级联逻辑删除字幕条、物理清理"原始上传归档"（MinIO 对象 + 文件库条目）；
+     * 字幕条备份（subtitle_cue_backup）刻意保留——文件库中翻译保存的归档在主记录删除后仍可据此编辑；
+     * 翻译/编辑后保存到文件库的归档（SUBTITLE_SAVE）同样保留，可在文件库中单独管理。
+     */
     @Transactional
     public void delete(long id) {
         userManageService.requireMenu("subtitle");
         SubtitleEntity e = requireOwned(id);
         cueMapper.delete(new QueryWrapper<SubtitleCueEntity>().eq("subtitle_id", e.getId()));
+        fileLibraryService.removeSubtitleUpload(e.getId());
         subtitleMapper.deleteById(e.getId());
         log.info("字幕记录已删除 subtitle={}", e.getId());
     }
@@ -464,15 +507,21 @@ public class SubtitleService {
                 // updateById 默认跳过 null 字段，清空译文需用 UpdateWrapper 显式 set
                 UpdateWrapper<SubtitleCueEntity> uw = new UpdateWrapper<SubtitleCueEntity>()
                         .eq("id", row.getId());
+                // 同步更新备份表（按 subtitle_id + seq 定位）
+                UpdateWrapper<SubtitleCueBackupEntity> buw = new UpdateWrapper<SubtitleCueBackupEntity>()
+                        .eq("subtitle_id", e.getId()).eq("seq", row.getSeq());
                 if (contentChanged) {
                     uw.set("content", text);
+                    buw.set("content", text);
                     row.setContent(text);
                 }
                 if (translatedChanged) {
                     uw.set("translated_text", translated);
+                    buw.set("translated_text", translated);
                     row.setTranslatedText(translated);
                 }
                 cueMapper.update(null, uw);
+                cueBackupMapper.update(null, buw);
             }
         }
         // 同步归档到文件库（每次保存新增一条，文件名带目标语言；归档失败不阻断保存主流程）

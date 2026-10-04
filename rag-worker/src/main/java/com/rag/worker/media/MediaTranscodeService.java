@@ -126,6 +126,8 @@ public class MediaTranscodeService {
             e.setPlaybackKey(prefix + "master.m3u8");
             e.setPlaybackStatus(ST_READY);
             e.setPlaybackProgress(100);
+            e.setVideoWidth(probe.width() > 0 ? probe.width() : null);
+            e.setVideoHeight(probe.height() > 0 ? probe.height() : null);
             libraryFileMapper.updateById(e);
             progressPublisher.publish(e.getId(), ST_READY, 100);
             log.info("转码完成 file={} id={} 产物前缀={}", e.getFileName(), fileId, prefix);
@@ -185,20 +187,28 @@ public class MediaTranscodeService {
         }
         // 锁帧率（HLS 浏览器兼容性更稳），不缩放，保持源分辨率
         cmd.addAll(List.of("-r", String.valueOf(probe.fps())));
+        // 每 6 秒强制关键帧，与 -hls_time 对齐：保证分片切点均匀，避免分片时长/大小漂移
+        cmd.addAll(List.of("-force_key_frames", "expr:gte(t,n_forced*6)"));
         // 10-bit/其他像素格式转 8-bit yuv420p：NVENC 只支持 8-bit 编码，不加会报 "10 bit encode not supported"；
         // 8-bit 源此滤镜为透传无副作用，浏览器播放也要求 yuv420p
         cmd.addAll(List.of("-vf", "format=yuv420p"));
         if ("nvenc".equals(encoder)) {
-            // NVENC 画质模式：-cq 23（0-51，越低画质越高；23 为均衡点）
-            cmd.addAll(List.of("-c:v", "h264_nvenc", "-preset", "p1", "-cq", "23"));
+            // NVENC 质量模式：-cq 23（0-51，越低画质越高；23 为均衡点）
+            // p4 比 p1 压缩率明显更好（同质量码率更低）；maxrate 封顶防止 4K60 复杂场景码率失控
+            // （实测 ultrafast/p1 会把 6.7Mbps 的 HEVC 源膨胀到 35~85Mbps，单个 6 秒分片近百 MB 导致 HLS 播放中断）
+            cmd.addAll(List.of("-c:v", "h264_nvenc", "-preset", "p4", "-cq", "23",
+                    "-maxrate", "20M", "-bufsize", "40M"));
         } else {
-            // CPU 画质模式：-crf 23（ultrafast 预设速度最快，crf 23 画质均衡）
-            cmd.addAll(List.of("-c:v", "libx264", "-preset", "ultrafast", "-crf", "23"));
+            // CPU 质量模式：-crf 23；veryfast 压缩率显著优于 ultrafast（ultrafast 在 4K60 上码率会膨胀 5~13 倍），
+            // 叠加 maxrate 20M 封顶，6 秒分片约 15MB，兼顾画质与浏览器 HLS 加载
+            cmd.addAll(List.of("-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
+                    "-maxrate", "20M", "-bufsize", "40M"));
         }
         if (hasAudio) {
             cmd.addAll(List.of("-c:a", "aac", "-b:a", "128k"));
         }
         cmd.addAll(List.of("-f", "hls", "-hls_time", "6", "-hls_playlist_type", "vod",
+                "-hls_flags", "independent_segments",
                 "-hls_segment_filename", "seg_%03d.ts",
                 "master.m3u8"));
         return cmd;

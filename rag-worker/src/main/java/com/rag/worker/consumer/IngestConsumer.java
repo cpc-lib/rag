@@ -18,9 +18,11 @@ import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 
 import java.io.IOException;
+import java.util.concurrent.Executor;
 
 /**
- * 流水线消费者：手动 ack；失败按 retry_count 延迟重试（TTL 死信），超限入 DLQ 并置 FAILED。
+ * 流水线消费者：收到消息立即 ack，提交 ingestExecutor 异步执行；
+ * 失败按 retry_count 延迟重试（TTL 死信），超限入 DLQ 并置 FAILED。
  */
 @Slf4j
 @Component
@@ -33,6 +35,7 @@ public class IngestConsumer {
     private final PipelineProcessor processor;
     private final RetryPublisher retryPublisher;
     private final TenantMqSemaphore semaphore;
+    private final Executor ingestExecutor;
 
     @Value("${rag.worker.max-retry:3}")
     private int maxRetry;
@@ -51,25 +54,25 @@ public class IngestConsumer {
             channel.basicAck(tag, false);
             return;
         }
-        log.info("收到任务 task={} type={} doc={}", msg.taskId(), msg.type(), msg.documentId());
+        // 立即 ack：解析/Embedding/索引是分钟级阻塞操作，若等处理完再 ack 会触发 RabbitMQ
+        // consumer_timeout（默认 30 分钟）关闭通道并重新投递，导致任务重复执行。
+        // 幂等性由 DB 状态保证（PENDING 状态下重复投递会被忽略）。
+        channel.basicAck(tag, false);
+        log.info("收到任务 task={} type={} doc={}，已确认，异步执行", msg.taskId(), msg.type(), msg.documentId());
+        ingestExecutor.execute(() -> doProcess(msg));
+    }
 
+    private void doProcess(RetryPublisher.IngestMessage msg) {
         PipelineTaskEntity task = taskMapper.selectById(msg.taskId());
         if (task == null || !"PENDING".equals(task.getStatus())) {
             log.warn("任务不可执行（不存在或状态非 PENDING）task={} status={}",
                     msg.taskId(), task == null ? null : task.getStatus());
-            channel.basicAck(tag, false);
             return;
         }
 
-        // 租户并发额度：超出则 requeue 稍后再试
+        // 租户并发额度：超出则直接放弃（消息已 ack，不再 requeue；由用户重新触发或依赖重试机制）
         if (!semaphore.tryAcquire(msg.tenantId())) {
-            log.info("租户 {} MQ 并发已达上限，消息重新入队", msg.tenantId());
-            try {
-                Thread.sleep(2000);
-            } catch (InterruptedException ie) {
-                Thread.currentThread().interrupt();
-            }
-            channel.basicNack(tag, false, true);
+            log.warn("租户 {} MQ 并发已达上限，任务跳过 task={}", msg.tenantId(), msg.taskId());
             return;
         }
 
@@ -78,23 +81,20 @@ public class IngestConsumer {
             taskMapper.updateById(task);
             processor.process(msg, task);
             taskMapper.updateById(task);
-            channel.basicAck(tag, false);
             log.info("任务成功 task={}", msg.taskId());
         } catch (StoppedException e) {
-            // 用户主动停止：任务置 CANCELLED，直接 ack，不进入重试
+            // 用户主动停止：任务置 CANCELLED，不进入重试
             task.setStatus("CANCELLED");
             taskMapper.updateById(task);
-            channel.basicAck(tag, false);
             log.info("任务已被用户停止 task={}", msg.taskId());
         } catch (Exception e) {
-            handleFailure(msg, task, e, channel, tag);
+            handleFailure(msg, task, e);
         } finally {
             semaphore.release(msg.tenantId());
         }
     }
 
-    private void handleFailure(RetryPublisher.IngestMessage msg, PipelineTaskEntity task,
-                               Exception e, Channel channel, long tag) throws IOException {
+    private void handleFailure(RetryPublisher.IngestMessage msg, PipelineTaskEntity task, Exception e) {
         String error = e.getMessage() == null ? e.getClass().getSimpleName() : e.getMessage();
         log.error("任务失败 task={} retry={}: {}", msg.taskId(), task.getRetryCount(), error, e);
         int nextRetry = (task.getRetryCount() == null ? 0 : task.getRetryCount()) + 1;
@@ -105,7 +105,6 @@ public class IngestConsumer {
             taskMapper.updateById(task);
             long delay = retryBaseDelayMs * nextRetry;
             retryPublisher.publishRetry(msg, delay);
-            channel.basicAck(tag, false);
             log.info("任务将延迟 {}ms 后第 {} 次重试 task={}", delay, nextRetry, msg.taskId());
         } else {
             task.setStatus("FAILED");
@@ -120,7 +119,6 @@ public class IngestConsumer {
                 retryPublisher.publishDlq(msg);
             } catch (Exception ignored) {
             }
-            channel.basicAck(tag, false);
             log.error("任务重试超限，已入 DLQ task={}", msg.taskId());
         }
     }
