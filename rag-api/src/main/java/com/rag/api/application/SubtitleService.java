@@ -42,6 +42,8 @@ public class SubtitleService {
 
     private static final int BATCH_SIZE = 25;
     private static final int CONTEXT_RADIUS = 5;
+    /** 条数不符二分重译的最小批大小：不大于该值的批次仍失败则逐条兜底。 */
+    private static final int SPLIT_MIN = 8;
 
     private final SubtitleMapper subtitleMapper;
     private final SubtitleCueMapper cueMapper;
@@ -320,34 +322,47 @@ public class SubtitleService {
             for (int i = to; i < Math.min(texts.size(), to + CONTEXT_RADIUS); i++) {
                 after.add(texts.get(i));
             }
-            List<String> translated;
-            try {
-                translated = callTranslate(batchTexts, before, after, m, targetLabel, null);
-                if (translated.size() != batchTexts.size()) {
-                    // 一次纠错重试：向模型反馈实际返回条数，要求严格逐条对应
-                    log.warn("翻译条数不匹配（{} != {}），带反馈重试", translated.size(), batchTexts.size());
-                    translated = callTranslate(batchTexts, before, after, m, targetLabel, translated.size());
-                }
-            } catch (BizException be) {
-                // 整批调用失败（超时/返回格式异常等）：降级逐条，不阻断整体
-                log.warn("整批翻译调用失败，降级为逐条翻译: {}", be.getMessage());
-                translated = List.of();
-            }
-            if (translated.size() != batchTexts.size()) {
-                // 反馈重试后仍不匹配（或整批调用失败）：逐条翻译兜底，保证条数严格对齐（个别失败保留原文）
-                log.warn("批量翻译条数不符（{} != {}），降级为逐条翻译", translated.size(), batchTexts.size());
-                translated = translateOneByOne(batchTexts, m, targetLabel);
-            }
-            result.addAll(translated);
+            result.addAll(translateBatch(batchTexts, before, after, m, targetLabel));
         }
         return result;
     }
 
     /**
-     * 调用 LLM 翻译一批字幕。prevCount 非空时表示上一轮返回条数不符，附带纠错反馈重试。
+     * 翻译一批并保证返回条数与输入严格一致。
+     * 模型返回条数不符时（常见于弱模型合并/漏译相邻短句），不做整批反馈重试（实测重试常更差），
+     * 而是二分小批重译——批量越小模型越不易出错；批次不大于 SPLIT_MIN 仍失败则逐条兜底。
+     * 典型路径：25 条失败 → 12+13 两个小批成功，共 3 次调用（原方案需 1+1+25 次）。
      */
+    private List<String> translateBatch(List<String> texts, List<String> before, List<String> after,
+                                        ModelEntity m, String targetLabel) {
+        List<String> translated;
+        try {
+            translated = callTranslate(texts, before, after, m, targetLabel);
+        } catch (BizException be) {
+            // 整批调用失败（超时/返回格式异常等）：按条数不符同样走二分/逐条降级
+            log.warn("批量翻译调用失败（{} 条）: {}", texts.size(), be.getMessage());
+            translated = List.of();
+        }
+        if (translated.size() == texts.size()) {
+            return translated;
+        }
+        if (texts.size() <= SPLIT_MIN) {
+            log.warn("批量翻译条数不符（{} != {}），降级为逐条翻译", translated.size(), texts.size());
+            return translateOneByOne(texts, m, targetLabel);
+        }
+        int mid = texts.size() / 2;
+        log.warn("批量翻译条数不符（{} != {}），二分重译 {}/{} 条",
+                translated.size(), texts.size(), mid, texts.size() - mid);
+        // 子批内部条目彼此相邻即互为上下文，不再附带跨批上下文
+        List<String> out = new ArrayList<>(texts.size());
+        out.addAll(translateBatch(texts.subList(0, mid), List.of(), List.of(), m, targetLabel));
+        out.addAll(translateBatch(texts.subList(mid, texts.size()), List.of(), List.of(), m, targetLabel));
+        return out;
+    }
+
+    /** 调用 LLM 翻译一批字幕。 */
     private List<String> callTranslate(List<String> texts, List<String> before, List<String> after,
-                                       ModelEntity m, String targetLabel, Integer prevCount) {
+                                       ModelEntity m, String targetLabel) {
         // 系统提示词来自租户级字幕翻译模板（支持 {{目标语言}} 占位符），模板不存在时自动播种默认值
         String system = promptTemplateService.renderSubtitle(
                 promptTemplateService.getSubtitleTemplate(TenantContext.require().tenantId()), targetLabel);
@@ -378,11 +393,6 @@ public class SubtitleService {
                 .append("元素只能是字符串；字符串内双引号用 \\\" 转义、换行用 \\n 表示，空条目输出 \"\"。")
                 .append("示例（输入 2 条）：[")
                 .append("\"译文1\",\"译文2\"]");
-        if (prevCount != null) {
-            user.append("\n注意：你上次返回了 ").append(prevCount).append(" 条，但待翻译输入是 ")
-                    .append(texts.size()).append(" 条。请严格逐条对应，恰好返回 ")
-                    .append(texts.size()).append(" 条，不要合并或拆分任何条目。");
-        }
 
         try {
             var msg = llmClient.chatOnce(m.getBaseUrl(), m.getApiKey(), m.getModel(),
@@ -406,7 +416,7 @@ public class SubtitleService {
         List<String> out = new ArrayList<>(texts.size());
         for (String t : texts) {
             try {
-                out.add(callTranslate(List.of(t), List.of(), List.of(), m, targetLabel, null).get(0));
+                out.add(callTranslate(List.of(t), List.of(), List.of(), m, targetLabel).get(0));
             } catch (Exception ex) {
                 log.warn("单条翻译失败，保留原文: {}", ex.getMessage());
                 out.add(t);
@@ -455,7 +465,7 @@ public class SubtitleService {
                 throw new BizException(com.rag.api.common.ErrorCode.UPSTREAM,
                         "翻译条数不匹配（" + arr.size() + " != 1）");
             }
-            // 批量场景不在此校验条数：原样返回，由上层做"带反馈纠错重试"，避免直接降级逐条
+            // 批量场景不在此校验条数：原样返回，由上层二分小批重译/逐条兜底保证条数对齐
             return arr;
         } catch (IOException e) {
             throw new BizException(com.rag.api.common.ErrorCode.UPSTREAM,

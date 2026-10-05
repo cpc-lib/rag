@@ -6,6 +6,7 @@ import com.rag.api.common.BizException;
 import com.rag.api.common.ErrorCode;
 import io.milvus.v2.client.ConnectConfig;
 import io.milvus.v2.client.MilvusClientV2;
+import io.milvus.v2.client.RetryConfig;
 import io.milvus.v2.service.collection.request.AddFieldReq;
 import io.milvus.v2.service.collection.request.CreateCollectionReq;
 import io.milvus.v2.service.collection.request.DropCollectionReq;
@@ -50,11 +51,29 @@ public class MilvusClientWrapper {
         if (client == null) {
             synchronized (this) {
                 if (client == null) {
-                    client = new MilvusClientV2(ConnectConfig.builder().uri("http://" + host + ":" + port).build());
+                    client = createClient();
                 }
             }
         }
         return client;
+    }
+
+    private MilvusClientV2 createClient() {
+        // SDK 默认重试 75 次且总时长无上限，Milvus 宕机时调用线程会被挂住数分钟。
+        // 收紧超时与重试：建连 3s、单次 RPC 10s 截止（DEADLINE_EXCEEDED 不重试）、最多重试 1 次，
+        // 失败由上层降级（向量召回失败时仅走 ES 关键词检索）。
+        MilvusClientV2 c = new MilvusClientV2(ConnectConfig.builder()
+                .uri("http://" + host + ":" + port)
+                .connectTimeoutMs(3000)
+                .rpcDeadlineMs(10000)
+                .build());
+        c.retryConfig(RetryConfig.builder()
+                .maxRetryTimes(2)
+                .initialBackOffMs(100)
+                .maxBackOffMs(1000)
+                .build());
+        log.info("Milvus 客户端已初始化: {}:{}（connectTimeout=3s, rpcDeadline=10s, maxRetry=2）", host, port);
+        return c;
     }
 
     public boolean hasCollection(String collection) {

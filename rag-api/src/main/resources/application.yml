@@ -64,6 +64,7 @@ rag:
   jwt:
     secret: ${RAG_JWT_SECRET:rag-dev-secret-key-change-me-32bytes!!}
     ttl-hours: 2
+    renew-minutes: 10
   minio:
     endpoint: http://${MIDDLEWARE_HOST:192.168.1.200}:${MINIO_PORT:9000}
     access-key: ${MINIO_USER:minioadmin}

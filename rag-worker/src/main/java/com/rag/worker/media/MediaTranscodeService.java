@@ -20,7 +20,8 @@ import java.util.stream.Stream;
 
 /**
  * 文件库视频转码：ffprobe 探测分辨率/帧率 → 保持源画质单档 HLS（不缩放、锁源帧率）。
- * 源为 H.264+AAC 时 -c copy 直切（不重编码，秒级）；其余优先 NVENC 硬编（-cq 画质模式），失败回退 CPU 软编。
+ * 源为 H.264+AAC 时 -c copy 直切（不重编码，秒级）；其余长视频按时间轴 3 段并行 NVENC 硬编后 concat 直拷封装，
+ * 短视频走单次 NVENC（-cq 画质模式，帧全程驻留 GPU），失败逐级回退 CPU 软编。
  * 产物上传 MinIO {objectKey}.hls/（master.m3u8 + 分片），回写 library_file.playback_key/status。
  */
 @Service
@@ -31,14 +32,20 @@ public class MediaTranscodeService {
     private static final Set<String> AUDIO_OK = Set.of("aac", "mp3");
     private static final String ST_READY = "READY";
     private static final String ST_FAILED = "FAILED";
+    /** 并行分段转码：时长 >= 该值才切段（短视频直接串行，避免进程开销）。 */
+    private static final double PARALLEL_MIN_DURATION_SEC = 60;
+    /** HLS 分片目标时长（秒），切段点对齐其整数倍网格，保证 concat 直拷后分片均匀。 */
+    private static final int SEG_GRID_SEC = 6;
 
     private final LibraryFileMapper libraryFileMapper;
     private final MinioStorage minioStorage;
     private final MediaProgressPublisher progressPublisher;
     private final String ffmpegPath;
     private final String ffprobePath;
-    /** 运行中的 ffmpeg 进程（停止转码时强杀）。 */
-    private final java.util.Map<Long, Process> runningProcesses = new java.util.concurrent.ConcurrentHashMap<>();
+    /** 并行分段转码的分段数（M4000 实测 3 路并发可榨干 NVENC：聚合约 4x 单路速度）。 */
+    private final int transcodeParallel;
+    /** 运行中的 ffmpeg 进程（并行转码时每个文件可有多个；停止转码时全部强杀）。 */
+    private final java.util.Map<Long, List<Process>> runningProcesses = new java.util.concurrent.ConcurrentHashMap<>();
     /** 已请求停止的 fileId：未起进程时（下载/探测阶段）在阶段边界中止。 */
     private final Set<Long> stopRequested = java.util.concurrent.ConcurrentHashMap.newKeySet();
 
@@ -49,12 +56,12 @@ public class MediaTranscodeService {
         }
     }
 
-    /** 请求停止：已起 ffmpeg 进程则强杀，否则标记后在阶段边界中止。 */
+    /** 请求停止：已起 ffmpeg 进程则全部强杀，否则标记后在阶段边界中止。 */
     public void requestStop(long fileId) {
         stopRequested.add(fileId);
-        Process p = runningProcesses.get(fileId);
-        if (p != null) {
-            p.destroyForcibly();
+        List<Process> ps = runningProcesses.get(fileId);
+        if (ps != null) {
+            ps.forEach(Process::destroyForcibly);
         }
     }
 
@@ -67,12 +74,14 @@ public class MediaTranscodeService {
     public MediaTranscodeService(LibraryFileMapper libraryFileMapper,
                                  MinioStorage minioStorage,
                                  MediaProgressPublisher progressPublisher,
-                                 @Value("${rag.media.ffmpeg-path:ffmpeg}") String ffmpegPath) {
+                                 @Value("${rag.media.ffmpeg-path:ffmpeg}") String ffmpegPath,
+                                 @Value("${rag.media.transcode-parallel:3}") int transcodeParallel) {
         this.libraryFileMapper = libraryFileMapper;
         this.minioStorage = minioStorage;
         this.progressPublisher = progressPublisher;
         this.ffmpegPath = ffmpegPath;
         this.ffprobePath = ffmpegPath.replace("ffmpeg.exe", "ffprobe.exe");
+        this.transcodeParallel = Math.max(1, transcodeParallel);
     }
 
     /** 执行转码：READY 幂等跳过；产物就绪回写 READY，异常由调用方置 FAILED。
@@ -137,9 +146,23 @@ public class MediaTranscodeService {
     }
 
     /** 源画质转码：保持源分辨率与帧率，画质模式（NVENC -cq / x264 -crf），只出单档 HLS。
-     *  回退链：GPU 解码+NVENC → CPU 解码+NVENC → CPU 软编 x264。 */
+     *  回退链：NVENC 时间轴并行分段（长视频）→ GPU 解码+NVENC → CPU 解码+NVENC → CPU 软编 x264。 */
     private void transcodeSource(String inputUrl, Path outDir, Path workDir, Probe probe,
                                  LibraryFileEntity entity) throws Exception {
+        // 长视频优先按时间轴切段并行转码：单路 ffmpeg 只能跑满约一半 NVENC（M4000 实测），
+        // 3 路并发聚合速度约 4x；任何一段失败都整体回退下方串行链路
+        if (nvencAvailable() && probe.durationSec() >= PARALLEL_MIN_DURATION_SEC) {
+            try {
+                parallelTranscode(inputUrl, outDir, workDir, probe, entity);
+                return;
+            } catch (StoppedException se) {
+                throw se;
+            } catch (Exception ex) {
+                log.warn("并行分段转码失败，回退串行链路 file={}: {}", entity.getFileName(), ex.getMessage());
+                deleteRecursively(outDir);
+                Files.createDirectories(outDir);
+            }
+        }
         if (!nvencAvailable()) {
             log.info("源画质转码 file={} 分辨率={}x{} 帧率={} 编码器=x264 音频={}",
                     entity.getFileName(), probe.width(), probe.height(),
@@ -174,12 +197,174 @@ public class MediaTranscodeService {
         runFfmpeg(workDir, outDir, buildCmd(inputUrl, probe, "x264", false), probe.durationSec(), entity);
     }
 
-    /** 构建转码命令：保持源分辨率与源帧率；hwaccel=true 时用 GPU 解码（不支持的编码自动回退软解）。 */
+    /**
+     * 时间轴并行分段转码：把视频按 SEG_GRID_SEC 网格切成 K 段（K<=transcodeParallel），
+     * K 个 ffmpeg 同时各自硬解+NVENC 输出 MPEG-TS 分片，再用 concat 解复用器 -c copy 秒级封装为统一 HLS。
+     * 切段长度取 6 秒整数倍，段内关键帧按帧间隔固定（mpegts+seek 下 -force_key_frames 时间表达式不可靠），
+     * 保证 concat 直拷后 HLS 分片仍均匀 ≤6s。任一段失败抛异常，由上层回退串行链路。
+     */
+    private void parallelTranscode(String inputUrl, Path outDir, Path workDir, Probe probe,
+                                   LibraryFileEntity entity) throws Exception {
+        double duration = probe.durationSec();
+        // 理想段长向上取整到 6s 网格：各切段起点都落在全局 6s 关键帧网格上，分段数不超过并行度
+        double idealLen = duration / transcodeParallel;
+        double chunkLen = Math.ceil(idealLen / SEG_GRID_SEC) * SEG_GRID_SEC;
+        List<double[]> ranges = new ArrayList<>();
+        for (double start = 0; start < duration - 1e-3; start += chunkLen) {
+            ranges.add(new double[]{start, Math.min(chunkLen, duration - start)});
+        }
+        int k = ranges.size();
+        // 30fps→180 帧一个关键帧；29.97 等分数帧率取整后段内 6.006s，浏览器 HLS 兼容
+        int gopFrames = Math.max(1, (int) Math.round(probe.fps() * SEG_GRID_SEC));
+
+        Path chunksDir = outDir.resolve("_chunks");
+        Files.createDirectories(chunksDir);
+        log.info("并行分段转码 file={} 段数={} 段长≈{}s 编码器=nvenc（{}x 并发）",
+                entity.getFileName(), k, String.format(java.util.Locale.US, "%.0f", chunkLen), k);
+
+        double[] weights = new double[k];
+        for (int i = 0; i < k; i++) {
+            weights[i] = ranges.get(i)[1] / duration;
+        }
+        ParallelProgress progress = new ParallelProgress(entity, weights);
+
+        java.util.concurrent.ExecutorService pool = java.util.concurrent.Executors.newFixedThreadPool(k);
+        try {
+            List<java.util.concurrent.Future<?>> futures = new ArrayList<>();
+            for (int i = 0; i < k; i++) {
+                final int idx = i;
+                futures.add(pool.submit(() -> {
+                    try {
+                        List<String> cmd = buildChunkCmd(inputUrl, probe,
+                                ranges.get(idx)[0], ranges.get(idx)[1], gopFrames, idx);
+                        runProcess(chunksDir, workDir.resolve("chunk_" + idx + ".log"), cmd,
+                                ranges.get(idx)[1], entity, 0, 100, pct -> progress.update(idx, pct));
+                    } catch (Exception ex) {
+                        throw new RuntimeException(ex);
+                    }
+                }));
+            }
+            // 汇总异常：首个失败段立即强杀其余段，快速回退串行（不等它们跑完）
+            Exception first = null;
+            for (java.util.concurrent.Future<?> f : futures) {
+                try {
+                    f.get();
+                } catch (java.util.concurrent.ExecutionException ee) {
+                    Throwable cause = ee.getCause() instanceof RuntimeException re && re.getCause() != null
+                            ? re.getCause() : ee.getCause();
+                    if (first == null) {
+                        first = cause instanceof Exception e ? e : new RuntimeException(cause);
+                        List<Process> siblings = runningProcesses.get(entity.getId());
+                        if (siblings != null) {
+                            siblings.forEach(Process::destroyForcibly);
+                        }
+                    }
+                }
+            }
+            if (first != null) {
+                if (stopRequested.contains(entity.getId())) {
+                    throw new StoppedException("转码已停止 fileId=" + entity.getId());
+                }
+                throw first;
+            }
+        } finally {
+            pool.shutdownNow();
+        }
+        checkStopped(entity.getId());
+
+        // concat 清单（路径相对清单所在目录）
+        StringBuilder list = new StringBuilder();
+        for (int i = 0; i < k; i++) {
+            list.append("file 'chunk_").append(i).append(".ts'\n");
+        }
+        Files.writeString(chunksDir.resolve("list.txt"), list.toString(), StandardCharsets.UTF_8);
+        // -c copy 直拷封装 HLS：不重编码，秒级完成（无时长信息，进度条保持在并行段结束时的位置）
+        List<String> concatCmd = new ArrayList<>(List.of(ffmpegPath, "-y",
+                "-f", "concat", "-safe", "0", "-i", "_chunks/list.txt",
+                "-c", "copy", "-f", "hls", "-hls_time", String.valueOf(SEG_GRID_SEC),
+                "-hls_playlist_type", "vod", "-hls_flags", "independent_segments",
+                "-hls_segment_filename", "seg_%03d.ts", "master.m3u8"));
+        runProcess(outDir, workDir.resolve("concat.log"), concatCmd, 0, entity, 0, 100, pct -> {
+        });
+        deleteRecursively(chunksDir);
+        log.info("并行分段转码封装完成 file={}", entity.getFileName());
+    }
+
+    /** 构建单段转码命令：-ss 输入快seek（转码时 ffmpeg 自动精确到目标时间戳），输出 mpegts 连续分片。 */
+    private List<String> buildChunkCmd(String inputUrl, Probe probe, double startSec, double lengthSec,
+                                       int gopFrames, int chunkIndex) {
+        boolean hasAudio = probe.acodec() != null;
+        List<String> cmd = new ArrayList<>(List.of(ffmpegPath, "-y",
+                // HEVC 等本卡不支持硬解的编码自动回退软解，解码帧经 hwupload_cuda 上送 NVENC，两种解码都兼容
+                "-hwaccel", "cuda",
+                "-ss", String.format(java.util.Locale.US, "%.3f", startSec),
+                "-i", inputUrl,
+                "-t", String.format(java.util.Locale.US, "%.3f", lengthSec),
+                "-map", "0:v:0"));
+        if (hasAudio) {
+            cmd.addAll(List.of("-map", "0:a:0?"));
+        }
+        cmd.addAll(List.of("-r", String.valueOf(probe.fps())));
+        // 帧间隔固定关键帧（比时间表达式在 mpegts 输出下更可靠），与 6s HLS 网格对齐
+        cmd.addAll(List.of("-g", String.valueOf(gopFrames), "-keyint_min", String.valueOf(gopFrames)));
+        cmd.addAll(List.of("-vf", "format=yuv420p,hwupload_cuda"));
+        if (hasAudio) {
+            // 切段边界补偿 AAC 编码 priming，避免拼接处音画累计漂移
+            cmd.addAll(List.of("-af", "aresample=async=1"));
+        }
+        // 与串行 NVENC 路径同一画质/码控参数
+        cmd.addAll(List.of("-c:v", "h264_nvenc", "-preset", "p4", "-cq", "23",
+                "-maxrate", "20M", "-bufsize", "40M"));
+        if (hasAudio) {
+            cmd.addAll(List.of("-c:a", "aac", "-b:a", "128k"));
+        }
+        cmd.addAll(List.of("-f", "mpegts", "chunk_" + chunkIndex + ".ts"));
+        return cmd;
+    }
+
+    /** 多段并行进度聚合：按各段时长权重汇总成整体百分比，500ms 节流写库 + WebSocket 推送。 */
+    private final class ParallelProgress {
+        private final LibraryFileEntity entity;
+        private final double[] weights;
+        private final double[] fractions;
+        private long lastUpdate;
+        private int lastPct = -1;
+
+        ParallelProgress(LibraryFileEntity entity, double[] weights) {
+            this.entity = entity;
+            this.weights = weights;
+            this.fractions = new double[weights.length];
+        }
+
+        synchronized void update(int chunk, int pct) {
+            fractions[chunk] = pct / 100.0;
+            double done = 0;
+            for (int i = 0; i < fractions.length; i++) {
+                done += weights[i] * fractions[i];
+            }
+            int global = (int) Math.min(99, Math.round(done * 100));
+            long now = System.currentTimeMillis();
+            if (global != lastPct && now - lastUpdate >= 500) {
+                lastPct = global;
+                lastUpdate = now;
+                try {
+                    entity.setPlaybackProgress(global);
+                    libraryFileMapper.updateById(entity);
+                    progressPublisher.publish(entity.getId(), "PROCESSING", global);
+                } catch (Exception ignored) {
+                    // 进度回写失败不影响转码主流程
+                }
+            }
+        }
+    }
+
+    /** 构建转码命令：保持源分辨率与源帧率；hwaccel=true 时帧全程驻留 GPU（CUDA 解码 + scale_cuda 格式转换）。 */
     private List<String> buildCmd(String inputUrl, Probe probe, String encoder, boolean hwaccel) {
         boolean hasAudio = probe.acodec() != null;
         List<String> cmd = new ArrayList<>(List.of(ffmpegPath, "-y"));
         if (hwaccel) {
-            cmd.addAll(List.of("-hwaccel", "cuda"));
+            // 解码帧保留在显存（不回传系统内存），scale_cuda 在 GPU 上做像素格式转换后直接喂 NVENC
+            cmd.addAll(List.of("-hwaccel", "cuda", "-hwaccel_output_format", "cuda"));
         }
         cmd.addAll(List.of("-i", inputUrl, "-map", "0:v:0"));
         if (hasAudio) {
@@ -191,7 +376,7 @@ public class MediaTranscodeService {
         cmd.addAll(List.of("-force_key_frames", "expr:gte(t,n_forced*6)"));
         // 10-bit/其他像素格式转 8-bit yuv420p：NVENC 只支持 8-bit 编码，不加会报 "10 bit encode not supported"；
         // 8-bit 源此滤镜为透传无副作用，浏览器播放也要求 yuv420p
-        cmd.addAll(List.of("-vf", "format=yuv420p"));
+        cmd.addAll(List.of("-vf", hwaccel ? "scale_cuda=format=yuv420p" : "format=yuv420p"));
         if ("nvenc".equals(encoder)) {
             // NVENC 质量模式：-cq 23（0-51，越低画质越高；23 为均衡点）
             // p4 比 p1 压缩率明显更好（同质量码率更低）；maxrate 封顶防止 4K60 复杂场景码率失控
@@ -317,29 +502,48 @@ public class MediaTranscodeService {
     }
 
     /**
-     * 执行 ffmpeg：stderr 落工作目录 ffmpeg.log；stdout 接 -progress pipe:1 输出，
-     * 由读取线程按 out_time_ms（微秒）/ 总时长计算进度，节流回写 library_file.playback_progress。
+     * 串行转码执行入口：stderr 落工作目录 ffmpeg.log；stdout 接 -progress pipe:1，
+     * 按 out_time_ms（微秒）/ 总时长计算进度，节流回写 library_file.playback_progress。
      */
     private void runFfmpeg(Path workDir, Path processDir, List<String> cmd, double durationSec,
                            LibraryFileEntity entity) throws Exception {
-        runFfmpeg(workDir, processDir, cmd, durationSec, entity, 0, 100);
+        int[] lastMilestone = {0};
+        runProcess(processDir, workDir.resolve("ffmpeg.log"), cmd, durationSec, entity, 0, 100, pct -> {
+            try {
+                entity.setPlaybackProgress(pct);
+                libraryFileMapper.updateById(entity);
+                // Redis 广播进度事件，rag-api 经 WebSocket 推给前端
+                progressPublisher.publish(entity.getId(), "PROCESSING", pct);
+                // 每跨 10% 打一次里程碑日志，避免刷屏
+                if (pct / 10 > lastMilestone[0] / 10) {
+                    log.info("转码进度 file={} {}%", entity.getFileName(), pct);
+                }
+                lastMilestone[0] = pct;
+            } catch (Exception ignored) {
+                // 进度回写失败不影响转码主流程
+            }
+        });
     }
 
-    /** progressBase/progressSpan：逐档串行时把单档进度折算到整体进度区间。 */
-    private void runFfmpeg(Path workDir, Path processDir, List<String> cmd, double durationSec,
-                           LibraryFileEntity entity, double progressBase, double progressSpan) throws Exception {
+    /**
+     * 通用 ffmpeg 进程执行：相对路径输出（HLS 在 Windows 下绝对路径会 Permission denied），
+     * 进程登记到运行表（同一文件并行段可有多个进程），进度百分比经 onPct 回调上报（由调用方决定写库/聚合方式）。
+     */
+    private void runProcess(Path processDir, Path logFile, List<String> cmd, double durationSec,
+                            LibraryFileEntity entity, double progressBase, double progressSpan,
+                            java.util.function.IntConsumer onPct) throws Exception {
         List<String> full = new ArrayList<>(cmd);
         full.addAll(full.indexOf("-y") + 1, List.of("-nostats", "-progress", "pipe:1"));
         log.info("执行 ffmpeg: {}", String.join(" ", full).replaceAll("https?://\\S+", "<presigned-url>"));
-        Path ffmpegLog = workDir.resolve("ffmpeg.log");
         ProcessBuilder pb = new ProcessBuilder(full);
-        // HLS 输出用相对路径（Windows 上 var_stream_map + 绝对路径会 Permission denied），故指定工作目录
         pb.directory(processDir.toFile());
-        pb.redirectError(ffmpegLog.toFile());
+        pb.redirectError(logFile.toFile());
         Process process = pb.start();
-        runningProcesses.put(entity.getId(), process);
+        List<Process> registered = runningProcesses.computeIfAbsent(entity.getId(),
+                k -> java.util.Collections.synchronizedList(new ArrayList<>()));
+        registered.add(process);
         try {
-            Thread reader = new Thread(() -> reportProgress(process, durationSec, entity, progressBase, progressSpan));
+            Thread reader = new Thread(() -> reportProgress(process, durationSec, progressBase, progressSpan, onPct));
             reader.setDaemon(true);
             reader.start();
             boolean finished = process.waitFor(60, TimeUnit.MINUTES);
@@ -352,10 +556,11 @@ public class MediaTranscodeService {
             }
             if (!finished || process.exitValue() != 0) {
                 throw new IllegalStateException("ffmpeg 处理失败，exit=" + (finished ? process.exitValue() : "超时")
-                        + "，日志尾部: " + tailLog(ffmpegLog));
+                        + "，日志尾部: " + tailLog(logFile));
             }
         } finally {
-            runningProcesses.remove(entity.getId());
+            registered.remove(process);
+            runningProcesses.remove(entity.getId(), registered);
         }
     }
 
@@ -370,9 +575,10 @@ public class MediaTranscodeService {
         }
     }
 
-    /** 读取 ffmpeg -progress 输出并回写转码进度（≥500ms 且百分比变化才写库，避免刷库）。 */
-    private void reportProgress(Process process, double durationSec, LibraryFileEntity entity,
-                                double progressBase, double progressSpan) {
+    /** 读取 ffmpeg -progress 输出，折算百分比后回调 onPct（≥500ms 且百分比变化才回调，避免刷库）。 */
+    private void reportProgress(Process process, double durationSec,
+                                double progressBase, double progressSpan,
+                                java.util.function.IntConsumer onPct) {
         if (durationSec <= 0) {
             // 无时长也要把 stdout 排空，避免管道写满阻塞 ffmpeg
             try (java.io.BufferedReader br = new java.io.BufferedReader(
@@ -389,7 +595,6 @@ public class MediaTranscodeService {
             String line;
             long lastUpdate = 0;
             int lastPct = -1;
-            int lastMilestone = (int) progressBase;
             while ((line = br.readLine()) != null) {
                 if (!line.startsWith("out_time_ms=")) {
                     continue;
@@ -400,26 +605,14 @@ public class MediaTranscodeService {
                 } catch (NumberFormatException ex) {
                     continue;
                 }
-                // ffmpeg 的 out_time_ms 实为微秒；单档进度折算到 [base, base+span] 区间，封顶 99，100 由转码完成后统一回写
+                // ffmpeg 的 out_time_ms 实为微秒；折算到 [base, base+span] 区间，封顶 99，100 由转码完成后统一回写
                 double raw = micros / 1_000_000.0 / durationSec * 100;
                 int pct = (int) Math.min(99, Math.round(progressBase + progressSpan * Math.min(100, raw) / 100));
                 long now = System.currentTimeMillis();
                 if (pct != lastPct && now - lastUpdate >= 500) {
                     lastPct = pct;
                     lastUpdate = now;
-                    try {
-                        entity.setPlaybackProgress(pct);
-                        libraryFileMapper.updateById(entity);
-                        // Redis 广播进度事件，rag-api 经 WebSocket 推给前端
-                        progressPublisher.publish(entity.getId(), "PROCESSING", pct);
-                        // 每跨 10% 打一次里程碑日志，避免刷屏
-                        if (pct / 10 > lastMilestone / 10) {
-                            log.info("转码进度 file={} {}%", entity.getFileName(), pct);
-                        }
-                        lastMilestone = pct;
-                    } catch (Exception ignored) {
-                        // 进度回写失败不影响转码主流程
-                    }
+                    onPct.accept(pct);
                 }
             }
         } catch (Exception ignored) {

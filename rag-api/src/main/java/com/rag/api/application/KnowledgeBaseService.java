@@ -8,9 +8,11 @@ import com.rag.api.common.TenantContext;
 import com.rag.api.infrastructure.persistence.entity.ChunkEntity;
 import com.rag.api.infrastructure.persistence.entity.DocumentEntity;
 import com.rag.api.infrastructure.persistence.entity.KnowledgeBaseEntity;
+import com.rag.api.infrastructure.persistence.entity.PipelineTaskEntity;
 import com.rag.api.infrastructure.persistence.mapper.ChunkMapper;
 import com.rag.api.infrastructure.persistence.mapper.DocumentMapper;
 import com.rag.api.infrastructure.persistence.mapper.KnowledgeBaseMapper;
+import com.rag.api.infrastructure.persistence.mapper.PipelineTaskMapper;
 import com.rag.api.infrastructure.search.EsSearchClient;
 import com.rag.api.infrastructure.search.MilvusClientWrapper;
 import com.rag.api.infrastructure.storage.MinioStorage;
@@ -18,6 +20,7 @@ import com.rag.api.interfaces.dto.Dtos;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
 
 import java.util.List;
 
@@ -40,6 +43,7 @@ public class KnowledgeBaseService {
     private final UserManageService userManageService;
     private final PromptTemplateService promptTemplateService;
     private final FileLibraryService fileLibraryService;
+    private final PipelineTaskMapper pipelineTaskMapper;
 
     public KnowledgeBaseEntity create(Dtos.KbCreateReq req) {
         TenantContext.Session s = TenantContext.require();
@@ -112,7 +116,8 @@ public class KnowledgeBaseService {
         return kb;
     }
 
-    /** 级联删除：切片/文档行 + MinIO 前缀 + Milvus 集合 + ES 索引。 */
+    /** 级联删除：切片/文档/流水线任务/提示词/授权行 + MinIO 前缀 + Milvus 集合 + ES 索引。 */
+    @Transactional
     public void delete(long kbId) {
         KnowledgeBaseEntity kb = getOwned(kbId);
         if (TenantContext.require().userType() != 1) {
@@ -126,6 +131,8 @@ public class KnowledgeBaseService {
                 .map(o -> ((Number) o).longValue())
                 .toList();
         documentMapper.delete(new QueryWrapper<DocumentEntity>().eq("kb_id", kbId));
+        // 流水线任务（与单文档删除 DocumentAppService.delete 保持一致，避免残留 PENDING/SUCCESS 任务）
+        pipelineTaskMapper.delete(new QueryWrapper<PipelineTaskEntity>().eq("kb_id", kbId));
         promptTemplateService.deleteByKb(kbId);
         userManageService.onKbDeleted(kbId);
         minio.deletePrefix(kb.getTenantId() + "/" + kbId + "/");
