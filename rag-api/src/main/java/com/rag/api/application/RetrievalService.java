@@ -83,17 +83,27 @@ public class RetrievalService {
         float[] vector = llmClient.embed(emb.getBaseUrl(), emb.getApiKey(),
                 emb.getModel(), List.of(question)).get(0);
         List<MilvusClientWrapper.MilvusHit> vectorHits = List.of();
+        long vecStart = System.currentTimeMillis();
         try {
             vectorHits = milvus.search(kb.getMilvusCollection(), vector, rc.vectorTopN);
+            log.info("向量检索（Milvus）kb={} collection={} topN={} 命中={}条 耗时={}ms",
+                    kbId, kb.getMilvusCollection(), rc.vectorTopN, vectorHits.size(),
+                    System.currentTimeMillis() - vecStart);
         } catch (Exception e) {
-            log.warn("向量检索失败（可能尚未建索引）kb={}: {}", kbId, e.getMessage());
+            log.warn("向量检索失败（可能尚未建索引）kb={} collection={} 耗时={}ms: {}",
+                    kbId, kb.getMilvusCollection(), System.currentTimeMillis() - vecStart, e.getMessage());
         }
         // 2. 关键词召回
         List<Long> keywordIds = List.of();
+        long kwStart = System.currentTimeMillis();
         try {
             keywordIds = es.search(kb.getEsIndex(), question, rc.keywordTopN);
+            log.info("关键词检索（ES BM25）kb={} index={} topN={} 命中={}条 耗时={}ms",
+                    kbId, kb.getEsIndex(), rc.keywordTopN, keywordIds.size(),
+                    System.currentTimeMillis() - kwStart);
         } catch (Exception e) {
-            log.warn("关键词检索失败（可能尚未建索引）kb={}: {}", kbId, e.getMessage());
+            log.warn("关键词检索失败（可能尚未建索引）kb={} index={} 耗时={}ms: {}",
+                    kbId, kb.getEsIndex(), System.currentTimeMillis() - kwStart, e.getMessage());
         }
         double bestScore = vectorHits.stream().mapToDouble(MilvusClientWrapper.MilvusHit::score)
                 .max().orElse(0.0);
@@ -106,11 +116,15 @@ public class RetrievalService {
         for (int i = 0; i < keywordIds.size(); i++) {
             rrf.merge(keywordIds.get(i), 1.0 / (rc.rrfK + i + 1), Double::sum);
         }
+        Set<Long> vectorIds = vectorHits.stream().map(MilvusClientWrapper.MilvusHit::chunkId).collect(Collectors.toSet());
+        long overlap = keywordIds.stream().filter(vectorIds::contains).count();
         List<Long> topIds = rrf.entrySet().stream()
                 .sorted(Map.Entry.<Long, Double>comparingByValue().reversed())
                 .limit(rc.topK)
                 .map(Map.Entry::getKey)
                 .toList();
+        log.info("RRF 融合 kb={} rrfK={} 向量={}条 关键词={}条 双路重叠={}条 融合去重={}条 入选topK={}条 ids={}",
+                kbId, rc.rrfK, vectorHits.size(), keywordIds.size(), overlap, rrf.size(), topIds.size(), topIds);
 
         // 4. child → parent 扩展：同 parent 去重（保留最高排名），parent 内容作为引用上下文
         Map<Long, ChunkEntity> chunks = topIds.isEmpty() ? Map.of()

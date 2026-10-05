@@ -60,19 +60,20 @@ public class MilvusClientWrapper {
 
     private MilvusClientV2 createClient() {
         // SDK 默认重试 75 次且总时长无上限，Milvus 宕机时调用线程会被挂住数分钟。
-        // 收紧超时与重试：建连 3s、单次 RPC 10s 截止（DEADLINE_EXCEEDED 不重试）、最多重试 1 次，
-        // 失败由上层降级（向量召回失败时仅走 ES 关键词检索）。
+        // 仅收紧重试：建连探测 3s 超时、最多重试 2 次（退避 100ms~1s），失败由上层降级（向量召回失败时仅走 ES）。
+        // 注意：不要设置 rpcDeadlineMs——SDK 2.4.3 在 rpcDeadlineMs>0 时会同时 withWaitForReady()，
+        // 宕机期间 RPC 在 gRPC 延迟队列里停车等待重连，恢复后携带早已过期的 deadline 重放，
+        // 报 "ClientCall started after CallOptions deadline was exceeded -N seconds" 且不可重试。
         MilvusClientV2 c = new MilvusClientV2(ConnectConfig.builder()
                 .uri("http://" + host + ":" + port)
                 .connectTimeoutMs(3000)
-                .rpcDeadlineMs(10000)
                 .build());
         c.retryConfig(RetryConfig.builder()
                 .maxRetryTimes(2)
                 .initialBackOffMs(100)
                 .maxBackOffMs(1000)
                 .build());
-        log.info("Milvus 客户端已初始化: {}:{}（connectTimeout=3s, rpcDeadline=10s, maxRetry=2）", host, port);
+        log.info("Milvus 客户端已初始化: {}:{}（connectTimeout=3s, maxRetry=2，不设 rpcDeadline 避免 wait-for-ready 停车）", host, port);
         return c;
     }
 
