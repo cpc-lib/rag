@@ -1070,19 +1070,19 @@ export default function FileLibraryPage() {
                         </Dropdown>
                       );
                     })()}
-                    {/* 重新转码：READY 后覆盖旧产物（如转码参数更新后刷新高码率旧视频） */}
+                    {/* 下载需二次确认，避免误触大文件直接下载 */}
                     <Popconfirm
-                      title="重新转码该视频？"
-                      description="将删除现有 HLS 产物并全量重转，转码期间无法播放。"
-                      okText="重新转码"
+                      title="下载原视频？"
+                      okText="下载"
                       cancelText="取消"
-                      onConfirm={() => { if (viewing) startTranscode(); }}
+                      onConfirm={() => viewing && handleDownload(viewing)}
                     >
-                      <span style={{ ...pillStyle, cursor: 'pointer', background: 'rgba(245,34,45,0.25)', border: '1px solid rgba(245,34,45,0.5)' }}>重新转码</span>
+                      <span style={{ display: 'inline-flex' }}>
+                        <CtrlBtn title="下载原视频">
+                          <DownloadOutlined />
+                        </CtrlBtn>
+                      </span>
                     </Popconfirm>
-                    <CtrlBtn title="下载原视频" onClick={() => viewing && handleDownload(viewing)}>
-                      <DownloadOutlined />
-                    </CtrlBtn>
                     <CtrlBtn title={isFullscreen ? '退出全屏 (f)' : '全屏 (f)'} onClick={toggleFullscreen}>
                       {isFullscreen ? <FullscreenExitOutlined /> : <FullscreenOutlined />}
                     </CtrlBtn>
