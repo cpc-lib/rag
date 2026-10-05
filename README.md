@@ -182,6 +182,48 @@ SSE 事件：`session` / `search_start` / `search_result`（含引用）/ `messa
 
 检索参数（top-k、rrf-k、max-context-tokens 等）在 `application.yml` 中有兜底值，并可通过 etcd 路径 `/rag/config/global/retrieval` 热更覆盖。
 
+## Linux 服务器部署注意事项
+
+### 容器开机自启
+
+`docker-compose.yml` 中 6 个常驻服务（mysql、redis、minio、etcd、elasticsearch、milvus）均已配置 `restart: unless-stopped`：Linux 重启后 Docker 守护进程会自动拉起容器；手动 `docker compose stop/down` 过的容器不会自动启动。
+
+- `mc-init` 是一次性建桶任务（跑完即退出），未配置重启策略，避免反复执行
+- 修改过 restart 策略后需重建容器才能生效：`docker compose up -d`
+
+### 重启后端口映射正常但 telnet 不通
+
+**现象**：服务器重启后 `docker ps` 端口映射显示正常，但 `telnet <ip> <端口>` 不通，再次重启服务器才恢复。
+
+**根因**：firewalld/iptables 与 Docker 的启动顺序冲突——Docker 启动时向 iptables 写入 `DOCKER` 链做 DNAT（端口映射真正生效靠它），若 firewalld 在 Docker 之后启动或 reload，会重建/清空 iptables 规则并抹掉 `DOCKER` 链，导致容器在跑、映射在显示，但 DNAT 规则丢失。
+
+**验证**（故障复现时在服务器上执行）：
+
+```bash
+iptables -S DOCKER | head    # 输出为空或报错 → 规则被清了
+systemctl show docker firewalld -p ActiveEnterTimestamp    # 对比两者启动时间
+```
+
+**修复**：让 Docker 在网络和防火墙就绪之后再启动（一次性配置）：
+
+```bash
+mkdir -p /etc/systemd/system/docker.service.d
+cat > /etc/systemd/system/docker.service.d/override.conf <<'EOF'
+[Unit]
+After=network-online.target firewalld.service nftables.service
+Wants=network-online.target
+EOF
+systemctl daemon-reload
+```
+
+服务器未启用 firewalld 时此配置同样无害（`After` 只是顺序声明）。配置后重启验证：开机后直接 `telnet <ip> <端口>` 应立即通。
+
+**兜底方案**：个别发行版 firewalld 异步 reload 仍可能复现，可在服务器加开机任务延迟重启 Docker：
+
+```bash
+(crontab -l; echo "@reboot sleep 30 && systemctl restart docker") | crontab -
+```
+
 ## 进一步阅读
 
 - [AGENTS.md](AGENTS.md) — 项目全貌、架构地图、编码约定与常见坑位

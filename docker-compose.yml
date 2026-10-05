@@ -2,6 +2,7 @@ services:
   mysql:
     image: registry.cn-hangzhou.aliyuncs.com/snow-io/mysql:8.4
     container_name: rag-mysql
+    restart: unless-stopped
     environment:
       MYSQL_ROOT_PASSWORD: rag123456
       MYSQL_DATABASE: rag
@@ -20,6 +21,7 @@ services:
   redis:
     image: registry.cn-hangzhou.aliyuncs.com/snow-io/redis:7.4-alpine
     container_name: rag-redis
+    restart: unless-stopped
     ports:
       - "6379:6379"
     volumes:
@@ -44,6 +46,7 @@ services:
   minio:
     image: minio/minio:latest
     container_name: rag-minio
+    restart: unless-stopped
     command: server /data --console-address ":9001"
     environment:
       MINIO_ROOT_USER: minioadmin
@@ -76,6 +79,7 @@ services:
   etcd:
     image: registry.cn-hangzhou.aliyuncs.com/snow-io/etcd:v3.5.18
     container_name: rag-etcd
+    restart: unless-stopped
     environment:
       ALLOW_NONE_AUTHENTICATION: "yes"
       ETCD_ADVERTISE_CLIENT_URLS: http://etcd:2379
@@ -89,6 +93,7 @@ services:
   elasticsearch:
     image: registry.cn-hangzhou.aliyuncs.com/snow-io/elasticsearch:8.14.3
     container_name: rag-es
+    restart: unless-stopped
     environment:
       discovery.type: single-node
       xpack.security.enabled: "false"
@@ -107,6 +112,7 @@ services:
   milvus:
     image: registry.cn-hangzhou.aliyuncs.com/snow-io/milvus:v2.5.4
     container_name: rag-milvus
+    restart: unless-stopped
     command: ["milvus", "run", "standalone"]
     environment:
       ETCD_ENDPOINTS: etcd:2379
