@@ -1,0 +1,283 @@
+{
+	"info": {
+		"name": "RAG 认证与字幕接口",
+		"description": "登录 / 登出 / 字幕上传 / 分页查询历史 / 翻译 / 保存 / 下载 SRT / 删除历史记录。\n\n- 所有字幕接口均需请求头 `Authorization: Bearer {{token}}`（登录后自动保存到集合变量）\n- 可选请求头 `X-Tenant-Id`（多租户标识，登录脚本自动写入集合变量；与 Token 中租户不一致时会被拒绝）\n- 统一响应结构：`{ code, message, data }`，`code=0` 表示成功，非 0 为业务错误码，`message` 为中文提示",
+		"schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+	},
+	"variable": [
+		{ "key": "baseUrl", "value": "http://localhost:8080" },
+		{ "key": "token", "value": "" },
+		{ "key": "tenantId", "value": "" },
+		{ "key": "subtitleId", "value": "1" }
+	],
+	"auth": {
+		"type": "bearer",
+		"bearer": [ { "key": "token", "value": "{{token}}", "type": "string" } ]
+	},
+	"item": [
+		{
+			"name": "认证",
+			"item": [
+				{
+					"name": "登录",
+					"request": {
+						"auth": { "type": "noauth" },
+						"method": "POST",
+						"header": [ { "key": "Content-Type", "value": "application/json" } ],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"username\": \"admin\",\n  \"password\": \"admin123\",\n  \"tenantCode\": \"000000\"\n}"
+						},
+						"url": { "raw": "{{baseUrl}}/api/v1/auth/login", "host": [ "{{baseUrl}}" ], "path": [ "api", "v1", "auth", "login" ] },
+						"description": "用户登录，返回 JWT Token。\n\n**请求参数（JSON Body）**\n\n| 参数 | 类型 | 必填 | 说明 |\n|---|---|---|---|\n| username | string | 是 | 用户名 |\n| password | string | 是 | 密码 |\n| tenantCode | string | 否 | 租户编码；租户用户必填（如 000000 为超级租户），平台管理员可不传 |\n\n**响应参数（data）**\n\n| 参数 | 类型 | 说明 |\n|---|---|---|\n| token | string | JWT，后续请求放入 `Authorization: Bearer <token>` |\n| user.id | long | 用户 ID |\n| user.username | string | 用户名 |\n| user.tenantId | string | 所属租户 ID |\n| user.userType | int | 0 平台管理员 / 1 租户管理员 / 2 普通用户 |\n| user.tenantName | string | 租户名称 |\n| user.menuCodes | string[] | 已授权菜单编码（如 chat、subtitle） |"
+					},
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"type": "text/javascript",
+								"exec": [
+									"const res = pm.response.json();",
+									"if (res.code === 0 && res.data && res.data.token) {",
+									"    pm.collectionVariables.set('token', res.data.token);",
+									"    pm.collectionVariables.set('tenantId', res.data.user.tenantId);",
+									"    console.log('token 与 tenantId 已写入集合变量');",
+									"}"
+								]
+							}
+						}
+					],
+					"response": [
+						{
+							"name": "登录成功",
+							"originalRequest": {
+								"method": "POST",
+								"header": [ { "key": "Content-Type", "value": "application/json" } ],
+								"body": { "mode": "raw", "raw": "{\n  \"username\": \"admin\",\n  \"password\": \"admin123\",\n  \"tenantCode\": \"000000\"\n}" },
+								"url": { "raw": "{{baseUrl}}/api/v1/auth/login", "host": [ "{{baseUrl}}" ], "path": [ "api", "v1", "auth", "login" ] }
+							},
+							"status": "OK",
+							"code": 200,
+							"header": [ { "key": "Content-Type", "value": "application/json" } ],
+							"body": "{\n  \"code\": 0,\n  \"message\": \"ok\",\n  \"data\": {\n    \"token\": \"eyJhbGciOiJIUzI1NiJ9.xxx.yyy\",\n    \"user\": {\n      \"id\": 1,\n      \"username\": \"admin\",\n      \"tenantId\": \"000000\",\n      \"userType\": 0,\n      \"tenantName\": \"超级租户\",\n      \"menuCodes\": [\"chat\", \"image-studio\", \"subtitle\", \"file-library\"]\n    }\n  }\n}"
+						}
+					]
+				},
+				{
+					"name": "登出",
+					"request": {
+						"method": "POST",
+						"header": [ { "key": "Authorization", "value": "Bearer {{token}}" } ],
+						"url": { "raw": "{{baseUrl}}/api/v1/auth/logout", "host": [ "{{baseUrl}}" ], "path": [ "api", "v1", "auth", "logout" ] },
+						"description": "登出，服务端将当前 Token 加入黑名单（Redis）。\n\n**请求参数**\n\n| 参数 | 位置 | 必填 | 说明 |\n|---|---|---|---|\n| Authorization | Header | 是 | `Bearer <token>`；缺失或格式不对不报错，仅不处理黑名单 |\n\n**响应参数**：无 data，`{ code: 0, message: \"ok\", data: null }`"
+					},
+					"response": [
+						{
+							"name": "登出成功",
+							"originalRequest": {
+								"method": "POST",
+								"header": [ { "key": "Authorization", "value": "Bearer {{token}}" } ],
+								"url": { "raw": "{{baseUrl}}/api/v1/auth/logout", "host": [ "{{baseUrl}}" ], "path": [ "api", "v1", "auth", "logout" ] }
+							},
+							"status": "OK",
+							"code": 200,
+							"header": [ { "key": "Content-Type", "value": "application/json" } ],
+							"body": "{\n  \"code\": 0,\n  \"message\": \"ok\",\n  \"data\": null\n}"
+						}
+					]
+				}
+			]
+		},
+		{
+			"name": "字幕",
+			"item": [
+				{
+					"name": "上传字幕文件",
+					"request": {
+						"method": "POST",
+						"header": [],
+						"body": {
+							"mode": "formdata",
+							"formdata": [
+								{ "key": "file", "type": "file", "src": [], "description": "字幕文件，支持 SRT / VTT / ASS，其他格式报错" },
+								{ "key": "sha256", "type": "text", "value": "", "disabled": true, "description": "可选；文件 SHA-256（前端已算时传入）。命中本租户同一用户的原始上传归档时秒传，直接返回已有字幕记录" }
+							]
+						},
+						"url": { "raw": "{{baseUrl}}/api/v1/subtitles", "host": [ "{{baseUrl}}" ], "path": [ "api", "v1", "subtitles" ] },
+						"description": "上传字幕文件，服务端解析为字幕条并落库；同时自动归档原始文件到文件库。\n\n**请求参数（multipart/form-data）**\n\n| 参数 | 类型 | 必填 | 说明 |\n|---|---|---|---|\n| file | file | 是 | 字幕文件（.srt / .vtt / .ass） |\n| sha256 | text | 否 | 文件 SHA-256，用于秒传；未命中则正常上传 |\n\n**响应参数（data = SubtitleView）**\n\n| 参数 | 类型 | 说明 |\n|---|---|---|\n| id | long | 字幕记录 ID（后续翻译/保存/下载/删除都用它） |\n| originalName | string | 原始文件名 |\n| sourceLang | string | 源语言（未识别为 null） |\n| targetLang | string | 目标语言（未翻译为 null） |\n| cues | object[] | 字幕条数组 |\n| cues[].index | int | 序号，从 1 开始 |\n| cues[].start | string | 开始时间轴（HH:MM:SS,mmm） |\n| cues[].end | string | 结束时间轴（HH:MM:SS,mmm） |\n| cues[].text | string | 原文 |\n| cues[].translated | string | 译文（未翻译为 null） |\n| createdAt / updatedAt | string | 创建 / 更新时间（ISO-8601） |"
+					},
+					"response": [
+						{
+							"name": "上传成功",
+							"originalRequest": {
+								"method": "POST",
+								"header": [],
+								"body": {
+									"mode": "formdata",
+									"formdata": [
+										{ "key": "file", "type": "file", "src": [] }
+									]
+								},
+								"url": { "raw": "{{baseUrl}}/api/v1/subtitles", "host": [ "{{baseUrl}}" ], "path": [ "api", "v1", "subtitles" ] }
+							},
+							"status": "OK",
+							"code": 200,
+							"header": [ { "key": "Content-Type", "value": "application/json" } ],
+							"body": "{\n  \"code\": 0,\n  \"message\": \"ok\",\n  \"data\": {\n    \"id\": 12,\n    \"originalName\": \"邻家花美男-01.srt\",\n    \"sourceLang\": null,\n    \"targetLang\": null,\n    \"cues\": [\n      { \"index\": 1, \"start\": \"00:00:01,000\", \"end\": \"00:00:03,500\", \"text\": \"Hello!\", \"translated\": null },\n      { \"index\": 2, \"start\": \"00:00:04,000\", \"end\": \"00:00:06,200\", \"text\": \"Nice to meet you.\", \"translated\": null }\n    ],\n    \"createdAt\": \"2026-10-05T10:00:00\",\n    \"updatedAt\": \"2026-10-05T10:00:00\"\n  }\n}"
+						}
+					]
+				},
+				{
+					"name": "分页查询字幕历史记录",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{baseUrl}}/api/v1/subtitles",
+							"host": [ "{{baseUrl}}" ],
+							"path": [ "api", "v1", "subtitles" ],
+							"query": [
+								{ "key": "page", "value": "1", "disabled": true, "description": "无此参数，仅为前端分页示意；服务端不分页" },
+								{ "key": "pageSize", "value": "10", "disabled": true, "description": "无此参数，仅为前端分页示意；服务端不分页" }
+							]
+						},
+						"urlDescription": "见 description",
+						"description": "查询当前登录用户的字幕历史记录。\n\n> **说明**：该接口为全量列表接口，**服务端无 page/pageSize 分页参数**，按 `updatedAt` 倒序返回本人全部记录；分页由前端（管理控制台字幕页）在内存中完成。接口调用方如需分页，取回数组后自行按页切片即可。\n\n**请求参数**：无（仅按 `Authorization` 中的用户 + 租户过滤）\n\n**响应参数（data = SubtitleListItem[]）**\n\n| 参数 | 类型 | 说明 |\n|---|---|---|\n| id | long | 字幕记录 ID |\n| originalName | string | 原始文件名 |\n| sourceLang | string | 源语言 |\n| targetLang | string | 最近一次翻译的目标语言 |\n| cueCount | int | 字幕条数 |\n| updatedAt | string | 最后更新时间（ISO-8601） |"
+					},
+					"response": [
+						{
+							"name": "查询成功",
+							"originalRequest": {
+								"method": "GET",
+								"url": { "raw": "{{baseUrl}}/api/v1/subtitles", "host": [ "{{baseUrl}}" ], "path": [ "api", "v1", "subtitles" ] }
+							},
+							"status": "OK",
+							"code": 200,
+							"header": [ { "key": "Content-Type", "value": "application/json" } ],
+							"body": "{\n  \"code\": 0,\n  \"message\": \"ok\",\n  \"data\": [\n    { \"id\": 12, \"originalName\": \"邻家花美男-01.srt\", \"sourceLang\": null, \"targetLang\": \"繁體中文\", \"cueCount\": 25, \"updatedAt\": \"2026-10-05T10:05:00\" },\n    { \"id\": 11, \"originalName\": \"lesson-03.vtt\", \"sourceLang\": null, \"targetLang\": null, \"cueCount\": 180, \"updatedAt\": \"2026-10-04T18:30:00\" }\n  ]\n}"
+						}
+					]
+				},
+				{
+					"name": "翻译字幕",
+					"request": {
+						"method": "POST",
+						"header": [ { "key": "Content-Type", "value": "application/json" } ],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"targetLang\": \"繁體中文\",\n  \"indices\": null\n}"
+						},
+						"url": {
+							"raw": "{{baseUrl}}/api/v1/subtitles/{{subtitleId}}/translate",
+							"host": [ "{{baseUrl}}" ],
+							"path": [ "api", "v1", "subtitles", "{{subtitleId}}", "translate" ]
+						},
+						"description": "将字幕翻译到目标语言，时间轴保持不变。目标语言必须来自租户维护列表（GET /api/v1/subtitles/langs 可查）。翻译完成后自动归档 SRT 到文件库。\n\n**路径参数**\n\n| 参数 | 说明 |\n|---|---|\n| subtitleId | 字幕记录 ID（使用集合变量 {{subtitleId}}） |\n\n**请求参数（JSON Body）**\n\n| 参数 | 类型 | 必填 | 说明 |\n|---|---|---|---|\n| targetLang | string | 是 | 目标语言名，须在租户语言列表中，否则报错 |\n| indices | int[] | 否 | 勾选翻译的字幕序号（从 1 开始，与页面序号一致）；null 或缺省 = 翻译全部条目 |\n\n**响应参数**：同「上传字幕文件」的 SubtitleView，其中 `targetLang` 为本次目标语言、`cues[].translated` 为译文；仅勾选的条目会被翻译，其余保留原值。"
+					},
+					"response": [
+						{
+							"name": "翻译成功",
+							"originalRequest": {
+								"method": "POST",
+								"header": [ { "key": "Content-Type", "value": "application/json" } ],
+								"body": { "mode": "raw", "raw": "{\n  \"targetLang\": \"繁體中文\",\n  \"indices\": null\n}" },
+								"url": { "raw": "{{baseUrl}}/api/v1/subtitles/12/translate", "host": [ "{{baseUrl}}" ], "path": [ "api", "v1", "subtitles", "12", "translate" ] }
+							},
+							"status": "OK",
+							"code": 200,
+							"header": [ { "key": "Content-Type", "value": "application/json" } ],
+							"body": "{\n  \"code\": 0,\n  \"message\": \"ok\",\n  \"data\": {\n    \"id\": 12,\n    \"originalName\": \"邻家花美男-01.srt\",\n    \"sourceLang\": null,\n    \"targetLang\": \"繁體中文\",\n    \"cues\": [\n      { \"index\": 1, \"start\": \"00:00:01,000\", \"end\": \"00:00:03,500\", \"text\": \"Hello!\", \"translated\": \"你好！\" },\n      { \"index\": 2, \"start\": \"00:00:04,000\", \"end\": \"00:00:06,200\", \"text\": \"Nice to meet you.\", \"translated\": \"很高興見到你。\" }\n    ],\n    \"createdAt\": \"2026-10-05T10:00:00\",\n    \"updatedAt\": \"2026-10-05T10:05:00\"\n  }\n}"
+						}
+					]
+				},
+				{
+					"name": "保存（编辑字幕）",
+					"request": {
+						"method": "PUT",
+						"header": [ { "key": "Content-Type", "value": "application/json" } ],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"cues\": [\n    { \"index\": 1, \"start\": \"00:00:01,000\", \"end\": \"00:00:03,500\", \"text\": \"Hello!\", \"translated\": \"你好！\" },\n    { \"index\": 2, \"start\": \"00:00:04,000\", \"end\": \"00:00:06,200\", \"text\": \"Nice to meet you.\", \"translated\": \"很高興見到你。\" }\n  ]\n}"
+						},
+						"url": {
+							"raw": "{{baseUrl}}/api/v1/subtitles/{{subtitleId}}",
+							"host": [ "{{baseUrl}}" ],
+							"path": [ "api", "v1", "subtitles", "{{subtitleId}}" ]
+						},
+						"description": "保存人工编辑的字幕内容（原文/译文），保存后自动归档最新内容到文件库。\n\n**路径参数**\n\n| 参数 | 说明 |\n|---|---|\n| subtitleId | 字幕记录 ID |\n\n**请求参数（JSON Body）**\n\n| 参数 | 类型 | 必填 | 说明 |\n|---|---|---|---|\n| cues | object[] | 是 | 全量字幕条数组（须提交全部条目，按提交内容整体覆盖） |\n| cues[].index | int | 是 | 序号 |\n| cues[].start / end | string | 是 | 时间轴（服务端以已存记录为准，仅文本可改） |\n| cues[].text | string | 是 | 原文 |\n| cues[].translated | string | 否 | 译文，可为空字符串 |\n\n**响应参数**：SubtitleView（同「上传字幕文件」），返回保存后的完整字幕。"
+					},
+					"response": [
+						{
+							"name": "保存成功",
+							"originalRequest": {
+								"method": "PUT",
+								"header": [ { "key": "Content-Type", "value": "application/json" } ],
+								"body": { "mode": "raw", "raw": "{\n  \"cues\": [\n    { \"index\": 1, \"start\": \"00:00:01,000\", \"end\": \"00:00:03,500\", \"text\": \"Hello!\", \"translated\": \"你好！\" }\n  ]\n}" },
+								"url": { "raw": "{{baseUrl}}/api/v1/subtitles/12", "host": [ "{{baseUrl}}" ], "path": [ "api", "v1", "subtitles", "12" ] }
+							},
+							"status": "OK",
+							"code": 200,
+							"header": [ { "key": "Content-Type", "value": "application/json" } ],
+							"body": "{\n  \"code\": 0,\n  \"message\": \"ok\",\n  \"data\": {\n    \"id\": 12,\n    \"originalName\": \"邻家花美男-01.srt\",\n    \"sourceLang\": null,\n    \"targetLang\": \"繁體中文\",\n    \"cues\": [\n      { \"index\": 1, \"start\": \"00:00:01,000\", \"end\": \"00:00:03,500\", \"text\": \"Hello!\", \"translated\": \"你好！\" },\n      { \"index\": 2, \"start\": \"00:00:04,000\", \"end\": \"00:00:06,200\", \"text\": \"Nice to meet you.\", \"translated\": \"很高興見到你。\" }\n    ],\n    \"createdAt\": \"2026-10-05T10:00:00\",\n    \"updatedAt\": \"2026-10-05T10:08:00\"\n  }\n}"
+						}
+					]
+				},
+				{
+					"name": "下载 SRT",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{baseUrl}}/api/v1/subtitles/{{subtitleId}}/download",
+							"host": [ "{{baseUrl}}" ],
+							"path": [ "api", "v1", "subtitles", "{{subtitleId}}", "download" ]
+						},
+						"description": "下载当前字幕内容的 SRT 文件，内容规则：条目有译文取译文，无译文取原文。文件名带目标语言后缀（如 `邻家花美男-01_繁體中文.srt`）。\n\n> Postman 中请使用 **Send and Download** 按钮触发文件保存。\n\n**路径参数**\n\n| 参数 | 说明 |\n|---|---|\n| subtitleId | 字幕记录 ID |\n\n**响应**：二进制 SRT 文件（UTF-8）\n\n| 响应头 | 说明 |\n|---|---|\n| Content-Type | `application/x-subrip;charset=UTF-8` |\n| Content-Disposition | `attachment; filename=<URL编码文件名>` |\n| Cache-Control | `no-store`（内容随翻译变化，禁止缓存） |"
+					},
+					"response": [
+						{
+							"name": "下载成功（SRT 内容）",
+							"originalRequest": {
+								"method": "GET",
+								"url": { "raw": "{{baseUrl}}/api/v1/subtitles/12/download", "host": [ "{{baseUrl}}" ], "path": [ "api", "v1", "subtitles", "12", "download" ] }
+							},
+							"status": "OK",
+							"code": 200,
+							"header": [
+								{ "key": "Content-Type", "value": "application/x-subrip;charset=UTF-8" },
+								{ "key": "Content-Disposition", "value": "attachment; filename=\"%E9%82%BB%E5%AE%B6%E8%8A%B1%E7%BE%8E%E7%94%B7-01_%E7%B9%81%E9%AB%94%E4%B8%AD%E6%96%87.srt\"" }
+							],
+							"body": "1\n00:00:01,000 --> 00:00:03,500\n你好！\n\n2\n00:00:04,000 --> 00:00:06,200\n很高興見到你。\n"
+						}
+					]
+				},
+				{
+					"name": "删除历史记录",
+					"request": {
+						"method": "DELETE",
+						"header": [],
+						"url": {
+							"raw": "{{baseUrl}}/api/v1/subtitles/{{subtitleId}}",
+							"host": [ "{{baseUrl}}" ],
+							"path": [ "api", "v1", "subtitles", "{{subtitleId}}" ]
+						},
+						"description": "删除字幕记录（逻辑删除），级联删除全部字幕条；同时清理上传时自动归档到文件库的**原始上传文件**（MinIO 对象 + library_file 记录）。翻译/编辑保存产生的文件库归档**不会被关联删除**。\n\n**路径参数**\n\n| 参数 | 说明 |\n|---|---|\n| subtitleId | 字幕记录 ID |\n\n**请求参数**：无\n\n**响应参数**：无 data，`{ code: 0, message: \"ok\", data: null }`\n\n**错误场景**：记录不存在 / 已删除 / 不属于当前用户或租户 → `code=404`，`message=字幕不存在`"
+					},
+					"response": [
+						{
+							"name": "删除成功",
+							"originalRequest": {
+								"method": "DELETE",
+								"url": { "raw": "{{baseUrl}}/api/v1/subtitles/12", "host": [ "{{baseUrl}}" ], "path": [ "api", "v1", "subtitles", "12" ] }
+							},
+							"status": "OK",
+							"code": 200,
+							"header": [ { "key": "Content-Type", "value": "application/json" } ],
+							"body": "{\n  \"code\": 0,\n  \"message\": \"ok\",\n  \"data\": null\n}"
+						}
+					]
+				}
+			]
+		}
+	]
+}
