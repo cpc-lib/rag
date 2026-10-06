@@ -25,7 +25,10 @@ import { imageApi } from '../api/images';
 import type { GeneratedImage } from '../api/types';
 
 const SIZE_OPTIONS = [
-  { value: '1024*1536', label: '竖版 2:3 · 1024*1536（默认）' },
+  { value: '2K', label: '2K 高清（默认）· 约 2048*2048' },
+  { value: '1K', label: '1K · 约 1280*1280' },
+  { value: '4K', label: '4K 超清 · 约 4096*4096（仅 pro 文生图）' },
+  { value: '1024*1536', label: '竖版 2:3 · 1024*1536' },
   { value: '1024*1024', label: '方图 1:1 · 1024*1024' },
   { value: '1536*1024', label: '横版 3:2 · 1536*1024' },
   { value: '1120*1440', label: '竖版 · 1120*1440' },
@@ -112,6 +115,7 @@ export default function ImageStudioPage() {
     try {
       const img = await imageApi.generate({
         prompt: v.prompt,
+        negativePrompt: v.negativePrompt || undefined,
         size: v.size,
         seed: v.seed ?? undefined,
       });
@@ -151,7 +155,7 @@ export default function ImageStudioPage() {
             <Form
               form={form}
               layout="vertical"
-              initialValues={{ size: '1024*1536' }}
+              initialValues={{ size: '2K' }}
             >
               <Form.Item
                 name="prompt"
@@ -163,6 +167,18 @@ export default function ImageStudioPage() {
                   showCount
                   maxLength={2000}
                   placeholder="描述主体、风格、光线、镜头、氛围……如：一只橘猫坐在日式居酒屋门口，电影感灯光，胶片质感"
+                />
+              </Form.Item>
+              <Form.Item
+                name="negativePrompt"
+                label="反向提示词（可选）"
+                tooltip="描述不希望出现在画面中的内容，如：低分辨率，低画质，肢体畸形，画面过饱和"
+              >
+                <Input.TextArea
+                  rows={2}
+                  showCount
+                  maxLength={500}
+                  placeholder="低分辨率，低画质，肢体畸形，手指畸形，画面过饱和"
                 />
               </Form.Item>
               <Form.Item name="size" label="画幅尺寸">
@@ -330,7 +346,11 @@ export default function ImageStudioPage() {
             onChange: (p) => loadHistory(p),
           }}
           onRow={(img) => ({
-            onClick: () => setDetailImg(img),
+            onClick: (e) => {
+              // Popconfirm 弹层经 Portal 渲染，React 事件仍会冒泡到行：点击确认/取消时不触发详情
+              if ((e.target as HTMLElement).closest('.ant-popover')) return;
+              setDetailImg(img);
+            },
             style: { cursor: 'pointer' },
           })}
         />
@@ -351,6 +371,9 @@ export default function ImageStudioPage() {
             />
             <Descriptions column={1} size="small" style={{ marginTop: 12 }}>
               <Descriptions.Item label="画面描述">{detailImg.prompt}</Descriptions.Item>
+              {detailImg.negativePrompt && (
+                <Descriptions.Item label="反向提示词">{detailImg.negativePrompt}</Descriptions.Item>
+              )}
               <Descriptions.Item label="模型">{detailImg.model}</Descriptions.Item>
               <Descriptions.Item label="画幅尺寸">{detailImg.size}</Descriptions.Item>
               <Descriptions.Item label="随机种子">

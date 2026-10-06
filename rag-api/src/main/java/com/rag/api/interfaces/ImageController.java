@@ -34,7 +34,8 @@ public class ImageController {
     @PostMapping("/generate")
     public ApiResult<ImageGenerationService.ImageView> generate(
             @RequestBody @Valid Dtos.ImageGenerateReq req) {
-        return ApiResult.ok(imageGenerationService.generate(req.prompt(), req.size(), req.seed()));
+        return ApiResult.ok(imageGenerationService.generate(req.prompt(), req.negativePrompt(),
+                req.size(), req.seed(), req.promptExtend(), req.watermark()));
     }
 
     @GetMapping("/{id}/download")

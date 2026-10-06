@@ -33,14 +33,18 @@ public class ImageGenerationService {
     }
 
     /** 历史视图：url 为 MinIO 预签名地址。 */
-    public record ImageView(long id, String prompt, String model, String size, Long seed,
+    public record ImageView(long id, String prompt, String negativePrompt, String model, String size, Long seed,
                             String url, LocalDateTime createdAt, Long fileSize) {
     }
 
     private static final String DEFAULT_BASE = "https://dashscope.aliyuncs.com";
-    private static final String DEFAULT_MODEL = "z-image-turbo";
-    private static final String DEFAULT_SIZE = "1024*1536";
+    private static final String DEFAULT_MODEL = "wan2.7-image-pro";
+    private static final String DEFAULT_SIZE = "2K";
     private static final Pattern SIZE_PATTERN = Pattern.compile("^(\\d{3,4})\\*(\\d{3,4})$");
+    /** 分辨率档位（万相 2.7：1K≈1280*1280，2K≈2048*2048，4K≈4096*4096 仅 pro 文生图）。 */
+    private static final java.util.Set<String> SIZE_TIERS = java.util.Set.of("1K", "2K", "4K");
+    /** 反向提示词上限（官方：超出 500 字符自动截断，此处提前拒绝避免静默截断）。 */
+    private static final int NEGATIVE_PROMPT_MAX = 500;
 
     private final ModelService modelService;
     private final GeneratedImageMapper imageMapper;
@@ -50,7 +54,8 @@ public class ImageGenerationService {
     private final FileLibraryService fileLibraryService;
     private final Sha256Publisher sha256Publisher;
 
-    public ImageView generate(String prompt, String size, Long seed) {
+    public ImageView generate(String prompt, String negativePrompt, String size, Long seed,
+                              Boolean promptExtend, Boolean watermark) {
         TenantContext.Session s = TenantContext.require();
         userManageService.requireMenu("image-studio");
         ModelEntity m = modelService.requireEnabled(s.tenantId(), ModelService.IMAGE);
@@ -62,9 +67,10 @@ public class ImageGenerationService {
         }
         String model = blank(m.getModel()) ? DEFAULT_MODEL : m.getModel().trim();
         String actualSize = validateSize(size);
+        String neg = validateNegativePrompt(negativePrompt);
 
         String remoteUrl = zImageClient.generate(base, apiKey, model,
-                prompt.strip(), actualSize, seed);
+                prompt.strip(), neg, actualSize, seed, promptExtend, watermark);
         byte[] bytes = zImageClient.download(remoteUrl);
 
         String fileName = UUID.randomUUID() + ".png";
@@ -75,6 +81,7 @@ public class ImageGenerationService {
         e.setTenantId(s.tenantId());
         e.setUserId(s.userId());
         e.setPrompt(prompt.strip());
+        e.setNegativePrompt(neg);
         e.setModel(model);
         e.setSize(actualSize);
         e.setSeed(seed);
@@ -158,21 +165,36 @@ public class ImageGenerationService {
         if (blank(size)) {
             return DEFAULT_SIZE;
         }
-        Matcher m = SIZE_PATTERN.matcher(size.trim());
+        String v = size.trim();
+        if (SIZE_TIERS.contains(v)) {
+            return v;
+        }
+        Matcher m = SIZE_PATTERN.matcher(v);
         if (!m.matches()) {
-            throw BizException.badRequest("size 格式应为 宽*高，如 1024*1024");
+            throw BizException.badRequest("size 应为档位 1K/2K/4K 或 宽*高，如 2048*2048");
         }
         long w = Long.parseLong(m.group(1));
         long h = Long.parseLong(m.group(2));
         long pixels = w * h;
-        if (pixels < 512L * 512 || pixels > 2048L * 2048) {
-            throw BizException.badRequest("总像素需在 512*512 ~ 2048*2048 之间");
+        if (pixels < 512L * 512 || pixels > 4096L * 4096) {
+            throw BizException.badRequest("总像素需在 512*512 ~ 4096*4096 之间");
         }
         return w + "*" + h;
     }
 
+    private String validateNegativePrompt(String negativePrompt) {
+        if (blank(negativePrompt)) {
+            return null;
+        }
+        String v = negativePrompt.strip();
+        if (v.length() > NEGATIVE_PROMPT_MAX) {
+            throw BizException.badRequest("反向提示词不能超过 " + NEGATIVE_PROMPT_MAX + " 字符");
+        }
+        return v;
+    }
+
     private ImageView toView(GeneratedImageEntity e) {
-        return new ImageView(e.getId(), e.getPrompt(), e.getModel(), e.getSize(),
+        return new ImageView(e.getId(), e.getPrompt(), e.getNegativePrompt(), e.getModel(), e.getSize(),
                 e.getSeed(), minio.presignUrl(e.getObjectKey()), e.getCreatedAt(), e.getFileSize());
     }
 

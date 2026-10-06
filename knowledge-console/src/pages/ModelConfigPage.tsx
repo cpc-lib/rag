@@ -243,7 +243,11 @@ export default function ModelConfigPage() {
         dataSource={models}
         pagination={{ pageSize: 10, showSizeChanger: false }}
         onRow={(m) => ({
-          onClick: () => setDetail(m),
+          onClick: (e) => {
+            // Popconfirm 弹层经 Portal 渲染，React 事件仍会冒泡到行：点击确认/取消时不触发详情
+            if ((e.target as HTMLElement).closest('.ant-popover')) return;
+            setDetail(m);
+          },
           style: { cursor: 'pointer' },
         })}
       />

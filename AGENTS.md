@@ -6,10 +6,11 @@
 
 多租户 RAG 知识库问答平台：租户隔离的知识库管理 + 文档异步解析流水线（解析→切片→向量化→双索引）+ 混合检索（向量/BM25/RRF/可选 Rerank）+ LLM SSE 流式问答 + AI 文生图 + 外部工具（天气/Tavily）。
 
-三个模块（**各自独立 pom.xml，无 Maven 父子聚合结构**）：
+四个模块（各模块独立 pom.xml，均以 `spring-boot-starter-parent` 为 parent，**模块间无父子继承**；根目录有纯聚合 `pom.xml` 仅用于一键构建）：
 
 | 模块 | 形态 | 端口 | 职责 |
 |---|---|---|---|
+| `rag-common` | 公共 jar（无服务） | 无 | 25 张表实体 + Mapper 接口 + MyBatis XML（`resources/mapper/`），被 api/worker 共享 |
 | `rag-api` | Spring Boot 3.3.5 Web（Java 17） | 8080 | REST API、SSE 问答、鉴权、模型/租户/配额管理 |
 | `rag-worker` | Spring Boot 3.3.5 **非 Web**（Java 17） | 无 | RabbitMQ 消费者，文档解析/切片/Embedding/ES+Milvus 双写 |
 | `knowledge-console` | React 18 + TS + Vite 5 + Antd 5 | 5173 | 管理控制台，`/api` 代理到 8080 |
@@ -24,7 +25,7 @@ docker compose up -d mysql redis minio mc-init etcd elasticsearch milvus
 
 MySQL 8.4 / Redis 7.4 / MinIO（9000 API + 9001 控制台）/ etcd 3.5 / ES 8.14 / Milvus 2.5 standalone。MinIO 桶由 `mc-init` 自动建：`rag-files`（业务）、`a-bucket`（Milvus）。
 
-> 注意：compose 中 `rabbitmq` 服务当前被注释掉，但 rag-worker 代码依赖 RabbitMQ（exchange `rag.ingest`）。本地跑 Worker 前需取消注释并 `docker compose up -d rabbitmq`，或自备 RabbitMQ（5672/15672，guest/guest）。
+> 注意：compose 不包含 `rabbitmq`，但 rag-worker 代码依赖 RabbitMQ（exchange `rag.ingest`）。本地跑 Worker 前需自备 RabbitMQ（5672/15672，guest/guest）。
 
 所有中间件地址默认指向 `192.168.1.200`，可用环境变量覆盖：`MIDDLEWARE_HOST`、`MYSQL_HOST/PORT/DB/USER/PASSWORD`、`MINIO_PORT`、`ES_PORT`、`MILVUS_PORT`、`ETCD_PORT` 等。
 
@@ -67,7 +68,8 @@ npm run dev                                  # http://localhost:5173
 ### 2.4 构建与测试
 
 ```bash
-mvn -f rag-api/pom.xml clean compile -DskipTests
+mvn clean install -DskipTests               # 根目录聚合一键构建（reactor 自动按依赖排序：rag-common → rag-api/rag-worker）
+mvn -f rag-api/pom.xml clean compile -DskipTests   # 单模块构建前先 install rag-common
 mvn -f rag-worker/pom.xml clean test         # 唯一测试：ChunkPipelineTest
 cd knowledge-console && npm run typecheck    # tsc --noEmit
 cd knowledge-console && npm run build
@@ -79,15 +81,22 @@ cd knowledge-console && npm run build
 
 - `interfaces/` — Controller（路由前缀统一 `/api/v1`）、`dto/Dtos.java`（record 集中定义）、`GlobalExceptionHandler`、`security/{JwtAuthFilter,AuthGuard}`、`guard/SseConnectionGuard`
 - `application/` — 业务服务（无接口的单实现 @Service）：`AuthService`、`ChatOrchestrator`（SSE 编排）、`RetrievalService`（混合检索）、`DocumentAppService`、`ChunkAppService`、`KnowledgeBaseService`、`PromptTemplateService`、`ModelService`、`TenantService`、`UserManageService`、`MenuService`、`ToolConfigService`、`QuotaService`、`ChatSessionService`、`ImageGenerationService`
-- `infrastructure/`
-  - `persistence/entity` + `persistence/mapper`（MyBatis-Plus，下划线↔驼峰自动映射）
+- `infrastructure/`（**persistence 层已整体抽到 rag-common**，本模块不再有 entity/mapper）
   - `llm/LlmClient`、`image/ZImageClient`（文生图）
   - `search/{EsSearchClient,MilvusClientWrapper}`、`storage/MinioStorage`、`etcd/EtcdService`、`mq/IngestPublisher`
   - `tool/{WeatherClient,TavilyClient}`
 - `common/` — `ApiResult`、`BizException`、`ErrorCode`、`TenantContext`（ThreadLocal 会话）
 - `config/` — `DataInitializer`（种子账号）、`MinioConfig`、`MybatisPlusConfig`、`RabbitMqConfig`、`WebCorsConfig`
 
-### 3.2 rag-worker 包结构 `com.rag.worker`
+### 3.2 rag-common 包结构 `com.rag.api.infrastructure.persistence`
+
+- `entity/` — 25 张表实体（`@TableName` + Lombok `@Data`，**无 @TableLogic**，逻辑删除由 XML 手写）
+- `mapper/` — 25 个 Mapper **普通接口**（不 extends BaseMapper），方法由 XML 实现
+- `resources/mapper/*.xml` — 所有 DB CRUD 的唯一实现：SELECT 显式 `deleted = 0`（有该列的表）、删除统一 `UPDATE SET deleted = 1`、insert 用 `useGeneratedKeys`
+- `config/RagPersistenceAutoConfiguration` — MetaObjectHandler 自动填充：insert 补 `createdAt/updatedAt`、update 刷新 `updatedAt`；**必须判空 setValue，禁用 strictInsertFill**（普通接口 Mapper 不注册 TableInfo，strict 填充会静默跳过）；经 `AutoConfiguration.imports` 注册，api/worker 两端生效
+- 两端 yml 均已配置 `mybatis-plus.mapper-locations: classpath*:mapper/*.xml`；worker 的 `@MapperScan` 指向 `com.rag.api.infrastructure.persistence.mapper`
+
+### 3.3 rag-worker 包结构 `com.rag.worker`
 
 - `consumer/IngestConsumer` — 手动 ack、按租户信号量限流（`TenantMqSemaphore`）、失败延迟重试（TTL+DLQ，`RetryPublisher`），超 `rag.worker.max-retry` 置 FAILED
 - `pipeline/PipelineProcessor` — 状态机：`PARSE`（解析→切片→Embedding→双写）与 `REINDEX`（保留切片重嵌重建）
@@ -177,7 +186,7 @@ SSE 事件类型（ChatOrchestrator）：`session` / `search_start` / `search_re
 
 ## 8. 编码约定（必须遵守）
 
-1. **单 pom 模块**：禁止引入父子 pom / 多模块聚合；pom 中显式声明 UTF-8（`project.build.sourceEncoding`）与 `<maven.compiler.parameters>true</maven.compiler.parameters>`（RabbitMQ 等 bean 参数名消歧）
+1. **模块结构**：根目录有纯聚合 `pom.xml`（packaging=pom，仅含 modules），用于 `mvn clean install` 一键构建；rag-api/rag-worker/rag-common 各自独立 pom，均以 `spring-boot-starter-parent` 为 parent，**模块间无父子继承**。rag-common 先 install，api/worker 通过 `<dependency>` 引用。各模块 pom 中显式声明 UTF-8 与 `<maven.compiler.parameters>true</maven.compiler.parameters>`（RabbitMQ 等 bean 参数名消歧）
 2. Controller 只做参数与鉴权（`AuthGuard.requirePlatform()/requireTenantAdmin()` 静态调用），业务在 `application/`；DTO 一律加到 `interfaces/dto/Dtos.java` 的 record 中
 3. 跨租户访问一律返回"不存在"（NOT_FOUND），不泄露资源存在性；未匹配路由由 `GlobalExceptionHandler` 返回 404 `请求的资源不存在`（含 Spring 6 `NoResourceFoundException` 专项处理）
 4. 租户上下文取自 `TenantContext`（JWT 过滤器填充），SQL 必须带 `tenant_id` 条件，不允许跨租户 IN 批查遗漏隔离
@@ -195,7 +204,7 @@ SSE 事件类型（ChatOrchestrator）：`session` / `search_start` / `search_re
 - **PDFBox API 报错**：确认用的是 2.x 的 `Loader` 不存在；`PDDocument.load`
 - **MinIO 预签名 URL 403**：签名 URL 含 `?Expires&Signature`，WebClient 必须 `.uri(URI.create(url))`，用字符串会被当模板二次编码
 - **文生图 404 NOT_FOUND**：image base 要填裸 host，不能带 `/compatible-mode/v1` 后缀（`ZImageClient` 会规整一次但别依赖）
-- **MyBatis XML/实体包名**：worker 与 api 是两套实体（`com.rag.worker.*` vs `com.rag.api.*`），不要互相引用
+- **MyBatis XML/实体包名**：所有实体与 Mapper 已统一抽到 rag-common（`com.rag.api.infrastructure.persistence.*`），worker 直接引用 rag-common 的类，**不再有 `com.rag.worker.*` 的持久层类**。新增表时实体/Mapper/XML 都加到 rag-common
 - **Windows PowerShell**：不支持 `&&` 连接命令，用 `;` 或分行；路径含中文注意 UTF-8
 
 ## 10. 参考文档

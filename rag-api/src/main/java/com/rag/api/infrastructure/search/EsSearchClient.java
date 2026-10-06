@@ -38,6 +38,7 @@ public class EsSearchClient {
         try {
             boolean exists = client.indices().exists(e -> e.index(index)).value();
             if (exists) {
+                log.info("ES 索引已存在（跳过创建）: {}", index);
                 return;
             }
             String mapping = """
@@ -108,7 +109,10 @@ public class EsSearchClient {
 
     public void deleteIndex(String index) {
         try {
-            client.indices().delete(d -> d.index(index));
+            // 先 exists 再删：索引可能从未创建过（建库时预创建失败/文档未入库），直接删会抛 index_not_found
+            if (client.indices().exists(e -> e.index(index)).value()) {
+                client.indices().delete(d -> d.index(index));
+            }
         } catch (Exception e) {
             log.warn("ES 删除索引失败: {}", index, e);
         }

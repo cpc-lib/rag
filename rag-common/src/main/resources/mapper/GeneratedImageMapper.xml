@@ -1,5 +1,5 @@
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "https://mybatis.org/dtd/mybatis-3-mapper.dtd">
+﻿<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
 <mapper namespace="com.rag.api.infrastructure.persistence.mapper.GeneratedImageMapper">
 
     <resultMap id="BaseResultMap" type="com.rag.api.infrastructure.persistence.entity.GeneratedImageEntity">
@@ -7,6 +7,7 @@
         <result column="tenant_id" property="tenantId"/>
         <result column="user_id" property="userId"/>
         <result column="prompt" property="prompt"/>
+        <result column="negative_prompt" property="negativePrompt"/>
         <result column="model" property="model"/>
         <result column="size" property="size"/>
         <result column="seed" property="seed"/>
@@ -21,7 +22,7 @@
     </resultMap>
 
     <sql id="Base_Column_List">
-        id, tenant_id, user_id, prompt, model, size, seed, object_key, file_name, file_size, sha256, status, error_msg, created_at, deleted
+        id, tenant_id, user_id, prompt, negative_prompt, model, size, seed, object_key, file_name, file_size, sha256, status, error_msg, created_at, deleted
     </sql>
 
     <select id="selectById" resultMap="BaseResultMap">
@@ -31,8 +32,8 @@
     </select>
 
     <insert id="insert" useGeneratedKeys="true" keyProperty="id">
-        INSERT INTO generated_image (tenant_id, user_id, prompt, model, size, seed, object_key, file_name, file_size, status, error_msg)
-        VALUES (#{tenantId}, #{userId}, #{prompt}, #{model}, #{size}, #{seed}, #{objectKey}, #{fileName}, #{fileSize}, #{status}, #{errorMsg})
+        INSERT INTO generated_image (tenant_id, user_id, prompt, negative_prompt, model, size, seed, object_key, file_name, file_size, status, error_msg)
+        VALUES (#{tenantId}, #{userId}, #{prompt}, #{negativePrompt}, #{model}, #{size}, #{seed}, #{objectKey}, #{fileName}, #{fileSize}, #{status}, #{errorMsg})
     </insert>
 
     <select id="selectPageByTenantUser" resultMap="BaseResultMap">

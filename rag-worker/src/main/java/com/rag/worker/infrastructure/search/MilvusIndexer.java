@@ -70,7 +70,12 @@ public class MilvusIndexer {
     }
 
     public boolean hasCollection(String collection) {
-        return client().hasCollection(HasCollectionReq.builder().collectionName(collection).build());
+        Boolean exists = client().hasCollection(HasCollectionReq.builder().collectionName(collection).build());
+        // SDK 2.4.3 在 RPC 失败且重试耗尽时返回 null（吞掉底层异常），自动拆箱会 NPE 掩盖真实原因，转为显式异常
+        if (exists == null) {
+            throw new IllegalStateException("Milvus hasCollection 返回 null（通常为连接不可达/重试耗尽）: " + collection);
+        }
+        return exists;
     }
 
     /** 幂等建集合；维度不一致时（空集合）重建。 */
@@ -84,7 +89,9 @@ public class MilvusIndexer {
             log.warn("Milvus 集合维度 {} != {}，重建空集合: {}", existing, dim, collection);
             dropCollection(collection);
             createCollection(collection, dim);
+            return;
         }
+        log.info("Milvus 集合已存在（跳过创建）: {}", collection);
     }
 
     private void createCollection(String collection, int dim) {
@@ -150,12 +157,14 @@ public class MilvusIndexer {
             client().insert(InsertReq.builder().collectionName(collection)
                     .data(rows.subList(from, to)).build());
         }
+        log.info("Milvus 向量写入完成 collection={} 条数={}", collection, rows.size());
     }
 
     public void deleteByDocument(String collection, long documentId) {
         try {
             client().delete(DeleteReq.builder().collectionName(collection)
                     .filter("document_id == " + documentId).build());
+            log.info("Milvus 删除文档向量完成 collection={} doc={}", collection, documentId);
         } catch (Exception e) {
             log.warn("Milvus 删除向量失败 collection={} doc={}: {}", collection, documentId, e.getMessage());
         }

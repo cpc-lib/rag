@@ -340,13 +340,17 @@ export interface PromptReq {
 // ---- 文生图 ----
 export interface ImageGenerateReq {
   prompt: string;
+  negativePrompt?: string;
   size?: string;
   seed?: number | null;
+  promptExtend?: boolean;
+  watermark?: boolean;
 }
 
 export interface GeneratedImage {
   id: number;
   prompt: string;
+  negativePrompt: string | null;
   model: string;
   size: string | null;
   seed: number | null;

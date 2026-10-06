@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <groupId>com.rag</groupId>
+    <artifactId>rag</artifactId>
+    <version>1.0.0</version>
+    <packaging>pom</packaging>
+    <name>rag</name>
+    <description>多租户 RAG 知识库系统 - 根聚合 pom（仅用于一键构建，模块间无父子继承）</description>
+
+    <properties>
+        <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+        <project.reporting.outputEncoding>UTF-8</project.reporting.outputEncoding>
+        <maven.compiler.parameters>true</maven.compiler.parameters>
+    </properties>
+
+    <!-- 纯聚合：reactor 按模块间依赖自动排序（rag-common → rag-api/rag-worker）。
+         各模块仍保持独立 pom，以 spring-boot-starter-parent 为 parent，不继承本 pom。 -->
+    <modules>
+        <module>rag-common</module>
+        <module>rag-api</module>
+        <module>rag-worker</module>
+    </modules>
+</project>

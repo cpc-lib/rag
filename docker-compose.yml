@@ -27,22 +27,6 @@ services:
     volumes:
       - redis-data:/data
 
-#  rabbitmq:
-#    image: registry.cn-hangzhou.aliyuncs.com/snow-io/rabbitmq:3.13-management
-#    container_name: rag-rabbitmq
-#    environment:
-#      TZ: Asia/Shanghai
-#    ports:
-#      - "5672:5672"
-#      - "15672:15672"
-#    volumes:
-#      - rabbitmq-data:/var/lib/rabbitmq
-#    healthcheck:
-#      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
-#      interval: 10s
-#      timeout: 10s
-#      retries: 12
-
   minio:
     image: minio/minio:latest
     container_name: rag-minio
@@ -141,7 +125,6 @@ services:
 volumes:
   mysql-data: {}
   redis-data: {}
-  #rabbitmq-data: {}
   minio-data: {}
   etcd-data: {}
   es-data: {}

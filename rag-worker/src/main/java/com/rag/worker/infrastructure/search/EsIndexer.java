@@ -31,6 +31,7 @@ public class EsIndexer {
         try {
             boolean exists = client.indices().exists(e -> e.index(index)).value();
             if (exists) {
+                log.info("ES 索引已存在（跳过创建）: {}", index);
                 return;
             }
             String mapping = """
@@ -65,6 +66,8 @@ public class EsIndexer {
             BulkResponse resp = client.bulk(bulk.build());
             if (resp.errors()) {
                 log.warn("ES bulk 存在部分错误 index={} size={}", index, docs.size());
+            } else {
+                log.info("ES bulk 写入完成 index={} 条数={}", index, docs.size());
             }
         } catch (Exception e) {
             throw new IllegalStateException("ES 写入失败: " + e.getMessage(), e);
@@ -75,6 +78,7 @@ public class EsIndexer {
         try {
             client.deleteByQuery(d -> d.index(index)
                     .query(q -> q.term(t -> t.field("documentId").value(String.valueOf(documentId)))));
+            log.info("ES 删除文档旧索引完成 index={} doc={}", index, documentId);
         } catch (Exception e) {
             log.warn("ES 删除旧索引失败 index={} doc={}: {}", index, documentId, e.getMessage());
         }

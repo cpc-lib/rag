@@ -2,6 +2,8 @@ package com.rag.api.infrastructure.persistence.entity;
 
 import com.baomidou.mybatisplus.annotation.IdType;
 import com.baomidou.mybatisplus.annotation.TableId;
+import com.baomidou.mybatisplus.annotation.FieldFill;
+import com.baomidou.mybatisplus.annotation.TableField;
 import com.baomidou.mybatisplus.annotation.TableName;
 import lombok.Data;
 
@@ -25,7 +27,9 @@ public class SubtitleCueBackupEntity {
     private String content;
     /** 翻译后文本，null 表示未翻译。 */
     private String translatedText;
+    @TableField(fill = FieldFill.INSERT)
     private LocalDateTime createdAt;
+    @TableField(fill = FieldFill.INSERT_UPDATE)
     private LocalDateTime updatedAt;
     /** 逻辑删除：0=正常 1=已删除。 */
     private Integer deleted;

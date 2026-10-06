@@ -96,7 +96,8 @@ public final class Dtos {
                             java.time.LocalDateTime createdAt) {
     }
 
-    public record ImageGenerateReq(@NotBlank String prompt, String size, Long seed) {
+    public record ImageGenerateReq(@NotBlank String prompt, String negativePrompt, String size, Long seed,
+                                   Boolean promptExtend, Boolean watermark) {
     }
 
     public record KbCreateReq(@NotBlank String name, String description,

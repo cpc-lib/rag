@@ -78,7 +78,12 @@ public class MilvusClientWrapper {
     }
 
     public boolean hasCollection(String collection) {
-        return client().hasCollection(HasCollectionReq.builder().collectionName(collection).build());
+        Boolean exists = client().hasCollection(HasCollectionReq.builder().collectionName(collection).build());
+        // SDK 2.4.3 在 RPC 失败且重试耗尽时返回 null（吞掉底层异常），自动拆箱会 NPE 掩盖真实原因，转为显式异常
+        if (exists == null) {
+            throw new IllegalStateException("Milvus hasCollection 返回 null（通常为连接不可达/重试耗尽）: " + collection);
+        }
+        return exists;
     }
 
     /**
@@ -99,7 +104,9 @@ public class MilvusClientWrapper {
                 throw new BizException(ErrorCode.UPSTREAM,
                         "向量维度与已有数据不一致（集合维度 " + existing + "，模型维度 " + dim + "），请更换知识库或模型配置");
             }
+            return;
         }
+        log.info("Milvus 集合已存在（跳过创建）: {}", collection);
     }
 
     private void createCollection(String collection, int dim) {
