@@ -1,0 +1,58 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "https://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.rag.api.infrastructure.persistence.mapper.SubtitleMapper">
+
+    <resultMap id="BaseResultMap" type="com.rag.api.infrastructure.persistence.entity.SubtitleEntity">
+        <id column="id" property="id"/>
+        <result column="tenant_id" property="tenantId"/>
+        <result column="user_id" property="userId"/>
+        <result column="original_name" property="originalName"/>
+        <result column="source_lang" property="sourceLang"/>
+        <result column="target_lang" property="targetLang"/>
+        <result column="srt_content" property="srtContent"/>
+        <result column="created_at" property="createdAt"/>
+        <result column="updated_at" property="updatedAt"/>
+        <result column="deleted" property="deleted"/>
+    </resultMap>
+
+    <sql id="Base_Column_List">
+        id, tenant_id, user_id, original_name, source_lang, target_lang, srt_content, created_at, updated_at, deleted
+    </sql>
+
+    <select id="selectById" resultMap="BaseResultMap">
+        SELECT <include refid="Base_Column_List"/>
+        FROM subtitle
+        WHERE deleted = 0 AND id = #{id}
+    </select>
+
+    <insert id="insert" useGeneratedKeys="true" keyProperty="id">
+        INSERT INTO subtitle (tenant_id, user_id, original_name, source_lang, target_lang, srt_content)
+        VALUES (#{tenantId}, #{userId}, #{originalName}, #{sourceLang}, #{targetLang}, #{srtContent})
+    </insert>
+
+    <update id="updateById">
+        UPDATE subtitle
+        <set>
+            <if test="tenantId != null">tenant_id = #{tenantId},</if>
+            <if test="userId != null">user_id = #{userId},</if>
+            <if test="originalName != null">original_name = #{originalName},</if>
+            <if test="sourceLang != null">source_lang = #{sourceLang},</if>
+            <if test="targetLang != null">target_lang = #{targetLang},</if>
+            <if test="srtContent != null">srt_content = #{srtContent},</if>
+            updated_at = NOW()
+        </set>
+        WHERE id = #{id} AND deleted = 0
+    </update>
+
+    <select id="selectListByTenantUser" resultMap="BaseResultMap">
+        SELECT <include refid="Base_Column_List"/>
+        FROM subtitle
+        WHERE deleted = 0 AND tenant_id = #{tenantId} AND user_id = #{userId}
+        ORDER BY updated_at DESC
+    </select>
+
+    <update id="logicDeleteById">
+        UPDATE subtitle SET deleted = 1 WHERE id = #{id}
+    </update>
+
+</mapper>

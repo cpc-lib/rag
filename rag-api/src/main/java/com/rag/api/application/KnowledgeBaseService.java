@@ -1,6 +1,5 @@
 package com.rag.api.application;
 
-import com.baomidou.mybatisplus.core.conditions.query.QueryWrapper;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.rag.api.common.BizException;
 import com.rag.api.common.ErrorCode;
@@ -123,16 +122,12 @@ public class KnowledgeBaseService {
         if (TenantContext.require().userType() != 1) {
             throw BizException.forbidden("仅租户管理员可删除知识库");
         }
-        chunkMapper.delete(new QueryWrapper<ChunkEntity>().eq("kb_id", kbId));
+        chunkMapper.logicDeleteByKbId(kbId);
         // 先收集文档 id，用于级联清理文件库条目（MinIO 对象由下方 deletePrefix 删除）
-        List<Long> docIds = documentMapper.selectObjs(new QueryWrapper<DocumentEntity>()
-                        .select("id").eq("kb_id", kbId)).stream()
-                .filter(java.util.Objects::nonNull)
-                .map(o -> ((Number) o).longValue())
-                .toList();
-        documentMapper.delete(new QueryWrapper<DocumentEntity>().eq("kb_id", kbId));
+        List<Long> docIds = documentMapper.selectIdsByKbId(kbId);
+        documentMapper.logicDeleteByKbId(kbId);
         // 流水线任务（与单文档删除 DocumentAppService.delete 保持一致，避免残留 PENDING/SUCCESS 任务）
-        pipelineTaskMapper.delete(new QueryWrapper<PipelineTaskEntity>().eq("kb_id", kbId));
+        pipelineTaskMapper.logicDeleteByKbId(kbId);
         promptTemplateService.deleteByKb(kbId);
         userManageService.onKbDeleted(kbId);
         minio.deletePrefix(kb.getTenantId() + "/" + kbId + "/");
@@ -151,7 +146,7 @@ public class KnowledgeBaseService {
         } catch (Exception e) {
             log.warn("ES 索引删除失败 kb={}: {}", kbId, e.getMessage());
         }
-        kbMapper.deleteById(kbId);
+        kbMapper.logicDeleteById(kbId);
     }
 
     /** 基础设施准备失败不阻塞建库（可延后到首次入库）。 */

@@ -1,6 +1,5 @@
 package com.rag.api.application;
 
-import com.baomidou.mybatisplus.core.conditions.query.QueryWrapper;
 import com.rag.api.common.BizException;
 import com.rag.api.common.ErrorCode;
 import com.rag.api.infrastructure.persistence.entity.ChatMessageEntity;
@@ -53,20 +52,14 @@ public class QuotaService {
         }
         // 回退：仅 library_file（document 上传时已双写到 library_file，避免重复计数；
         // 不含转码产物与 MinIO 残留对象）
-        QueryWrapper<com.rag.api.infrastructure.persistence.entity.LibraryFileEntity> qwLib =
-                new QueryWrapper<com.rag.api.infrastructure.persistence.entity.LibraryFileEntity>()
-                        .select("COALESCE(SUM(file_size),0) AS total").eq("tenant_id", tenantId);
-        Object vLib = libraryFileMapper.selectObjs(qwLib).stream().findFirst().orElse(0);
-        return vLib instanceof Number n ? n.longValue() : 0L;
+        Long vLib = libraryFileMapper.sumFileSizeByTenantId(tenantId);
+        return vLib == null ? 0L : vLib;
     }
 
     public long tokensUsedThisMonth(String tenantId) {
-        QueryWrapper<ChatMessageEntity> qw = new QueryWrapper<ChatMessageEntity>()
-                .select("COALESCE(SUM(token_usage),0) AS total")
-                .eq("tenant_id", tenantId)
-                .ge("created_at", LocalDate.now().withDayOfMonth(1).atTime(LocalTime.MIN));
-        Object v = chatMessageMapper.selectObjs(qw).stream().findFirst().orElse(0);
-        return v instanceof Number n ? n.longValue() : 0L;
+        Long v = chatMessageMapper.sumTokenUsageByTenantIdSince(
+                tenantId, LocalDate.now().withDayOfMonth(1).atTime(LocalTime.MIN));
+        return v == null ? 0L : v;
     }
 
     public void checkStorage(String tenantId, long addBytes) {

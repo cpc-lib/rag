@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.rag.api.infrastructure.persistence.mapper.TenantMapper">
+
+    <sql id="columns">id, code, name, status, max_storage_mb, max_mq_concurrency, max_llm_tokens_month, max_sse_connections, created_at, updated_at</sql>
+
+    <select id="selectById" resultType="com.rag.api.infrastructure.persistence.entity.TenantEntity">
+        SELECT <include refid="columns"/> FROM tenant WHERE id = #{id} AND deleted = 0
+    </select>
+
+    <select id="selectByCode" resultType="com.rag.api.infrastructure.persistence.entity.TenantEntity">
+        SELECT <include refid="columns"/> FROM tenant WHERE code = #{code} AND deleted = 0
+    </select>
+
+    <select id="selectAll" resultType="com.rag.api.infrastructure.persistence.entity.TenantEntity">
+        SELECT <include refid="columns"/> FROM tenant WHERE deleted = 0
+    </select>
+
+    <select id="countByCode" resultType="long">
+        SELECT COUNT(*) FROM tenant WHERE code = #{code} AND deleted = 0
+    </select>
+
+    <insert id="insert">
+        INSERT INTO tenant (id, code, name, status, max_storage_mb, max_mq_concurrency, max_llm_tokens_month, max_sse_connections, created_at, updated_at)
+        VALUES (#{id}, #{code}, #{name}, #{status}, #{maxStorageMb}, #{maxMqConcurrency}, #{maxLlmTokensMonth}, #{maxSseConnections}, #{createdAt}, #{updatedAt})
+    </insert>
+
+    <update id="updateById">
+        UPDATE tenant
+        <set>
+            <if test="code != null">code = #{code},</if>
+            <if test="name != null">name = #{name},</if>
+            <if test="status != null">status = #{status},</if>
+            <if test="maxStorageMb != null">max_storage_mb = #{maxStorageMb},</if>
+            <if test="maxMqConcurrency != null">max_mq_concurrency = #{maxMqConcurrency},</if>
+            <if test="maxLlmTokensMonth != null">max_llm_tokens_month = #{maxLlmTokensMonth},</if>
+            <if test="maxSseConnections != null">max_sse_connections = #{maxSseConnections},</if>
+            updated_at = NOW()
+        </set>
+        WHERE id = #{id} AND deleted = 0
+    </update>
+</mapper>

@@ -2,8 +2,8 @@ package com.rag.worker.consumer;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.rabbitmq.client.Channel;
-import com.rag.worker.infrastructure.persistence.entity.LibraryFileEntity;
-import com.rag.worker.infrastructure.persistence.mapper.LibraryFileMapper;
+import com.rag.api.infrastructure.persistence.entity.LibraryFileEntity;
+import com.rag.api.infrastructure.persistence.mapper.LibraryFileMapper;
 import com.rag.worker.media.MediaProgressPublisher;
 import com.rag.worker.media.MediaTranscodeService;
 import lombok.RequiredArgsConstructor;

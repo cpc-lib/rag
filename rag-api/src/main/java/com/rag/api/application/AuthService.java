@@ -1,6 +1,5 @@
 package com.rag.api.application;
 
-import com.baomidou.mybatisplus.core.conditions.query.QueryWrapper;
 import com.rag.api.common.BizException;
 import com.rag.api.common.ErrorCode;
 import com.rag.api.common.TenantContext;
@@ -27,16 +26,15 @@ public class AuthService {
     private final JwtAuthFilter jwtAuthFilter;
 
     public Dtos.LoginResp login(String username, String password, String tenantCode) {
-        QueryWrapper<SysUserEntity> qw = new QueryWrapper<SysUserEntity>().eq("username", username).eq("status", 1);
+        String tenantId = null;
         if (tenantCode != null && !tenantCode.isBlank()) {
-            TenantEntity tenant = tenantMapper.selectOne(
-                    new QueryWrapper<TenantEntity>().eq("code", tenantCode.trim()));
+            TenantEntity tenant = tenantMapper.selectByCode(tenantCode.trim());
             if (tenant == null) {
                 throw new BizException(ErrorCode.BAD_REQUEST, "租户编码不存在");
             }
-            qw.eq("tenant_id", tenant.getId());
+            tenantId = tenant.getId();
         }
-        List<SysUserEntity> users = userMapper.selectList(qw);
+        List<SysUserEntity> users = userMapper.selectList(tenantId, username, 1, null);
         if (users.isEmpty()) {
             throw new BizException(ErrorCode.UNAUTHORIZED, "账号或密码错误");
         }

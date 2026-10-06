@@ -1,6 +1,5 @@
 package com.rag.api.application;
 
-import com.baomidou.mybatisplus.core.conditions.query.QueryWrapper;
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import com.rag.api.common.BizException;
 import com.rag.api.common.TenantContext;
@@ -101,12 +100,9 @@ public class ImageGenerationService {
     /** 个人生成历史分页（仅本人可见）；keyword 非空时按画面描述模糊查询。 */
     public Page<ImageView> page(long current, long size, String keyword) {
         TenantContext.Session s = TenantContext.require();
-        Page<GeneratedImageEntity> p = new Page<>(current, size);
-        imageMapper.selectPage(p, new QueryWrapper<GeneratedImageEntity>()
-                .eq("tenant_id", s.tenantId())
-                .eq("user_id", s.userId())
-                .like(keyword != null && !keyword.isBlank(), "prompt", keyword == null ? null : keyword.trim())
-                .orderByDesc("id"));
+        Page<GeneratedImageEntity> p = imageMapper.selectPageByTenantUser(
+                new Page<>(current, size), s.tenantId(), s.userId(),
+                keyword == null ? null : keyword.trim());
         Page<ImageView> views = new Page<>(p.getCurrent(), p.getSize(), p.getTotal());
         views.setRecords(p.getRecords().stream().map(e -> {
             if (e.getFileSize() == null) {
@@ -129,7 +125,7 @@ public class ImageGenerationService {
         } catch (Exception ex) {
             log.warn("删除 MinIO 图片失败 key={} err={}", e.getObjectKey(), ex.getMessage());
         }
-        imageMapper.deleteById(id);
+        imageMapper.logicDeleteById(id);
         fileLibraryService.removeByImage(id);
     }
 
@@ -138,8 +134,7 @@ public class ImageGenerationService {
         try {
             long size = minio.statSize(e.getObjectKey());
             e.setFileSize(size);
-            imageMapper.update(null, new com.baomidou.mybatisplus.core.conditions.update.UpdateWrapper<GeneratedImageEntity>()
-                    .eq("id", e.getId()).set("file_size", size));
+            imageMapper.updateFileSizeById(e.getId(), size);
         } catch (Exception ex) {
             log.warn("作品大小回填失败 id={}: {}", e.getId(), ex.getMessage());
         }

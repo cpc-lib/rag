@@ -1,0 +1,73 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.rag.api.infrastructure.persistence.mapper.PromptTemplateMapper">
+
+    <sql id="columns">id, tenant_id, kb_id, category, name, content, is_default, created_at, updated_at</sql>
+
+    <select id="selectById" resultType="com.rag.api.infrastructure.persistence.entity.PromptTemplateEntity">
+        SELECT <include refid="columns"/> FROM prompt_template WHERE id = #{id} AND deleted = 0
+    </select>
+
+    <select id="selectByIds" resultType="com.rag.api.infrastructure.persistence.entity.PromptTemplateEntity">
+        SELECT <include refid="columns"/> FROM prompt_template WHERE id IN
+        <foreach collection="ids" item="item" open="(" separator="," close=")">#{item}</foreach>
+        AND deleted = 0
+    </select>
+
+    <select id="selectByTenantIdAndCategoryIsNull" resultType="com.rag.api.infrastructure.persistence.entity.PromptTemplateEntity">
+        SELECT <include refid="columns"/> FROM prompt_template WHERE tenant_id = #{tenantId} AND category IS NULL AND deleted = 0 ORDER BY is_default DESC, updated_at DESC
+    </select>
+
+    <select id="selectByKbId" resultType="com.rag.api.infrastructure.persistence.entity.PromptTemplateEntity">
+        SELECT <include refid="columns"/> FROM prompt_template WHERE kb_id = #{kbId} AND deleted = 0 ORDER BY is_default DESC, updated_at DESC
+    </select>
+
+    <select id="selectByKbIdAndIds" resultType="com.rag.api.infrastructure.persistence.entity.PromptTemplateEntity">
+        SELECT <include refid="columns"/> FROM prompt_template WHERE kb_id = #{kbId} AND id IN
+        <foreach collection="ids" item="item" open="(" separator="," close=")">#{item}</foreach>
+        AND deleted = 0 ORDER BY is_default DESC, updated_at DESC
+    </select>
+
+    <select id="selectDefaultByTenantIdAndKbId" resultType="com.rag.api.infrastructure.persistence.entity.PromptTemplateEntity">
+        SELECT <include refid="columns"/> FROM prompt_template WHERE tenant_id = #{tenantId} AND kb_id = #{kbId} AND is_default = 1 AND deleted = 0 LIMIT 1
+    </select>
+
+    <select id="selectByTenantIdAndCategory" resultType="com.rag.api.infrastructure.persistence.entity.PromptTemplateEntity">
+        SELECT <include refid="columns"/> FROM prompt_template WHERE tenant_id = #{tenantId} AND category = #{category} AND deleted = 0 LIMIT 1
+    </select>
+
+    <select id="selectByKbIdAndIsDefault" resultType="com.rag.api.infrastructure.persistence.entity.PromptTemplateEntity">
+        SELECT <include refid="columns"/> FROM prompt_template WHERE kb_id = #{kbId} AND is_default = #{isDefault} AND deleted = 0
+    </select>
+
+    <select id="selectIdsByKbId" resultType="java.lang.Long">
+        SELECT id FROM prompt_template WHERE kb_id = #{kbId} AND deleted = 0
+    </select>
+
+    <insert id="insert" useGeneratedKeys="true" keyProperty="id">
+        INSERT INTO prompt_template (tenant_id, kb_id, category, name, content, is_default, created_at, updated_at)
+        VALUES (#{tenantId}, #{kbId}, #{category}, #{name}, #{content}, #{isDefault}, #{createdAt}, #{updatedAt})
+    </insert>
+
+    <update id="updateById">
+        UPDATE prompt_template
+        <set>
+            <if test="tenantId != null">tenant_id = #{tenantId},</if>
+            <if test="kbId != null">kb_id = #{kbId},</if>
+            <if test="category != null">category = #{category},</if>
+            <if test="name != null">name = #{name},</if>
+            <if test="content != null">content = #{content},</if>
+            <if test="isDefault != null">is_default = #{isDefault},</if>
+            updated_at = NOW()
+        </set>
+        WHERE id = #{id} AND deleted = 0
+    </update>
+
+    <update id="deleteById">
+        UPDATE prompt_template SET deleted = 1, updated_at = NOW() WHERE id = #{id} AND deleted = 0
+    </update>
+
+    <update id="logicDeleteByKbId">
+        UPDATE prompt_template SET deleted = 1, updated_at = NOW() WHERE kb_id = #{kbId} AND deleted = 0
+    </update>
+</mapper>

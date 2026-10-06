@@ -1,6 +1,5 @@
 package com.rag.api.application;
 
-import com.baomidou.mybatisplus.core.conditions.query.QueryWrapper;
 import com.rag.api.common.BizException;
 import com.rag.api.common.TenantContext;
 import com.rag.api.infrastructure.mq.Sha256Publisher;
@@ -129,7 +128,7 @@ public class FileLibraryService {
 
     /** 文档删除时级联清理文件库条目（MinIO 对象由文档侧删除，条目残留会成为死数据）。 */
     public void removeByDocument(long documentId) {
-        libraryFileMapper.delete(new QueryWrapper<LibraryFileEntity>().eq("document_id", documentId));
+        libraryFileMapper.logicDeleteByDocumentId(documentId);
     }
 
     /** 知识库删除时级联清理该库所有文档归档的文件库条目。 */
@@ -137,12 +136,12 @@ public class FileLibraryService {
         if (documentIds == null || documentIds.isEmpty()) {
             return;
         }
-        libraryFileMapper.delete(new QueryWrapper<LibraryFileEntity>().in("document_id", documentIds));
+        libraryFileMapper.logicDeleteByDocumentIds(documentIds);
     }
 
     /** AI 图片删除时级联清理文件库条目（MinIO 对象由图片侧删除）。 */
     public void removeByImage(long imageId) {
-        libraryFileMapper.delete(new QueryWrapper<LibraryFileEntity>().eq("image_id", imageId));
+        libraryFileMapper.logicDeleteByImageId(imageId);
     }
 
     /**
@@ -151,17 +150,15 @@ public class FileLibraryService {
      * MinIO 删除失败仅告警，不阻断元数据与字幕主记录的删除。
      */
     public void removeSubtitleUpload(long subtitleId) {
-        List<LibraryFileEntity> uploads = libraryFileMapper.selectList(
-                new QueryWrapper<LibraryFileEntity>()
-                        .eq("subtitle_id", subtitleId)
-                        .eq("archive_source", SRC_SUBTITLE_UPLOAD));
+        List<LibraryFileEntity> uploads = libraryFileMapper.selectBySubtitleIdAndArchiveSource(
+                subtitleId, SRC_SUBTITLE_UPLOAD);
         for (LibraryFileEntity f : uploads) {
             try {
                 minioStorage.deleteObject(f.getObjectKey());
             } catch (Exception ex) {
                 log.warn("字幕原始归档 MinIO 对象删除失败 id={} err={}", f.getId(), ex.getMessage());
             }
-            libraryFileMapper.deleteById(f.getId());
+            libraryFileMapper.logicDeleteById(f.getId());
         }
     }
 
@@ -204,24 +201,13 @@ public class FileLibraryService {
 
     /** 秒传查询：同租户同 SHA-256 且已存在的文件条目（取最早一条），命中则无需重复上传。 */
     public Dtos.LibraryFileView findBySha256(String tenantId, String sha256) {
-        LibraryFileEntity e = libraryFileMapper.selectOne(new QueryWrapper<LibraryFileEntity>()
-                .eq("tenant_id", tenantId)
-                .eq("sha256", sha256)
-                .isNull("subtitle_id").isNull("image_id").isNull("document_id")
-                .orderByAsc("id")
-                .last("LIMIT 1"));
+        LibraryFileEntity e = libraryFileMapper.selectOneDirectBySha256(tenantId, sha256);
         return e == null ? null : toView(e);
     }
 
     /** 字幕秒传查询：同租户同 SHA-256 的原始上传归档（SUBTITLE_UPLOAD），取最新一条 subtitle_id。 */
     public Long findSubtitleIdBySha256(String tenantId, String sha256) {
-        LibraryFileEntity e = libraryFileMapper.selectOne(new QueryWrapper<LibraryFileEntity>()
-                .eq("tenant_id", tenantId)
-                .eq("sha256", sha256)
-                .eq("archive_source", SRC_SUBTITLE_UPLOAD)
-                .isNotNull("subtitle_id")
-                .orderByDesc("id")
-                .last("LIMIT 1"));
+        LibraryFileEntity e = libraryFileMapper.selectOneSubtitleUploadBySha256(tenantId, sha256);
         return e == null ? null : e.getSubtitleId();
     }
 
@@ -272,24 +258,20 @@ public class FileLibraryService {
         } catch (Exception ex) {
             log.warn("文件库 MinIO 对象删除失败 id={} err={}", e.getId(), ex.getMessage());
         }
-        libraryFileMapper.deleteById(e.getId());
+        libraryFileMapper.logicDeleteById(e.getId());
         log.info("文件库条目已删除 id={} file={}", e.getId(), e.getFileName());
     }
 
     public List<Dtos.LibraryFileView> list(String keyword) {
         userManageService.requireMenu("library");
         TenantContext.Session s = TenantContext.require();
-        QueryWrapper<LibraryFileEntity> qw = new QueryWrapper<LibraryFileEntity>()
-                .eq("tenant_id", s.tenantId())
-                .eq("user_id", s.userId());
         String kw = keyword == null ? "" : keyword.trim();
         if (!kw.isEmpty()) {
             // 转义 LIKE 通配符，避免用户输入的 % _ 被当作通配
-            String escaped = kw.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_");
-            qw.like("file_name", escaped);
+            kw = kw.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_");
         }
-        qw.orderByDesc("updated_at");
-        return libraryFileMapper.selectList(qw).stream().map(this::toView).toList();
+        return libraryFileMapper.selectByTenantIdAndUserId(s.tenantId(), s.userId(), kw)
+                .stream().map(this::toView).toList();
     }
 
     public Dtos.LibraryFileView get(long id) {
@@ -333,15 +315,11 @@ public class FileLibraryService {
     public List<Dtos.PlaybackHistoryView> listPlaybackHistory() {
         userManageService.requireMenu("library");
         TenantContext.Session s = TenantContext.require();
-        List<VideoPlaybackHistoryEntity> histories = playbackHistoryMapper.selectList(
-                new QueryWrapper<VideoPlaybackHistoryEntity>()
-                        .eq("tenant_id", s.tenantId())
-                        .eq("user_id", s.userId())
-                        .orderByDesc("updated_at")
-                        .last("LIMIT 100"));
+        List<VideoPlaybackHistoryEntity> histories = playbackHistoryMapper.selectListByTenantUser(
+                s.tenantId(), s.userId(), 100);
         if (histories.isEmpty()) return List.of();
         List<Long> fileIds = histories.stream().map(VideoPlaybackHistoryEntity::getFileId).toList();
-        Map<Long, LibraryFileEntity> fileMap = libraryFileMapper.selectBatchIds(fileIds).stream()
+        Map<Long, LibraryFileEntity> fileMap = libraryFileMapper.selectByIds(fileIds).stream()
                 .collect(Collectors.toMap(LibraryFileEntity::getId, f -> f, (a, b) -> a));
         return histories.stream().map(h -> {
             LibraryFileEntity f = fileMap.get(h.getFileId());
@@ -358,13 +336,8 @@ public class FileLibraryService {
     /** 查询当前用户在指定视频上的最新播放进度（毫秒），无记录返回 null。 */
     private Long queryPositionMs(long fileId) {
         TenantContext.Session s = TenantContext.require();
-        VideoPlaybackHistoryEntity h = playbackHistoryMapper.selectOne(
-                new QueryWrapper<VideoPlaybackHistoryEntity>()
-                        .eq("tenant_id", s.tenantId())
-                        .eq("user_id", s.userId())
-                        .eq("file_id", fileId)
-                        .orderByDesc("updated_at")
-                        .last("LIMIT 1"));
+        VideoPlaybackHistoryEntity h = playbackHistoryMapper.selectLatestByTenantUserFile(
+                s.tenantId(), s.userId(), fileId);
         return h == null ? null : h.getPositionMs();
     }
 
@@ -407,10 +380,8 @@ public class FileLibraryService {
         userManageService.requireMenu("library");
         LibraryFileEntity e = requireOwned(id);
         if (e.getSubtitleId() != null) {
-            List<SubtitleCueBackupEntity> rows = cueBackupMapper.selectList(
-                    new QueryWrapper<SubtitleCueBackupEntity>()
-                            .eq("subtitle_id", e.getSubtitleId())
-                            .orderByAsc("seq"));
+            List<SubtitleCueBackupEntity> rows = cueBackupMapper.selectListBySubtitleId(
+                    e.getSubtitleId());
             if (!rows.isEmpty()) {
                 return rows.stream()
                         .map(r -> new Dtos.SubtitleCue(r.getSeq(), r.getStartTime(), r.getEndTime(),

@@ -1,0 +1,52 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "https://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.rag.api.infrastructure.persistence.mapper.TranslateLangMapper">
+
+    <resultMap id="BaseResultMap" type="com.rag.api.infrastructure.persistence.entity.TranslateLangEntity">
+        <id column="id" property="id"/>
+        <result column="tenant_id" property="tenantId"/>
+        <result column="name" property="name"/>
+        <result column="sort_no" property="sortNo"/>
+        <result column="created_at" property="createdAt"/>
+        <result column="deleted" property="deleted"/>
+    </resultMap>
+
+    <sql id="Base_Column_List">
+        id, tenant_id, name, sort_no, created_at, deleted
+    </sql>
+
+    <select id="selectById" resultMap="BaseResultMap">
+        SELECT <include refid="Base_Column_List"/>
+        FROM translate_lang
+        WHERE deleted = 0 AND id = #{id}
+    </select>
+
+    <insert id="insert" useGeneratedKeys="true" keyProperty="id">
+        INSERT INTO translate_lang (tenant_id, name, sort_no)
+        VALUES (#{tenantId}, #{name}, #{sortNo})
+    </insert>
+
+    <select id="selectListByTenantId" resultMap="BaseResultMap">
+        SELECT <include refid="Base_Column_List"/>
+        FROM translate_lang
+        WHERE deleted = 0 AND tenant_id = #{tenantId}
+        ORDER BY sort_no ASC, id ASC
+    </select>
+
+    <select id="countByTenantIdAndName" resultType="java.lang.Long">
+        SELECT COUNT(*)
+        FROM translate_lang
+        WHERE deleted = 0 AND tenant_id = #{tenantId} AND name = #{name}
+    </select>
+
+    <select id="countByTenantId" resultType="java.lang.Long">
+        SELECT COUNT(*)
+        FROM translate_lang
+        WHERE deleted = 0 AND tenant_id = #{tenantId}
+    </select>
+
+    <update id="logicDeleteById">
+        UPDATE translate_lang SET deleted = 1 WHERE id = #{id}
+    </update>
+
+</mapper>

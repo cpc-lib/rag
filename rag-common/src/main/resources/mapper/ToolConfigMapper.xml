@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.rag.api.infrastructure.persistence.mapper.ToolConfigMapper">
+
+    <sql id="columns">id, tenant_id, weather_enabled, tavily_enabled, tavily_api_key</sql>
+
+    <select id="selectByTenantId" resultType="com.rag.api.infrastructure.persistence.entity.ToolConfigEntity">
+        SELECT <include refid="columns"/> FROM tool_config WHERE tenant_id = #{tenantId} AND deleted = 0
+    </select>
+
+    <insert id="insert" useGeneratedKeys="true" keyProperty="id">
+        INSERT INTO tool_config (tenant_id, weather_enabled, tavily_enabled, tavily_api_key)
+        VALUES (#{tenantId}, #{weatherEnabled}, #{tavilyEnabled}, #{tavilyApiKey})
+    </insert>
+
+    <update id="updateById">
+        UPDATE tool_config
+        <set>
+            <if test="tenantId != null">tenant_id = #{tenantId},</if>
+            <if test="weatherEnabled != null">weather_enabled = #{weatherEnabled},</if>
+            <if test="tavilyEnabled != null">tavily_enabled = #{tavilyEnabled},</if>
+            <if test="tavilyApiKey != null">tavily_api_key = #{tavilyApiKey}</if>
+        </set>
+        WHERE id = #{id} AND deleted = 0
+    </update>
+</mapper>

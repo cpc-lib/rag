@@ -1,0 +1,51 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "https://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.rag.api.infrastructure.persistence.mapper.SubtitleCueBackupMapper">
+
+    <resultMap id="BaseResultMap" type="com.rag.api.infrastructure.persistence.entity.SubtitleCueBackupEntity">
+        <id column="id" property="id"/>
+        <result column="tenant_id" property="tenantId"/>
+        <result column="subtitle_id" property="subtitleId"/>
+        <result column="seq" property="seq"/>
+        <result column="start_time" property="startTime"/>
+        <result column="end_time" property="endTime"/>
+        <result column="content" property="content"/>
+        <result column="translated_text" property="translatedText"/>
+        <result column="created_at" property="createdAt"/>
+        <result column="updated_at" property="updatedAt"/>
+        <result column="deleted" property="deleted"/>
+    </resultMap>
+
+    <sql id="Base_Column_List">
+        id, tenant_id, subtitle_id, seq, start_time, end_time, content, translated_text, created_at, updated_at, deleted
+    </sql>
+
+    <insert id="insert" useGeneratedKeys="true" keyProperty="id">
+        INSERT INTO subtitle_cue_backup (tenant_id, subtitle_id, seq, start_time, end_time, content, translated_text)
+        VALUES (#{tenantId}, #{subtitleId}, #{seq}, #{startTime}, #{endTime}, #{content}, #{translatedText})
+    </insert>
+
+    <select id="selectListBySubtitleId" resultMap="BaseResultMap">
+        SELECT <include refid="Base_Column_List"/>
+        FROM subtitle_cue_backup
+        WHERE deleted = 0 AND subtitle_id = #{subtitleId}
+        ORDER BY seq ASC
+    </select>
+
+    <update id="updateTranslatedTextBySubtitleIdAndSeq">
+        UPDATE subtitle_cue_backup
+        SET translated_text = #{translatedText}, updated_at = NOW()
+        WHERE subtitle_id = #{subtitleId} AND seq = #{seq} AND deleted = 0
+    </update>
+
+    <update id="updateContentAndTranslatedBySubtitleIdAndSeq">
+        UPDATE subtitle_cue_backup
+        <set>
+            <if test="content != null">content = #{content},</if>
+            translated_text = #{translatedText},
+            updated_at = NOW()
+        </set>
+        WHERE subtitle_id = #{subtitleId} AND seq = #{seq} AND deleted = 0
+    </update>
+
+</mapper>

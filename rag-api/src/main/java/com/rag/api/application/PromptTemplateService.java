@@ -1,6 +1,5 @@
 package com.rag.api.application;
 
-import com.baomidou.mybatisplus.core.conditions.query.QueryWrapper;
 import com.rag.api.common.BizException;
 import com.rag.api.infrastructure.persistence.entity.KnowledgeBaseEntity;
 import com.rag.api.infrastructure.persistence.entity.PromptTemplateEntity;
@@ -199,14 +198,14 @@ public class PromptTemplateService {
      * 租户下全部知识库问答模板（管理页/授权弹窗用），排除字幕等非知识库模板。
      */
     public List<PromptTemplateEntity> list(String tenantId) {
-        return mapper.selectList(new QueryWrapper<PromptTemplateEntity>().eq("tenant_id", tenantId).isNull("category").orderByDesc("is_default").orderByDesc("updated_at"));
+        return mapper.selectByTenantIdAndCategoryIsNull(tenantId);
     }
 
     /**
      * 指定知识库下的模板。
      */
     public List<PromptTemplateEntity> listByKb(long kbId) {
-        return mapper.selectList(new QueryWrapper<PromptTemplateEntity>().eq("kb_id", kbId).orderByDesc("is_default").orderByDesc("updated_at"));
+        return mapper.selectByKbId(kbId);
     }
 
     public PromptTemplateEntity get(String tenantId, long id) {
@@ -218,7 +217,7 @@ public class PromptTemplateService {
     }
 
     public PromptTemplateEntity getDefault(String tenantId, long kbId) {
-        PromptTemplateEntity t = mapper.selectOne(new QueryWrapper<PromptTemplateEntity>().eq("tenant_id", tenantId).eq("kb_id", kbId).eq("is_default", true).last("LIMIT 1"));
+        PromptTemplateEntity t = mapper.selectDefaultByTenantIdAndKbId(tenantId, kbId);
         if (t == null) {
             throw BizException.notFound("该知识库未配置默认提示词模板");
         }
@@ -259,7 +258,7 @@ public class PromptTemplateService {
         if (Boolean.TRUE.equals(t.getIsDefault())) {
             throw BizException.badRequest("默认模板不可删除，可先将其他模板设为默认");
         }
-        userPromptMapper.delete(new QueryWrapper<UserPromptEntity>().eq("prompt_id", id));
+        userPromptMapper.deleteByPromptId(id);
         mapper.deleteById(id);
     }
 
@@ -268,8 +267,8 @@ public class PromptTemplateService {
      */
     @Transactional
     public void deleteByKb(long kbId) {
-        userPromptMapper.delete(new QueryWrapper<UserPromptEntity>().inSql("prompt_id", "SELECT id FROM prompt_template WHERE kb_id = " + kbId));
-        mapper.delete(new QueryWrapper<PromptTemplateEntity>().eq("kb_id", kbId));
+        userPromptMapper.deleteByKbId(kbId);
+        mapper.logicDeleteByKbId(kbId);
     }
 
     /**
@@ -293,7 +292,7 @@ public class PromptTemplateService {
      */
     @Transactional
     public PromptTemplateEntity getSubtitleTemplate(String tenantId) {
-        PromptTemplateEntity t = mapper.selectOne(new QueryWrapper<PromptTemplateEntity>().eq("tenant_id", tenantId).eq("category", CATEGORY_SUBTITLE).last("LIMIT 1"));
+        PromptTemplateEntity t = mapper.selectByTenantIdAndCategory(tenantId, CATEGORY_SUBTITLE);
         if (t == null) {
             t = new PromptTemplateEntity();
             t.setTenantId(tenantId);
@@ -351,7 +350,7 @@ public class PromptTemplateService {
      */
     private void markDefault(String tenantId, long id) {
         PromptTemplateEntity t = get(tenantId, id);
-        List<PromptTemplateEntity> olds = mapper.selectList(new QueryWrapper<PromptTemplateEntity>().eq("kb_id", t.getKbId()).eq("is_default", true));
+        List<PromptTemplateEntity> olds = mapper.selectByKbIdAndIsDefault(t.getKbId(), true);
         for (PromptTemplateEntity old : olds) {
             if (!old.getId().equals(id)) {
                 old.setIsDefault(false);

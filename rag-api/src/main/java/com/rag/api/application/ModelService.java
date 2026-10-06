@@ -1,6 +1,5 @@
 package com.rag.api.application;
 
-import com.baomidou.mybatisplus.core.conditions.query.QueryWrapper;
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import com.rag.api.common.BizException;
 import com.rag.api.common.TenantContext;
@@ -42,20 +41,15 @@ public class ModelService {
     }
 
     public ModelEntity findEnabled(String tenantId, String type) {
-        return mapper.selectOne(new QueryWrapper<ModelEntity>()
-                .eq("tenant_id", tenantId).eq("type", type).eq("enabled", 1));
+        return mapper.selectEnabledByTenantIdAndType(tenantId, type);
     }
 
     // ---------- 管理（前端，脱敏） ----------
 
     public Page<Dtos.ModelView> page(long current, long size, String type) {
-        QueryWrapper<ModelEntity> qw = new QueryWrapper<ModelEntity>()
-                .eq("tenant_id", TenantContext.require().tenantId())
-                .orderByAsc("type").orderByDesc("enabled").orderByDesc("id");
-        if (type != null && !type.isBlank()) {
-            qw.eq("type", type);
-        }
-        Page<ModelEntity> p = mapper.selectPage(new Page<>(current, size), qw);
+        String tenantId = TenantContext.require().tenantId();
+        Page<ModelEntity> p = mapper.selectPage(new Page<>(current, size), tenantId,
+                type != null && !type.isBlank() ? type : null);
         Page<Dtos.ModelView> vp = new Page<>(p.getCurrent(), p.getSize(), p.getTotal());
         // 列表不回传密钥明文
         vp.setRecords(p.getRecords().stream().map(m -> toView(m, null)).toList());

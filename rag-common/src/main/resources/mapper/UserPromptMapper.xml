@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.rag.api.infrastructure.persistence.mapper.UserPromptMapper">
+
+    <sql id="columns">id, tenant_id, user_id, prompt_id, created_at</sql>
+
+    <select id="selectByUserIds" resultType="com.rag.api.infrastructure.persistence.entity.UserPromptEntity">
+        SELECT <include refid="columns"/> FROM user_prompt WHERE user_id IN
+        <foreach collection="userIds" item="item" open="(" separator="," close=")">#{item}</foreach>
+        ORDER BY prompt_id ASC
+    </select>
+
+    <select id="selectByUserId" resultType="com.rag.api.infrastructure.persistence.entity.UserPromptEntity">
+        SELECT <include refid="columns"/> FROM user_prompt WHERE user_id = #{userId} ORDER BY prompt_id ASC
+    </select>
+
+    <select id="countByUserIdAndPromptId" resultType="long">
+        SELECT COUNT(*) FROM user_prompt WHERE user_id = #{userId} AND prompt_id = #{promptId}
+    </select>
+
+    <insert id="insert" useGeneratedKeys="true" keyProperty="id">
+        INSERT INTO user_prompt (tenant_id, user_id, prompt_id, created_at)
+        VALUES (#{tenantId}, #{userId}, #{promptId}, #{createdAt})
+    </insert>
+
+    <delete id="deleteByUserId">
+        DELETE FROM user_prompt WHERE user_id = #{userId}
+    </delete>
+
+    <delete id="deleteByPromptId">
+        DELETE FROM user_prompt WHERE prompt_id = #{promptId}
+    </delete>
+
+    <delete id="deleteByPromptIds">
+        DELETE FROM user_prompt WHERE prompt_id IN
+        <foreach collection="promptIds" item="item" open="(" separator="," close=")">#{item}</foreach>
+    </delete>
+
+    <delete id="deleteByKbId">
+        DELETE FROM user_prompt WHERE prompt_id IN (SELECT id FROM prompt_template WHERE kb_id = #{kbId})
+    </delete>
+</mapper>

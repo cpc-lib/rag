@@ -2,10 +2,11 @@ package com.rag.worker.consumer;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.rabbitmq.client.Channel;
-import com.rag.worker.infrastructure.persistence.entity.DocumentEntity;
-import com.rag.worker.infrastructure.persistence.entity.LibraryFileEntity;
-import com.rag.worker.infrastructure.persistence.mapper.DocumentMapper;
-import com.rag.worker.infrastructure.persistence.mapper.LibraryFileMapper;
+import com.rag.api.infrastructure.persistence.entity.DocumentEntity;
+import com.rag.api.infrastructure.persistence.entity.LibraryFileEntity;
+import com.rag.api.infrastructure.persistence.mapper.DocumentMapper;
+import com.rag.api.infrastructure.persistence.mapper.GeneratedImageMapper;
+import com.rag.api.infrastructure.persistence.mapper.LibraryFileMapper;
 import com.rag.worker.infrastructure.storage.MinioStorage;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -97,8 +98,7 @@ public class Sha256Consumer {
                     documentMapper.updateById(e);
                 }
                 // 同步该文档归档到文件库的条目（document_id 关联）
-                libraryFileMapper.update(null, new com.baomidou.mybatisplus.core.conditions.update.UpdateWrapper<LibraryFileEntity>()
-                        .eq("document_id", msg.targetId()).set("sha256", sha256));
+                libraryFileMapper.updateSha256ByDocumentId(msg.targetId(), sha256);
             }
             case "LIBRARY_FILE" -> {
                 LibraryFileEntity e = libraryFileMapper.selectById(msg.targetId());
@@ -108,22 +108,13 @@ public class Sha256Consumer {
                 }
             }
             case "GENERATED_IMAGE" -> {
-                // generated_image 表 Worker 侧暂无实体，用 JdbcTemplate 直写
-                updateGeneratedImageSha256(msg.targetId(), sha256);
+                generatedImageMapper.updateSha256ById(msg.targetId(), sha256);
                 // 同步该图片归档到文件库的条目（image_id 关联）
-                libraryFileMapper.update(null, new com.baomidou.mybatisplus.core.conditions.update.UpdateWrapper<LibraryFileEntity>()
-                        .eq("image_id", msg.targetId()).set("sha256", sha256));
+                libraryFileMapper.updateSha256ByImageId(msg.targetId(), sha256);
             }
             default -> log.warn("未知 SHA-256 目标类型: {}", msg.targetType());
         }
     }
 
-    private void updateGeneratedImageSha256(long id, String sha256) {
-        // 简化：用 DocumentMapper 的 DataSource 执行原生 SQL
-        // 实际通过 MyBatis-Plus 的 SqlRunner 或新增 GeneratedImageMapper
-        // 这里直接新增一个 GeneratedImageMapper（见同包）
-        generatedImageMapper.updateSha256ById(id, sha256);
-    }
-
-    private final com.rag.worker.infrastructure.persistence.mapper.GeneratedImageMapper generatedImageMapper;
+    private final GeneratedImageMapper generatedImageMapper;
 }

@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.rag.api.infrastructure.persistence.mapper.TenantMenuMapper">
+
+    <sql id="columns">id, tenant_id, menu_code, enabled, created_at, updated_at</sql>
+
+    <select id="selectByTenantId" resultType="com.rag.api.infrastructure.persistence.entity.TenantMenuEntity">
+        SELECT <include refid="columns"/> FROM tenant_menu WHERE tenant_id = #{tenantId}
+    </select>
+
+    <select id="selectOneByTenantIdAndMenuCode" resultType="com.rag.api.infrastructure.persistence.entity.TenantMenuEntity">
+        SELECT <include refid="columns"/> FROM tenant_menu WHERE tenant_id = #{tenantId} AND menu_code = #{menuCode} LIMIT 1
+    </select>
+
+    <insert id="insert" useGeneratedKeys="true" keyProperty="id">
+        INSERT INTO tenant_menu (tenant_id, menu_code, enabled, created_at, updated_at)
+        VALUES (#{tenantId}, #{menuCode}, #{enabled}, #{createdAt}, #{updatedAt})
+    </insert>
+
+    <update id="updateById">
+        UPDATE tenant_menu SET enabled = #{enabled}, updated_at = NOW() WHERE id = #{id}
+    </update>
+</mapper>

@@ -1,7 +1,7 @@
 package com.rag.worker.mq;
 
-import com.rag.worker.infrastructure.persistence.entity.TenantEntity;
-import com.rag.worker.infrastructure.persistence.mapper.TenantMapper;
+import com.rag.api.infrastructure.persistence.entity.TenantEntity;
+import com.rag.api.infrastructure.persistence.mapper.TenantMapper;
 import lombok.RequiredArgsConstructor;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.data.redis.core.script.DefaultRedisScript;

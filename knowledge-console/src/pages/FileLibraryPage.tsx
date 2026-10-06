@@ -14,6 +14,14 @@ import type { LibraryFile, PlaybackHistory } from '../api/types';
 import { useAuthStore } from '../store/auth';
 import SubtitleEditDrawer from '../components/SubtitleEditDrawer';
 
+/** 上传速度格式化 */
+function formatSpeed(bps: number): string {
+  if (bps >= 1024 * 1024 * 1024) return `${(bps / 1024 / 1024 / 1024).toFixed(1)} GB/s`;
+  if (bps >= 1024 * 1024) return `${(bps / 1024 / 1024).toFixed(1)} MB/s`;
+  if (bps >= 1024) return `${(bps / 1024).toFixed(1)} KB/s`;
+  return `${bps.toFixed(0)} B/s`;
+}
+
 function formatSize(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
@@ -60,7 +68,7 @@ export default function FileLibraryPage() {
   const [files, setFiles] = useState<LibraryFile[]>([]);
   const [loading, setLoading] = useState(false);
   /** 上传任务列表：每个文件独立进度条，互不阻塞；tip 为阶段提示（如 loading） */
-  const [uploads, setUploads] = useState<{ key: string; name: string; percent: number; tip?: string }[]>([]);
+  const [uploads, setUploads] = useState<{ key: string; name: string; percent: number; tip?: string; speed?: string }[]>([]);
   const [viewing, setViewing] = useState<LibraryFile | null>(null);
   const [editing, setEditing] = useState<LibraryFile | null>(null);
   const [content, setContent] = useState('');
@@ -507,12 +515,18 @@ export default function FileLibraryPage() {
         }
         const total = Math.ceil(file.size / chunkSize);
         if (done.size > 0) setPct(Math.round((done.size / total) * 100));
+        let lastT = performance.now();
         for (let i = 0; i < total; i++) {
           const part = i + 1;
           if (done.has(part)) continue;
-          await uploadApi.uploadPart(sessionId, part, file.slice(i * chunkSize, (i + 1) * chunkSize));
+          const slice = file.slice(i * chunkSize, (i + 1) * chunkSize);
+          await uploadApi.uploadPart(sessionId, part, slice);
+          const now = performance.now();
+          const sec = (now - lastT) / 1000;
+          lastT = now;
           done.add(part);
-          setPct(Math.round((done.size / total) * 100));
+          const bps = slice.size / sec;
+          setUploads((prev) => prev.map((u) => (u.key === taskKey ? { ...u, percent: Math.round((done.size / total) * 100), tip: undefined, speed: formatSpeed(bps) } : u)));
         }
         await uploadApi.complete(sessionId);
         localStorage.removeItem(key);
@@ -639,11 +653,16 @@ export default function FileLibraryPage() {
                       >
                         {u.name}
                       </Typography.Text>
-                      <div style={{ width: 120 }}>
+                      <div style={{ width: 160 }}>
                         {u.tip ? (
                           <Tag style={{ fontSize: 11, marginInlineEnd: 0 }}>{u.tip}</Tag>
                         ) : (
-                          <Progress percent={u.percent} size="small" style={{ margin: 0 }} />
+                          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                            <Progress percent={u.percent} size="small" style={{ margin: 0, flex: 1 }} />
+                            <Typography.Text type="secondary" style={{ fontSize: 11, whiteSpace: 'nowrap' }}>
+                              {u.speed ?? ''}
+                            </Typography.Text>
+                          </div>
                         )}
                       </div>
                     </div>

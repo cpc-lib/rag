@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.rag.api.infrastructure.persistence.mapper.UserKbMapper">
+
+    <sql id="columns">id, tenant_id, user_id, kb_id, created_at</sql>
+
+    <select id="selectByUserIds" resultType="com.rag.api.infrastructure.persistence.entity.UserKbEntity">
+        SELECT <include refid="columns"/> FROM user_kb WHERE user_id IN
+        <foreach collection="userIds" item="item" open="(" separator="," close=")">#{item}</foreach>
+        ORDER BY kb_id ASC
+    </select>
+
+    <select id="selectByUserId" resultType="com.rag.api.infrastructure.persistence.entity.UserKbEntity">
+        SELECT <include refid="columns"/> FROM user_kb WHERE user_id = #{userId} ORDER BY kb_id ASC
+    </select>
+
+    <select id="countByUserIdAndKbId" resultType="long">
+        SELECT COUNT(*) FROM user_kb WHERE user_id = #{userId} AND kb_id = #{kbId}
+    </select>
+
+    <insert id="insert" useGeneratedKeys="true" keyProperty="id">
+        INSERT INTO user_kb (tenant_id, user_id, kb_id, created_at)
+        VALUES (#{tenantId}, #{userId}, #{kbId}, #{createdAt})
+    </insert>
+
+    <delete id="deleteByUserId">
+        DELETE FROM user_kb WHERE user_id = #{userId}
+    </delete>
+
+    <delete id="deleteByKbId">
+        DELETE FROM user_kb WHERE kb_id = #{kbId}
+    </delete>
+</mapper>

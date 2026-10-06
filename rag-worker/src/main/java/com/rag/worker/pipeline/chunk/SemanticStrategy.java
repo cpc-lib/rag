@@ -1,9 +1,8 @@
 package com.rag.worker.pipeline.chunk;
 
-import com.baomidou.mybatisplus.core.conditions.query.QueryWrapper;
 import com.rag.worker.infrastructure.llm.EmbeddingClient;
-import com.rag.worker.infrastructure.persistence.entity.ModelEntity;
-import com.rag.worker.infrastructure.persistence.mapper.ModelMapper;
+import com.rag.api.infrastructure.persistence.entity.ModelEntity;
+import com.rag.api.infrastructure.persistence.mapper.ModelMapper;
 import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Component;
 
@@ -32,10 +31,7 @@ public class SemanticStrategy implements ChunkStrategy {
 
     @Override
     public List<ChunkPlan> plan(ChunkContext ctx) {
-        ModelEntity cfg = modelMapper.selectOne(
-                new QueryWrapper<ModelEntity>()
-                        .eq("tenant_id", ctx.tenantId())
-                        .eq("type", "EMBEDDING").eq("enabled", 1));
+        ModelEntity cfg = modelMapper.selectEnabledByTenantIdAndType(ctx.tenantId(), "EMBEDDING");
         if (cfg == null || cfg.getModel() == null || cfg.getApiKey() == null) {
             throw new IllegalStateException("租户未启用向量(EMBEDDING)模型，无法执行语义切片");
         }

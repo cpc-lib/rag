@@ -1,7 +1,7 @@
 package com.rag.worker.media;
 
-import com.rag.worker.infrastructure.persistence.entity.LibraryFileEntity;
-import com.rag.worker.infrastructure.persistence.mapper.LibraryFileMapper;
+import com.rag.api.infrastructure.persistence.entity.LibraryFileEntity;
+import com.rag.api.infrastructure.persistence.mapper.LibraryFileMapper;
 import com.rag.worker.infrastructure.storage.MinioStorage;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;

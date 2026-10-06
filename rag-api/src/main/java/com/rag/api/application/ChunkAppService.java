@@ -1,7 +1,5 @@
 package com.rag.api.application;
 
-import com.baomidou.mybatisplus.core.conditions.query.QueryWrapper;
-import com.baomidou.mybatisplus.core.conditions.update.UpdateWrapper;
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import com.rag.api.common.BizException;
 import com.rag.api.infrastructure.mq.IngestPublisher;
@@ -32,11 +30,7 @@ public class ChunkAppService {
 
     public Page<ChunkEntity> page(long documentId, long page, long size) {
         assertDocOwned(documentId);
-        return chunkMapper.selectPage(new Page<>(page, size),
-                new QueryWrapper<ChunkEntity>()
-                        .eq("document_id", documentId)
-                        .ne("status", "DELETED")
-                        .orderByAsc("seq"));
+        return chunkMapper.selectPageByDocumentId(new Page<>(page, size), documentId);
     }
 
     /** 查询切片详情（校验归属），供编辑前回显。 */
@@ -111,11 +105,7 @@ public class ChunkAppService {
             parent.setStatus("DELETED");
             chunkMapper.updateById(parent);
         }
-        chunkMapper.update(null, new UpdateWrapper<ChunkEntity>()
-                .eq("parent_chunk_id", parentId)
-                .eq("document_id", documentId)
-                .ne("status", "DELETED")
-                .set("parent_chunk_id", null));
+        chunkMapper.clearParentByParentId(parentId, documentId);
     }
 
     private void requireChild(ChunkEntity chunk) {
@@ -149,10 +139,9 @@ public class ChunkAppService {
     }
 
     private int nextSeq(long documentId) {
-        Integer max = chunkMapper.selectList(new QueryWrapper<ChunkEntity>()
-                        .eq("document_id", documentId).orderByDesc("seq").last("limit 1"))
-                .stream().findFirst().map(ChunkEntity::getSeq).orElse(0);
-        return max == null ? 1 : max + 1;
+        ChunkEntity max = chunkMapper.selectMaxSeqByDocumentId(documentId);
+        Integer seq = max == null ? null : max.getSeq();
+        return seq == null ? 1 : seq + 1;
     }
 
     private void enqueueReindex(DocumentEntity doc) {

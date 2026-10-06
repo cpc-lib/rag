@@ -1,0 +1,64 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "https://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.rag.api.infrastructure.persistence.mapper.UploadSessionMapper">
+
+    <resultMap id="BaseResultMap" type="com.rag.api.infrastructure.persistence.entity.UploadSessionEntity">
+        <id column="id" property="id"/>
+        <result column="tenant_id" property="tenantId"/>
+        <result column="user_id" property="userId"/>
+        <result column="biz" property="biz"/>
+        <result column="kb_id" property="kbId"/>
+        <result column="file_name" property="fileName"/>
+        <result column="file_size" property="fileSize"/>
+        <result column="content_type" property="contentType"/>
+        <result column="sha256" property="sha256"/>
+        <result column="chunk_size" property="chunkSize"/>
+        <result column="total_chunks" property="totalChunks"/>
+        <result column="uploaded_chunks" property="uploadedChunks"/>
+        <result column="uploaded_parts" property="uploadedParts"/>
+        <result column="object_key" property="objectKey"/>
+        <result column="upload_id" property="uploadId"/>
+        <result column="status" property="status"/>
+        <result column="created_at" property="createdAt"/>
+        <result column="updated_at" property="updatedAt"/>
+    </resultMap>
+
+    <sql id="Base_Column_List">
+        id, tenant_id, user_id, biz, kb_id, file_name, file_size, content_type, sha256, chunk_size, total_chunks, uploaded_chunks, uploaded_parts, object_key, upload_id, status, created_at, updated_at
+    </sql>
+
+    <select id="selectById" resultMap="BaseResultMap">
+        SELECT <include refid="Base_Column_List"/>
+        FROM upload_session
+        WHERE id = #{id}
+    </select>
+
+    <insert id="insert" useGeneratedKeys="true" keyProperty="id">
+        INSERT INTO upload_session (tenant_id, user_id, biz, kb_id, file_name, file_size, content_type, sha256, chunk_size, total_chunks, uploaded_chunks, uploaded_parts, object_key, upload_id, status)
+        VALUES (#{tenantId}, #{userId}, #{biz}, #{kbId}, #{fileName}, #{fileSize}, #{contentType}, #{sha256}, #{chunkSize}, #{totalChunks}, #{uploadedChunks}, #{uploadedParts}, #{objectKey}, #{uploadId}, #{status})
+    </insert>
+
+    <update id="updateById">
+        UPDATE upload_session
+        <set>
+            <if test="tenantId != null">tenant_id = #{tenantId},</if>
+            <if test="userId != null">user_id = #{userId},</if>
+            <if test="biz != null">biz = #{biz},</if>
+            <if test="kbId != null">kb_id = #{kbId},</if>
+            <if test="fileName != null">file_name = #{fileName},</if>
+            <if test="fileSize != null">file_size = #{fileSize},</if>
+            <if test="contentType != null">content_type = #{contentType},</if>
+            <if test="sha256 != null">sha256 = #{sha256},</if>
+            <if test="chunkSize != null">chunk_size = #{chunkSize},</if>
+            <if test="totalChunks != null">total_chunks = #{totalChunks},</if>
+            <if test="uploadedChunks != null">uploaded_chunks = #{uploadedChunks},</if>
+            <if test="uploadedParts != null">uploaded_parts = #{uploadedParts},</if>
+            <if test="objectKey != null">object_key = #{objectKey},</if>
+            <if test="uploadId != null">upload_id = #{uploadId},</if>
+            <if test="status != null">status = #{status},</if>
+            updated_at = NOW()
+        </set>
+        WHERE id = #{id}
+    </update>
+
+</mapper>

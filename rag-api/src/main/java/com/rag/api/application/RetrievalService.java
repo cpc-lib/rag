@@ -1,6 +1,5 @@
 package com.rag.api.application;
 
-import com.baomidou.mybatisplus.core.conditions.query.QueryWrapper;
 import com.rag.api.common.BizException;
 import com.rag.api.common.ErrorCode;
 import com.rag.api.common.TenantContext;
@@ -128,7 +127,7 @@ public class RetrievalService {
 
         // 4. child → parent 扩展：同 parent 去重（保留最高排名），parent 内容作为引用上下文
         Map<Long, ChunkEntity> chunks = topIds.isEmpty() ? Map.of()
-                : chunkMapper.selectBatchIds(topIds).stream()
+                : chunkMapper.selectByIds(topIds).stream()
                 .filter(c -> !"DELETED".equals(c.getStatus()))
                 .collect(Collectors.toMap(ChunkEntity::getId, Function.identity(), (a, b) -> a));
         Set<Long> needLoad = new HashSet<>(chunks.keySet());
@@ -138,7 +137,7 @@ public class RetrievalService {
             }
         });
         Map<Long, ChunkEntity> all = needLoad.equals(chunks.keySet()) ? chunks
-                : chunkMapper.selectBatchIds(needLoad).stream()
+                : chunkMapper.selectByIds(needLoad).stream()
                 .collect(Collectors.toMap(ChunkEntity::getId, Function.identity(), (a, b) -> a));
 
         Set<Long> docIds = new HashSet<>();
@@ -156,7 +155,7 @@ public class RetrievalService {
             docIds.add((unit != null ? unit : child).getDocumentId());
         }
         Map<Long, DocumentEntity> docs = docIds.isEmpty() ? Map.of()
-                : documentMapper.selectBatchIds(docIds).stream()
+                : documentMapper.selectByIds(docIds).stream()
                 .collect(Collectors.toMap(DocumentEntity::getId, Function.identity()));
 
         List<Citation> citations = new ArrayList<>();

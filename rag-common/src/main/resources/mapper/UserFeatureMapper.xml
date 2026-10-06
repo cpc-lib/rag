@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.rag.api.infrastructure.persistence.mapper.UserFeatureMapper">
+
+    <sql id="columns">id, tenant_id, user_id, feature_type, code, created_at</sql>
+
+    <select id="selectByUserIds" resultType="com.rag.api.infrastructure.persistence.entity.UserFeatureEntity">
+        SELECT <include refid="columns"/> FROM user_feature WHERE user_id IN
+        <foreach collection="userIds" item="item" open="(" separator="," close=")">#{item}</foreach>
+        ORDER BY id ASC
+    </select>
+
+    <select id="selectListByUserIdAndType" resultType="com.rag.api.infrastructure.persistence.entity.UserFeatureEntity">
+        SELECT <include refid="columns"/> FROM user_feature WHERE user_id = #{userId} AND feature_type = #{featureType} ORDER BY id ASC
+    </select>
+
+    <select id="countByUserIdAndTypeAndCode" resultType="long">
+        SELECT COUNT(*) FROM user_feature WHERE user_id = #{userId} AND feature_type = #{featureType} AND code = #{code}
+    </select>
+
+    <insert id="insert" useGeneratedKeys="true" keyProperty="id">
+        INSERT INTO user_feature (tenant_id, user_id, feature_type, code, created_at)
+        VALUES (#{tenantId}, #{userId}, #{featureType}, #{code}, #{createdAt})
+    </insert>
+
+    <delete id="deleteByUserIdAndType">
+        DELETE FROM user_feature WHERE user_id = #{userId} AND feature_type = #{featureType}
+    </delete>
+</mapper>

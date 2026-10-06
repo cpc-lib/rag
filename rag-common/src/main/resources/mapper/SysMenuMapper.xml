@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.rag.api.infrastructure.persistence.mapper.SysMenuMapper">
+
+    <sql id="columns">id, code, name, path, icon, platform_visible, admin_visible, end_user, sort, status, created_at, updated_at</sql>
+
+    <select id="selectByCode" resultType="com.rag.api.infrastructure.persistence.entity.SysMenuEntity">
+        SELECT <include refid="columns"/> FROM sys_menu WHERE code = #{code}
+    </select>
+
+    <select id="selectList" resultType="com.rag.api.infrastructure.persistence.entity.SysMenuEntity">
+        SELECT <include refid="columns"/> FROM sys_menu
+        <where>
+            <if test="status != null">status = #{status}</if>
+            <if test="platformVisible != null">AND platform_visible = #{platformVisible}</if>
+            <if test="adminVisible != null">AND admin_visible = #{adminVisible}</if>
+            <if test="endUser != null">AND end_user = #{endUser}</if>
+        </where>
+        ORDER BY sort ASC
+    </select>
+
+    <select id="selectEndUserCatalog" resultType="com.rag.api.infrastructure.persistence.entity.SysMenuEntity">
+        SELECT <include refid="columns"/> FROM sys_menu WHERE end_user = 1 AND status = 1 ORDER BY sort ASC
+    </select>
+</mapper>

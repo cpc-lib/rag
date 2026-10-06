@@ -1,0 +1,62 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "https://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.rag.api.infrastructure.persistence.mapper.GeneratedImageMapper">
+
+    <resultMap id="BaseResultMap" type="com.rag.api.infrastructure.persistence.entity.GeneratedImageEntity">
+        <id column="id" property="id"/>
+        <result column="tenant_id" property="tenantId"/>
+        <result column="user_id" property="userId"/>
+        <result column="prompt" property="prompt"/>
+        <result column="model" property="model"/>
+        <result column="size" property="size"/>
+        <result column="seed" property="seed"/>
+        <result column="object_key" property="objectKey"/>
+        <result column="file_name" property="fileName"/>
+        <result column="file_size" property="fileSize"/>
+        <result column="sha256" property="sha256"/>
+        <result column="status" property="status"/>
+        <result column="error_msg" property="errorMsg"/>
+        <result column="created_at" property="createdAt"/>
+        <result column="deleted" property="deleted"/>
+    </resultMap>
+
+    <sql id="Base_Column_List">
+        id, tenant_id, user_id, prompt, model, size, seed, object_key, file_name, file_size, sha256, status, error_msg, created_at, deleted
+    </sql>
+
+    <select id="selectById" resultMap="BaseResultMap">
+        SELECT <include refid="Base_Column_List"/>
+        FROM generated_image
+        WHERE deleted = 0 AND id = #{id}
+    </select>
+
+    <insert id="insert" useGeneratedKeys="true" keyProperty="id">
+        INSERT INTO generated_image (tenant_id, user_id, prompt, model, size, seed, object_key, file_name, file_size, status, error_msg)
+        VALUES (#{tenantId}, #{userId}, #{prompt}, #{model}, #{size}, #{seed}, #{objectKey}, #{fileName}, #{fileSize}, #{status}, #{errorMsg})
+    </insert>
+
+    <select id="selectPageByTenantUser" resultMap="BaseResultMap">
+        SELECT <include refid="Base_Column_List"/>
+        FROM generated_image
+        WHERE deleted = 0 AND tenant_id = #{tenantId} AND user_id = #{userId}
+        <if test="keyword != null and keyword != ''">
+            AND prompt LIKE CONCAT('%', #{keyword}, '%')
+        </if>
+        ORDER BY id DESC
+    </select>
+
+    <update id="updateFileSizeById">
+        UPDATE generated_image
+        SET file_size = #{fileSize}
+        WHERE id = #{id} AND deleted = 0
+    </update>
+
+    <update id="updateSha256ById">
+        UPDATE generated_image SET sha256 = #{sha256} WHERE id = #{id}
+    </update>
+
+    <update id="logicDeleteById">
+        UPDATE generated_image SET deleted = 1 WHERE id = #{id}
+    </update>
+
+</mapper>

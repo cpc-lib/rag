@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.rag.api.infrastructure.persistence.mapper.ModelMapper">
+
+    <sql id="columns">id, tenant_id, name, type, base_url, api_key, model, temperature, top_p, max_tokens, embedding_dim, enabled, created_at, updated_at</sql>
+
+    <select id="selectById" resultType="com.rag.api.infrastructure.persistence.entity.ModelEntity">
+        SELECT <include refid="columns"/> FROM model WHERE id = #{id} AND deleted = 0
+    </select>
+
+    <select id="selectEnabledByTenantIdAndType" resultType="com.rag.api.infrastructure.persistence.entity.ModelEntity">
+        SELECT <include refid="columns"/> FROM model WHERE tenant_id = #{tenantId} AND type = #{type} AND enabled = 1 AND deleted = 0 LIMIT 1
+    </select>
+
+    <select id="selectPage" resultType="com.rag.api.infrastructure.persistence.entity.ModelEntity">
+        SELECT <include refid="columns"/> FROM model WHERE tenant_id = #{tenantId} AND deleted = 0
+        <if test="type != null">AND type = #{type}</if>
+        ORDER BY type ASC, enabled DESC, id DESC
+    </select>
+
+    <insert id="insert" useGeneratedKeys="true" keyProperty="id">
+        INSERT INTO model (tenant_id, name, type, base_url, api_key, model, temperature, top_p, max_tokens, embedding_dim, enabled, created_at, updated_at)
+        VALUES (#{tenantId}, #{name}, #{type}, #{baseUrl}, #{apiKey}, #{model}, #{temperature}, #{topP}, #{maxTokens}, #{embeddingDim}, #{enabled}, #{createdAt}, #{updatedAt})
+    </insert>
+
+    <update id="updateById">
+        UPDATE model
+        <set>
+            <if test="tenantId != null">tenant_id = #{tenantId},</if>
+            <if test="name != null">name = #{name},</if>
+            <if test="type != null">type = #{type},</if>
+            <if test="baseUrl != null">base_url = #{baseUrl},</if>
+            <if test="apiKey != null">api_key = #{apiKey},</if>
+            <if test="model != null">model = #{model},</if>
+            <if test="temperature != null">temperature = #{temperature},</if>
+            <if test="topP != null">top_p = #{topP},</if>
+            <if test="maxTokens != null">max_tokens = #{maxTokens},</if>
+            <if test="embeddingDim != null">embedding_dim = #{embeddingDim},</if>
+            <if test="enabled != null">enabled = #{enabled},</if>
+            updated_at = NOW()
+        </set>
+        WHERE id = #{id} AND deleted = 0
+    </update>
+</mapper>

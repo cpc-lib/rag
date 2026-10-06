@@ -1,0 +1,138 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "https://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.rag.api.infrastructure.persistence.mapper.DocumentMapper">
+
+    <sql id="Base_Column_List">
+        id, kb_id, tenant_id, file_name, object_key, file_size, sha256, mime_type, status, progress, page_count, warning, error_msg, stop_requested, deleted
+    </sql>
+
+    <select id="selectById" resultType="com.rag.api.infrastructure.persistence.entity.DocumentEntity">
+        SELECT <include refid="Base_Column_List"/>
+        FROM document
+        WHERE deleted = 0 AND id = #{id}
+    </select>
+
+    <insert id="insert" useGeneratedKeys="true" keyProperty="id">
+        INSERT INTO document
+        <trim prefix="(" suffix=")" suffixOverrides=",">
+            <if test="kbId != null">kb_id,</if>
+            <if test="tenantId != null">tenant_id,</if>
+            <if test="fileName != null">file_name,</if>
+            <if test="objectKey != null">object_key,</if>
+            <if test="fileSize != null">file_size,</if>
+            <if test="sha256 != null">sha256,</if>
+            <if test="mimeType != null">mime_type,</if>
+            <if test="status != null">status,</if>
+            <if test="progress != null">progress,</if>
+            <if test="pageCount != null">page_count,</if>
+            <if test="warning != null">warning,</if>
+            <if test="errorMsg != null">error_msg,</if>
+            <if test="stopRequested != null">stop_requested,</if>
+            <if test="deleted != null">deleted,</if>
+        </trim>
+        <trim prefix="VALUES (" suffix=")" suffixOverrides=",">
+            <if test="kbId != null">#{kbId},</if>
+            <if test="tenantId != null">#{tenantId},</if>
+            <if test="fileName != null">#{fileName},</if>
+            <if test="objectKey != null">#{objectKey},</if>
+            <if test="fileSize != null">#{fileSize},</if>
+            <if test="sha256 != null">#{sha256},</if>
+            <if test="mimeType != null">#{mimeType},</if>
+            <if test="status != null">#{status},</if>
+            <if test="progress != null">#{progress},</if>
+            <if test="pageCount != null">#{pageCount},</if>
+            <if test="warning != null">#{warning},</if>
+            <if test="errorMsg != null">#{errorMsg},</if>
+            <if test="stopRequested != null">#{stopRequested},</if>
+            <if test="deleted != null">#{deleted},</if>
+        </trim>
+    </insert>
+
+    <update id="updateById">
+        UPDATE document
+        <set>
+            <if test="kbId != null">kb_id = #{kbId},</if>
+            <if test="tenantId != null">tenant_id = #{tenantId},</if>
+            <if test="fileName != null">file_name = #{fileName},</if>
+            <if test="objectKey != null">object_key = #{objectKey},</if>
+            <if test="fileSize != null">file_size = #{fileSize},</if>
+            <if test="sha256 != null">sha256 = #{sha256},</if>
+            <if test="mimeType != null">mime_type = #{mimeType},</if>
+            <if test="status != null">status = #{status},</if>
+            <if test="progress != null">progress = #{progress},</if>
+            <if test="pageCount != null">page_count = #{pageCount},</if>
+            <if test="warning != null">warning = #{warning},</if>
+            <if test="errorMsg != null">error_msg = #{errorMsg},</if>
+            <if test="stopRequested != null">stop_requested = #{stopRequested},</if>
+            <if test="deleted != null">deleted = #{deleted},</if>
+        </set>
+        WHERE deleted = 0 AND id = #{id}
+    </update>
+
+    <select id="selectOneBySha256" resultType="com.rag.api.infrastructure.persistence.entity.DocumentEntity">
+        SELECT <include refid="Base_Column_List"/>
+        FROM document
+        WHERE deleted = 0 AND tenant_id = #{tenantId} AND kb_id = #{kbId} AND sha256 = #{sha256}
+        ORDER BY id DESC
+        LIMIT 1
+    </select>
+
+    <select id="selectStopRequestedById" resultType="com.rag.api.infrastructure.persistence.entity.DocumentEntity">
+        SELECT id, stop_requested
+        FROM document
+        WHERE deleted = 0 AND id = #{id}
+    </select>
+
+    <select id="selectPageByKbId" resultType="com.rag.api.infrastructure.persistence.entity.DocumentEntity">
+        SELECT <include refid="Base_Column_List"/>
+        FROM document
+        WHERE deleted = 0 AND kb_id = #{kbId}
+        ORDER BY id DESC
+    </select>
+
+    <select id="selectByIds" resultType="com.rag.api.infrastructure.persistence.entity.DocumentEntity">
+        SELECT <include refid="Base_Column_List"/>
+        FROM document
+        WHERE deleted = 0 AND id IN
+        <foreach collection="ids" item="id" open="(" separator="," close=")">#{id}</foreach>
+    </select>
+
+    <select id="selectIdsByKbId" resultType="java.lang.Long">
+        SELECT id
+        FROM document
+        WHERE deleted = 0 AND kb_id = #{kbId}
+    </select>
+
+    <update id="startProcessing">
+        UPDATE document
+        SET status = #{status}, progress = #{progress}, error_msg = NULL, stop_requested = 0
+        WHERE deleted = 0 AND id = #{id} AND status IN ('UPLOADED', 'STOPPED', 'FAILED')
+    </update>
+
+    <update id="reparseById">
+        UPDATE document
+        SET status = 'PARSING', progress = 0, error_msg = NULL
+        WHERE deleted = 0 AND id = #{id} AND status IN ('READY', 'FAILED')
+    </update>
+
+    <update id="updateStatusById">
+        UPDATE document
+        SET status = #{status}
+        WHERE deleted = 0 AND id = #{id}
+    </update>
+
+    <update id="updateStopRequestedById">
+        UPDATE document
+        SET stop_requested = #{stopRequested}
+        WHERE deleted = 0 AND id = #{id}
+    </update>
+
+    <update id="logicDeleteById">
+        UPDATE document SET deleted = 1 WHERE deleted = 0 AND id = #{id}
+    </update>
+
+    <update id="logicDeleteByKbId">
+        UPDATE document SET deleted = 1 WHERE deleted = 0 AND kb_id = #{kbId}
+    </update>
+
+</mapper>

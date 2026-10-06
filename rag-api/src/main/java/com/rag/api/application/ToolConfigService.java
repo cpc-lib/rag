@@ -1,11 +1,9 @@
 package com.rag.api.application;
 
-import com.baomidou.mybatisplus.core.conditions.query.QueryWrapper;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.rag.api.common.BizException;
 import com.rag.api.common.ErrorCode;
 import com.rag.api.infrastructure.etcd.EtcdService;
-import com.rag.api.infrastructure.persistence.entity.SysToolEntity;
 import com.rag.api.infrastructure.persistence.entity.ToolConfigEntity;
 import com.rag.api.infrastructure.persistence.mapper.SysToolMapper;
 import com.rag.api.infrastructure.persistence.mapper.ToolConfigMapper;
@@ -31,7 +29,7 @@ public class ToolConfigService {
     private final ObjectMapper objectMapper;
 
     public ToolConfigEntity getByTenant(String tenantId) {
-        ToolConfigEntity cfg = mapper.selectOne(new QueryWrapper<ToolConfigEntity>().eq("tenant_id", tenantId));
+        ToolConfigEntity cfg = mapper.selectByTenantId(tenantId);
         if (cfg == null) {
             cfg = new ToolConfigEntity();
             cfg.setTenantId(tenantId);
@@ -75,8 +73,7 @@ public class ToolConfigService {
     public List<Dtos.ToolCatalogView> catalog(String tenantId) {
         ToolConfigEntity cfg = getByTenant(tenantId);
         boolean keyConfigured = cfg.getTavilyApiKey() != null && !cfg.getTavilyApiKey().isBlank();
-        return sysToolMapper.selectList(new QueryWrapper<SysToolEntity>()
-                        .eq("status", 1).orderByAsc("sort")).stream()
+        return sysToolMapper.selectListByStatus(true).stream()
                 .map(t -> new Dtos.ToolCatalogView(t.getCode(), t.getName(), t.getFnName(),
                         t.getDescription(), Boolean.TRUE.equals(t.getRequiresKey()),
                         tenantSwitchOn(t.getCode(), cfg),

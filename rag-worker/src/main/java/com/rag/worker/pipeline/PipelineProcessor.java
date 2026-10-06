@@ -1,18 +1,16 @@
 package com.rag.worker.pipeline;
 
-import com.baomidou.mybatisplus.core.conditions.query.QueryWrapper;
-import com.baomidou.mybatisplus.core.conditions.update.UpdateWrapper;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.rag.worker.infrastructure.llm.EmbeddingClient;
-import com.rag.worker.infrastructure.persistence.entity.ChunkEntity;
-import com.rag.worker.infrastructure.persistence.entity.DocumentEntity;
-import com.rag.worker.infrastructure.persistence.entity.KnowledgeBaseEntity;
-import com.rag.worker.infrastructure.persistence.entity.ModelEntity;
-import com.rag.worker.infrastructure.persistence.entity.PipelineTaskEntity;
-import com.rag.worker.infrastructure.persistence.mapper.ChunkMapper;
-import com.rag.worker.infrastructure.persistence.mapper.DocumentMapper;
-import com.rag.worker.infrastructure.persistence.mapper.KnowledgeBaseMapper;
-import com.rag.worker.infrastructure.persistence.mapper.ModelMapper;
+import com.rag.api.infrastructure.persistence.entity.ChunkEntity;
+import com.rag.api.infrastructure.persistence.entity.DocumentEntity;
+import com.rag.api.infrastructure.persistence.entity.KnowledgeBaseEntity;
+import com.rag.api.infrastructure.persistence.entity.ModelEntity;
+import com.rag.api.infrastructure.persistence.entity.PipelineTaskEntity;
+import com.rag.api.infrastructure.persistence.mapper.ChunkMapper;
+import com.rag.api.infrastructure.persistence.mapper.DocumentMapper;
+import com.rag.api.infrastructure.persistence.mapper.KnowledgeBaseMapper;
+import com.rag.api.infrastructure.persistence.mapper.ModelMapper;
 import com.rag.worker.infrastructure.search.EsIndexer;
 import com.rag.worker.infrastructure.search.MilvusIndexer;
 import com.rag.worker.mq.RetryPublisher;
@@ -83,8 +81,7 @@ public class PipelineProcessor {
     }
 
     private ModelEntity findEnabled(String tenantId, String type) {
-        return modelMapper.selectOne(new QueryWrapper<ModelEntity>()
-                .eq("tenant_id", tenantId).eq("type", type).eq("enabled", 1));
+        return modelMapper.selectEnabledByTenantIdAndType(tenantId, type);
     }
 
     private void parseFlow(DocumentEntity doc, KnowledgeBaseEntity kb,
@@ -126,8 +123,7 @@ public class PipelineProcessor {
 
     /** 该文档是否已有有效切片（断点续跑判定依据）。 */
     private boolean hasChunks(DocumentEntity doc) {
-        return chunkMapper.selectCount(new QueryWrapper<ChunkEntity>()
-                .eq("document_id", doc.getId()).ne("status", "DELETED")) > 0;
+        return chunkMapper.countActiveByDocumentId(doc.getId()) > 0;
     }
 
     /**
@@ -135,11 +131,9 @@ public class PipelineProcessor {
      * 检测到后文档置为 STOPPED（保留当前进度），抛出 StoppedException 中断流水线（不重试）。
      */
     private void checkStop(DocumentEntity doc) {
-        DocumentEntity cur = documentMapper.selectOne(new QueryWrapper<DocumentEntity>()
-                .select("id", "stop_requested").eq("id", doc.getId()));
+        DocumentEntity cur = documentMapper.selectStopRequestedById(doc.getId());
         if (cur != null && cur.getStopRequested() != null && cur.getStopRequested() == 1) {
-            documentMapper.update(null, new UpdateWrapper<DocumentEntity>()
-                    .eq("id", doc.getId()).set("status", "STOPPED"));
+            documentMapper.updateStatusById(doc.getId(), "STOPPED");
             doc.setStatus("STOPPED");
             log.info("检测到停止请求，流水线中止 doc={} progress={}", doc.getId(), doc.getProgress());
             throw new StoppedException(doc.getId());
@@ -165,11 +159,7 @@ public class PipelineProcessor {
         if (embedding.getModel() == null) {
             throw new IllegalStateException("启用的向量(EMBEDDING)模型缺少模型名称");
         }
-        List<ChunkEntity> chunks = chunkMapper.selectList(new QueryWrapper<ChunkEntity>()
-                .eq("document_id", doc.getId())
-                .eq("chunk_type", "CHILD")
-                .ne("status", "DELETED")
-                .orderByAsc("seq"));
+        List<ChunkEntity> chunks = chunkMapper.selectChildrenByDocumentId(doc.getId());
         if (chunks.isEmpty()) {
             // 切片被清空（如一键清空）：清理该文档在 ES/Milvus 的旧索引
             log.warn("文档无有效切片，清理旧索引 doc={}", doc.getId());
@@ -228,12 +218,9 @@ public class PipelineProcessor {
      * parentChild 计划先插 PARENT 再插关联 CHILDREN；独立计划直接插 CHILD。
      */
     private void persistPlans(DocumentEntity doc, List<ChunkPlan> plans) {
-        chunkMapper.delete(new QueryWrapper<ChunkEntity>()
-                .eq("document_id", doc.getId())
-                .eq("status", "AUTO"));
-        Integer maxSeq = chunkMapper.selectList(new QueryWrapper<ChunkEntity>()
-                        .eq("document_id", doc.getId()).orderByDesc("seq").last("limit 1"))
-                .stream().findFirst().map(ChunkEntity::getSeq).orElse(0);
+        chunkMapper.logicDeleteAutoByDocumentId(doc.getId());
+        ChunkEntity maxSeqChunk = chunkMapper.selectMaxSeqByDocumentId(doc.getId());
+        Integer maxSeq = maxSeqChunk == null ? null : maxSeqChunk.getSeq();
         int seq = maxSeq == null ? 1 : maxSeq + 1;
 
         for (ChunkPlan plan : plans) {

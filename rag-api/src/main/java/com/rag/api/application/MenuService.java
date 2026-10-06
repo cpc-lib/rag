@@ -1,6 +1,5 @@
 package com.rag.api.application;
 
-import com.baomidou.mybatisplus.core.conditions.query.QueryWrapper;
 import com.rag.api.common.TenantContext;
 import com.rag.api.infrastructure.persistence.entity.SysMenuEntity;
 import com.rag.api.infrastructure.persistence.entity.TenantMenuEntity;
@@ -36,26 +35,19 @@ public class MenuService {
     /** 当前登录用户的侧边栏菜单。 */
     public List<Dtos.MenuView> sidebar() {
         TenantContext.Session s = TenantContext.require();
-        QueryWrapper<SysMenuEntity> qw = new QueryWrapper<SysMenuEntity>().eq("status", 1);
-        if (s.userType() == 0) {
-            qw.eq("platform_visible", 1);
-        } else if (s.userType() == 1) {
-            qw.eq("admin_visible", 1);
-        } else {
-            qw.eq("end_user", 1);
-        }
-        qw.orderByAsc("sort");
-        List<SysMenuEntity> rows = sysMenuMapper.selectList(qw);
+        List<SysMenuEntity> rows = switch (s.userType()) {
+            case 0 -> sysMenuMapper.selectList(true, true, null, null);
+            case 1 -> sysMenuMapper.selectList(true, null, true, null);
+            default -> sysMenuMapper.selectList(true, null, null, true);
+        };
         if (s.userType() != 2) {
             return rows.stream().map(this::toView).toList();
         }
         Map<String, Boolean> tenantEnabled = tenantState(s.tenantId()).stream()
                 .collect(Collectors.toMap(TenantMenuEntity::getMenuCode,
                         e -> Boolean.TRUE.equals(e.getEnabled())));
-        Set<String> personal = userFeatureMapper.selectList(
-                        new QueryWrapper<UserFeatureEntity>()
-                                .eq("user_id", s.userId())
-                                .eq("feature_type", UserManageService.TYPE_MENU)).stream()
+        Set<String> personal = userFeatureMapper.selectListByUserIdAndType(
+                        s.userId(), UserManageService.TYPE_MENU).stream()
                 .map(UserFeatureEntity::getCode).collect(Collectors.toSet());
         return rows.stream()
                 .filter(m -> Boolean.TRUE.equals(tenantEnabled.get(m.getCode())))
@@ -101,14 +93,12 @@ public class MenuService {
 
     /** 普通用户可授权菜单目录（产品启用）。 */
     private List<SysMenuEntity> endUserCatalog() {
-        return sysMenuMapper.selectList(new QueryWrapper<SysMenuEntity>()
-                .eq("end_user", 1).eq("status", 1).orderByAsc("sort"));
+        return sysMenuMapper.selectEndUserCatalog();
     }
 
     /** 租户总开关状态；新租户缺失的开关行按默认开启补齐。 */
     private List<TenantMenuEntity> tenantState(String tenantId) {
-        List<TenantMenuEntity> rows = tenantMenuMapper.selectList(
-                new QueryWrapper<TenantMenuEntity>().eq("tenant_id", tenantId));
+        List<TenantMenuEntity> rows = tenantMenuMapper.selectByTenantId(tenantId);
         Set<String> existing = rows.stream()
                 .map(TenantMenuEntity::getMenuCode).collect(Collectors.toSet());
         for (SysMenuEntity m : endUserCatalog()) {

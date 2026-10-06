@@ -47,6 +47,12 @@
     </dependencyManagement>
 
     <dependencies>
+        <!-- 公共持久层：实体 + Mapper 接口 + XML（所有 DB CRUD 走 XML，不再用 BaseMapper/QueryWrapper） -->
+        <dependency>
+            <groupId>com.rag</groupId>
+            <artifactId>rag-common</artifactId>
+            <version>1.0.0</version>
+        </dependency>
         <dependency>
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-web</artifactId>

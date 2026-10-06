@@ -1,8 +1,8 @@
 package com.rag.worker.pipeline;
 
 import com.rag.worker.infrastructure.ocr.OcrService;
-import com.rag.worker.infrastructure.persistence.entity.DocumentEntity;
-import com.rag.worker.infrastructure.persistence.entity.ModelEntity;
+import com.rag.api.infrastructure.persistence.entity.DocumentEntity;
+import com.rag.api.infrastructure.persistence.entity.ModelEntity;
 import com.rag.worker.infrastructure.storage.MinioStorage;
 import com.rag.worker.infrastructure.llm.VisionClient;
 import lombok.RequiredArgsConstructor;

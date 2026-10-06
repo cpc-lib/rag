@@ -1,6 +1,5 @@
 package com.rag.api.application;
 
-import com.baomidou.mybatisplus.core.conditions.query.QueryWrapper;
 import com.rag.api.common.BizException;
 import com.rag.api.common.TenantContext;
 import com.rag.api.infrastructure.persistence.entity.KnowledgeBaseEntity;
@@ -63,26 +62,19 @@ public class UserManageService {
     public List<Dtos.UserView> list() {
         AuthGuard.requireTenantAdmin();
         TenantContext.Session s = TenantContext.require();
-        List<SysUserEntity> users = userMapper.selectList(new QueryWrapper<SysUserEntity>()
-                .eq("tenant_id", s.tenantId()).eq("user_type", 2).orderByDesc("id"));
+        List<SysUserEntity> users = userMapper.selectList(s.tenantId(), null, null, 2);
         if (users.isEmpty()) {
             return List.of();
         }
         List<Long> userIds = users.stream().map(SysUserEntity::getId).toList();
 
         // 批量预加载，避免逐用户 1+N：菜单/工具一条 IN 查回，内存按类型拆分。
-        Map<Long, List<UserFeatureEntity>> features = userFeatureMapper.selectList(
-                        new QueryWrapper<UserFeatureEntity>()
-                                .in("user_id", userIds).orderByAsc("id")).stream()
+        Map<Long, List<UserFeatureEntity>> features = userFeatureMapper.selectByUserIds(userIds).stream()
                 .collect(Collectors.groupingBy(UserFeatureEntity::getUserId));
-        Map<Long, List<Long>> kbIdsByUser = userKbMapper.selectList(
-                        new QueryWrapper<UserKbEntity>()
-                                .in("user_id", userIds).orderByAsc("kb_id")).stream()
+        Map<Long, List<Long>> kbIdsByUser = userKbMapper.selectByUserIds(userIds).stream()
                 .collect(Collectors.groupingBy(UserKbEntity::getUserId,
                         Collectors.mapping(UserKbEntity::getKbId, Collectors.toList())));
-        Map<Long, List<Long>> promptIdsByUser = userPromptMapper.selectList(
-                        new QueryWrapper<UserPromptEntity>()
-                                .in("user_id", userIds).orderByAsc("prompt_id")).stream()
+        Map<Long, List<Long>> promptIdsByUser = userPromptMapper.selectByUserIds(userIds).stream()
                 .collect(Collectors.groupingBy(UserPromptEntity::getUserId,
                         Collectors.mapping(UserPromptEntity::getPromptId, Collectors.toList())));
 
@@ -108,8 +100,7 @@ public class UserManageService {
         if (username.length() < 2 || username.length() > 50) {
             throw BizException.badRequest("账号长度需在 2 ~ 50 位之间");
         }
-        if (userMapper.selectCount(new QueryWrapper<SysUserEntity>()
-                .eq("tenant_id", s.tenantId()).eq("username", username)) > 0) {
+        if (userMapper.countByTenantIdAndUsername(s.tenantId(), username) > 0) {
             throw BizException.badRequest("账号已存在");
         }
         String initialPassword = randomPassword();
@@ -175,22 +166,22 @@ public class UserManageService {
         requireOwned(userId);
         List<Long> ids = kbIds == null ? List.of() : kbIds.stream().distinct().toList();
         if (!ids.isEmpty()) {
-            List<KnowledgeBaseEntity> kbs = kbMapper.selectBatchIds(ids);
+            List<KnowledgeBaseEntity> kbs = kbMapper.selectByIds(ids);
             if (kbs.size() != ids.size() || kbs.stream().anyMatch(k -> !s.tenantId().equals(k.getTenantId()))) {
                 throw BizException.badRequest("存在不属于本租户的知识库");
             }
         }
         List<Long> pids = promptIds == null ? List.of() : promptIds.stream().distinct().toList();
         if (!pids.isEmpty()) {
-            List<PromptTemplateEntity> prompts = promptMapper.selectBatchIds(pids);
+            List<PromptTemplateEntity> prompts = promptMapper.selectByIds(pids);
             if (prompts.size() != pids.size()
                     || prompts.stream().anyMatch(p -> !s.tenantId().equals(p.getTenantId()))
                     || prompts.stream().anyMatch(p -> !ids.contains(p.getKbId()))) {
                 throw BizException.badRequest("存在未授权知识库下的提示词");
             }
         }
-        userKbMapper.delete(new QueryWrapper<UserKbEntity>().eq("user_id", userId));
-        userPromptMapper.delete(new QueryWrapper<UserPromptEntity>().eq("user_id", userId));
+        userKbMapper.deleteByUserId(userId);
+        userPromptMapper.deleteByUserId(userId);
         for (Long kbId : ids) {
             UserKbEntity e = new UserKbEntity();
             e.setTenantId(s.tenantId());
@@ -210,12 +201,10 @@ public class UserManageService {
     /** 知识库删除时清理其用户授权关系。 */
     @Transactional
     public void onKbDeleted(long kbId) {
-        userKbMapper.delete(new QueryWrapper<UserKbEntity>().eq("kb_id", kbId));
-        List<Long> promptIds = promptMapper.selectList(new QueryWrapper<PromptTemplateEntity>()
-                        .eq("kb_id", kbId).select("id")).stream()
-                .map(PromptTemplateEntity::getId).toList();
+        userKbMapper.deleteByKbId(kbId);
+        List<Long> promptIds = promptMapper.selectIdsByKbId(kbId);
         if (!promptIds.isEmpty()) {
-            userPromptMapper.delete(new QueryWrapper<UserPromptEntity>().in("prompt_id", promptIds));
+            userPromptMapper.deleteByPromptIds(promptIds);
         }
     }
 
@@ -225,8 +214,7 @@ public class UserManageService {
         if (s.userType() != 2) {
             return;
         }
-        if (userPromptMapper.selectCount(new QueryWrapper<UserPromptEntity>()
-                .eq("user_id", s.userId()).eq("prompt_id", promptId)) == 0) {
+        if (userPromptMapper.countByUserIdAndPromptId(s.userId(), promptId) == 0) {
             throw BizException.forbidden("未获得该提示词模板的使用授权");
         }
     }
@@ -235,19 +223,14 @@ public class UserManageService {
     public List<PromptTemplateEntity> visiblePrompts(long kbId) {
         TenantContext.Session s = TenantContext.require();
         if (s.userType() == 2) {
-            List<Long> pids = userPromptMapper.selectList(new QueryWrapper<UserPromptEntity>()
-                            .eq("user_id", s.userId())).stream()
+            List<Long> pids = userPromptMapper.selectByUserId(s.userId()).stream()
                     .map(UserPromptEntity::getPromptId).toList();
             if (pids.isEmpty()) {
                 return List.of();
             }
-            return promptMapper.selectList(new QueryWrapper<PromptTemplateEntity>()
-                    .eq("kb_id", kbId).in("id", pids)
-                    .orderByDesc("is_default").orderByDesc("updated_at"));
+            return promptMapper.selectByKbIdAndIds(kbId, pids);
         }
-        return promptMapper.selectList(new QueryWrapper<PromptTemplateEntity>()
-                .eq("kb_id", kbId)
-                .orderByDesc("is_default").orderByDesc("updated_at"));
+        return promptMapper.selectByKbId(kbId);
     }
 
     /**
@@ -259,20 +242,16 @@ public class UserManageService {
         if (s.userType() != 2) {
             return;
         }
-        SysMenuEntity menu = sysMenuMapper.selectOne(new QueryWrapper<SysMenuEntity>().eq("code", code));
+        SysMenuEntity menu = sysMenuMapper.selectByCode(code);
         if (menu == null || !Boolean.TRUE.equals(menu.getStatus())
                 || !Boolean.TRUE.equals(menu.getEndUser())) {
             throw BizException.forbidden("未获得该功能的使用授权");
         }
-        TenantMenuEntity tenantMenu = tenantMenuMapper.selectOne(new QueryWrapper<TenantMenuEntity>()
-                .eq("tenant_id", s.tenantId()).eq("menu_code", code));
+        TenantMenuEntity tenantMenu = tenantMenuMapper.selectOneByTenantIdAndMenuCode(s.tenantId(), code);
         if (tenantMenu == null || !Boolean.TRUE.equals(tenantMenu.getEnabled())) {
             throw BizException.forbidden("未获得该功能的使用授权");
         }
-        if (userFeatureMapper.selectCount(new QueryWrapper<UserFeatureEntity>()
-                .eq("user_id", s.userId())
-                .eq("feature_type", TYPE_MENU)
-                .eq("code", code)) == 0) {
+        if (userFeatureMapper.countByUserIdAndTypeAndCode(s.userId(), TYPE_MENU, code) == 0) {
             throw BizException.forbidden("未获得该功能的使用授权");
         }
     }
@@ -291,8 +270,7 @@ public class UserManageService {
             throw BizException.forbidden("无权访问该知识库");
         }
         if (s.userType() == 2
-                && userKbMapper.selectCount(new QueryWrapper<UserKbEntity>()
-                        .eq("user_id", s.userId()).eq("kb_id", kbId)) == 0) {
+                && userKbMapper.countByUserIdAndKbId(s.userId(), kbId) == 0) {
             throw BizException.forbidden("未获得该知识库的使用授权");
         }
         return kb;
@@ -303,10 +281,9 @@ public class UserManageService {
         TenantContext.Session s = TenantContext.require();
         if (s.userType() == 2) {
             List<Long> ids = listKbIds(s.userId());
-            return ids.isEmpty() ? List.of() : kbMapper.selectBatchIds(ids);
+            return ids.isEmpty() ? List.of() : kbMapper.selectByIds(ids);
         }
-        return kbMapper.selectList(new QueryWrapper<KnowledgeBaseEntity>()
-                .eq("tenant_id", s.tenantId()).orderByDesc("id"));
+        return kbMapper.selectByTenantId(s.tenantId());
     }
 
     /** 用户个人菜单码（登录信息下发用）。 */
@@ -325,30 +302,24 @@ public class UserManageService {
         if (s.userType() != 2) {
             return true;
         }
-        return userFeatureMapper.selectCount(new QueryWrapper<UserFeatureEntity>()
-                .eq("user_id", s.userId())
-                .eq("feature_type", TYPE_TOOL)
-                .eq("code", code)) > 0;
+        return userFeatureMapper.countByUserIdAndTypeAndCode(s.userId(), TYPE_TOOL, code) > 0;
     }
 
     /** 普通用户可授权的功能菜单码（目录启用）。 */
     private List<String> grantableMenuCodes() {
-        return sysMenuMapper.selectList(new QueryWrapper<SysMenuEntity>()
-                        .eq("end_user", 1).eq("status", 1).select("code")).stream()
+        return sysMenuMapper.selectList(true, null, null, true).stream()
                 .map(SysMenuEntity::getCode).toList();
     }
 
     /** 产品启用的工具码目录。 */
     private List<String> enabledToolCodes() {
-        return sysToolMapper.selectList(new QueryWrapper<SysToolEntity>()
-                        .eq("status", 1).select("code")).stream()
+        return sysToolMapper.selectListByStatus(true).stream()
                 .map(SysToolEntity::getCode).toList();
     }
 
     /** 全量替换某用户某类功能授权。 */
     private void replaceFeatures(long userId, String tenantId, String type, List<String> codes) {
-        userFeatureMapper.delete(new QueryWrapper<UserFeatureEntity>()
-                .eq("user_id", userId).eq("feature_type", type));
+        userFeatureMapper.deleteByUserIdAndType(userId, type);
         for (String code : codes) {
             UserFeatureEntity e = new UserFeatureEntity();
             e.setTenantId(tenantId);
@@ -360,14 +331,12 @@ public class UserManageService {
     }
 
     private List<String> listFeatureCodes(long userId, String type) {
-        return userFeatureMapper.selectList(new QueryWrapper<UserFeatureEntity>()
-                        .eq("user_id", userId).eq("feature_type", type).orderByAsc("id")).stream()
+        return userFeatureMapper.selectListByUserIdAndType(userId, type).stream()
                 .map(UserFeatureEntity::getCode).toList();
     }
 
     private List<Long> listKbIds(long userId) {
-        return userKbMapper.selectList(new QueryWrapper<UserKbEntity>()
-                        .eq("user_id", userId).orderByAsc("kb_id")).stream()
+        return userKbMapper.selectByUserId(userId).stream()
                 .map(UserKbEntity::getKbId).toList();
     }
 
@@ -396,8 +365,7 @@ public class UserManageService {
     }
 
     private List<Long> listPromptIds(long userId) {
-        return userPromptMapper.selectList(new QueryWrapper<UserPromptEntity>()
-                        .eq("user_id", userId).orderByAsc("prompt_id")).stream()
+        return userPromptMapper.selectByUserId(userId).stream()
                 .map(UserPromptEntity::getPromptId).toList();
     }
 

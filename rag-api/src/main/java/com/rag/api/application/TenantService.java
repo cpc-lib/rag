@@ -1,6 +1,5 @@
 package com.rag.api.application;
 
-import com.baomidou.mybatisplus.core.conditions.query.QueryWrapper;
 import com.rag.api.common.BizException;
 import com.rag.api.common.ErrorCode;
 import com.rag.api.infrastructure.persistence.entity.SysUserEntity;
@@ -42,7 +41,7 @@ public class TenantService {
         if (!CODE_PATTERN.matcher(code).matches()) {
             throw BizException.badRequest("租户编码仅允许字母、数字、下划线，长度 10 ~ 20 位");
         }
-        if (tenantMapper.selectCount(new QueryWrapper<TenantEntity>().eq("code", code)) > 0) {
+        if (tenantMapper.countByCode(code) > 0) {
             throw BizException.badRequest("租户编码已存在");
         }
         String tenantId = generateTenantId();
@@ -65,7 +64,7 @@ public class TenantService {
 
     public List<TenantEntity> list() {
         AuthGuard.requirePlatform();
-        return tenantMapper.selectList(new QueryWrapper<>());
+        return tenantMapper.selectAll();
     }
 
     public TenantEntity get(String id) {
@@ -118,8 +117,7 @@ public class TenantService {
     public Dtos.ResetAdminResp resetAdmin(String tenantId, Dtos.ResetAdminReq req) {
         AuthGuard.requirePlatform();
         get(tenantId);
-        SysUserEntity existing = userMapper.selectOne(new QueryWrapper<SysUserEntity>()
-                .eq("tenant_id", tenantId).eq("user_type", 1).last("limit 1"));
+        SysUserEntity existing = userMapper.selectOneByTenantIdAndUserType(tenantId, 1);
         String initialPassword = randomPassword();
         if (existing == null) {
             String username = req == null || req.username() == null || req.username().isBlank()

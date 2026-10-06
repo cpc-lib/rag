@@ -1,0 +1,87 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "https://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.rag.api.infrastructure.persistence.mapper.KnowledgeBaseMapper">
+
+    <sql id="Base_Column_List">
+        id, tenant_id, name, description, milvus_collection, es_index, chunk_size, chunk_overlap, parent_chunk_size, child_chunk_size, child_overlap, chunk_strategy, separators, deleted
+    </sql>
+
+    <select id="selectById" resultType="com.rag.api.infrastructure.persistence.entity.KnowledgeBaseEntity">
+        SELECT <include refid="Base_Column_List"/>
+        FROM knowledge_base
+        WHERE deleted = 0 AND id = #{id}
+    </select>
+
+    <insert id="insert" useGeneratedKeys="true" keyProperty="id">
+        INSERT INTO knowledge_base
+        <trim prefix="(" suffix=")" suffixOverrides=",">
+            <if test="tenantId != null">tenant_id,</if>
+            <if test="name != null">name,</if>
+            <if test="description != null">description,</if>
+            <if test="milvusCollection != null">milvus_collection,</if>
+            <if test="esIndex != null">es_index,</if>
+            <if test="chunkSize != null">chunk_size,</if>
+            <if test="chunkOverlap != null">chunk_overlap,</if>
+            <if test="parentChunkSize != null">parent_chunk_size,</if>
+            <if test="childChunkSize != null">child_chunk_size,</if>
+            <if test="childOverlap != null">child_overlap,</if>
+            <if test="chunkStrategy != null">chunk_strategy,</if>
+            <if test="separators != null">separators,</if>
+            <if test="deleted != null">deleted,</if>
+        </trim>
+        <trim prefix="VALUES (" suffix=")" suffixOverrides=",">
+            <if test="tenantId != null">#{tenantId},</if>
+            <if test="name != null">#{name},</if>
+            <if test="description != null">#{description},</if>
+            <if test="milvusCollection != null">#{milvusCollection},</if>
+            <if test="esIndex != null">#{esIndex},</if>
+            <if test="chunkSize != null">#{chunkSize},</if>
+            <if test="chunkOverlap != null">#{chunkOverlap},</if>
+            <if test="parentChunkSize != null">#{parentChunkSize},</if>
+            <if test="childChunkSize != null">#{childChunkSize},</if>
+            <if test="childOverlap != null">#{childOverlap},</if>
+            <if test="chunkStrategy != null">#{chunkStrategy},</if>
+            <if test="separators != null">#{separators},</if>
+            <if test="deleted != null">#{deleted},</if>
+        </trim>
+    </insert>
+
+    <update id="updateById">
+        UPDATE knowledge_base
+        <set>
+            <if test="tenantId != null">tenant_id = #{tenantId},</if>
+            <if test="name != null">name = #{name},</if>
+            <if test="description != null">description = #{description},</if>
+            <if test="milvusCollection != null">milvus_collection = #{milvusCollection},</if>
+            <if test="esIndex != null">es_index = #{esIndex},</if>
+            <if test="chunkSize != null">chunk_size = #{chunkSize},</if>
+            <if test="chunkOverlap != null">chunk_overlap = #{chunkOverlap},</if>
+            <if test="parentChunkSize != null">parent_chunk_size = #{parentChunkSize},</if>
+            <if test="childChunkSize != null">child_chunk_size = #{childChunkSize},</if>
+            <if test="childOverlap != null">child_overlap = #{childOverlap},</if>
+            <if test="chunkStrategy != null">chunk_strategy = #{chunkStrategy},</if>
+            <if test="separators != null">separators = #{separators},</if>
+            <if test="deleted != null">deleted = #{deleted},</if>
+        </set>
+        WHERE deleted = 0 AND id = #{id}
+    </update>
+
+    <select id="selectByIds" resultType="com.rag.api.infrastructure.persistence.entity.KnowledgeBaseEntity">
+        SELECT <include refid="Base_Column_List"/>
+        FROM knowledge_base
+        WHERE deleted = 0 AND id IN
+        <foreach collection="ids" item="id" open="(" separator="," close=")">#{id}</foreach>
+    </select>
+
+    <select id="selectByTenantId" resultType="com.rag.api.infrastructure.persistence.entity.KnowledgeBaseEntity">
+        SELECT <include refid="Base_Column_List"/>
+        FROM knowledge_base
+        WHERE deleted = 0 AND tenant_id = #{tenantId}
+        ORDER BY id DESC
+    </select>
+
+    <update id="logicDeleteById">
+        UPDATE knowledge_base SET deleted = 1 WHERE deleted = 0 AND id = #{id}
+    </update>
+
+</mapper>

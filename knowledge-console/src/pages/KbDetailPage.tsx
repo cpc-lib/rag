@@ -1,6 +1,7 @@
-﻿import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   App,
+  Badge,
   Button,
   Drawer,
   Form,
@@ -8,6 +9,7 @@ import {
   InputNumber,
   Modal,
   Popconfirm,
+  Popover,
   Progress,
   Space,
   Spin,
@@ -18,7 +20,7 @@ import {
   Typography,
   Upload,
 } from 'antd';
-import { ArrowLeftOutlined, DeleteOutlined, UploadOutlined, EyeOutlined, FileTextOutlined, ReloadOutlined } from '@ant-design/icons';
+import { ArrowLeftOutlined, CloudUploadOutlined, DeleteOutlined, UploadOutlined, EyeOutlined, FileTextOutlined, ReloadOutlined } from '@ant-design/icons';
 import type { UploadRequestOption } from 'rc-upload/lib/interface';
 import { createSHA256 } from 'hash-wasm';
 import { useNavigate, useParams } from 'react-router-dom';
@@ -86,6 +88,14 @@ const TERMINAL_STATUS = new Set(['READY', 'FAILED']);
 /** 处理中状态：仅这些状态需要轮询进度，UPLOADED/STOPPED 为静态状态 */
 const PROCESSING_STATUS = new Set(['PARSING', 'CHUNKING', 'EMBEDDING', 'INDEXING']);
 
+/** 上传速度格式化 */
+function formatSpeed(bps: number): string {
+  if (bps >= 1024 * 1024 * 1024) return `${(bps / 1024 / 1024 / 1024).toFixed(1)} GB/s`;
+  if (bps >= 1024 * 1024) return `${(bps / 1024 / 1024).toFixed(1)} MB/s`;
+  if (bps >= 1024) return `${(bps / 1024).toFixed(1)} KB/s`;
+  return `${bps.toFixed(0)} B/s`;
+}
+
 const formatSize = (bytes: number | null) => {
   if (bytes == null) return '-';
   if (bytes < 1024) return `${bytes} B`;
@@ -104,6 +114,8 @@ export default function KbDetailPage() {
   const [loading, setLoading] = useState(false);
   /** 当前查看进度的文档；弹窗打开期间轮询 */
   const [progressDoc, setProgressDoc] = useState<DocumentItem | null>(null);
+  /** 上传任务列表：每个文件独立进度与速度 */
+  const [uploading, setUploading] = useState<{ key: string; name: string; percent: number; speed?: string }[]>([]);
 
   // 切片抽屉状态
   const [chunkDoc, setChunkDoc] = useState<DocumentItem | null>(null);
@@ -186,6 +198,8 @@ export default function KbDetailPage() {
       return;
     }
     const sessKey = `upload-session:kb:${kbId}:${file.name}:${file.size}`;
+    const taskKey = `${file.name}:${file.size}:${Date.now()}`;
+    setUploading((prev) => [...prev, { key: taskKey, name: file.name, percent: 0 }]);
     let sha256Hex = '';
     try {
       // 秒传：流式分块计算 SHA-256（hash-wasm 增量模式，内存占用恒定）
@@ -194,8 +208,18 @@ export default function KbDetailPage() {
       for (let off = 0; off < file.size; off += CHUNK) {
         const buf = await file.slice(off, Math.min(off + CHUNK, file.size)).arrayBuffer();
         hasher.update(new Uint8Array(buf));
+        setUploading((prev) =>
+          prev.map((u) =>
+            u.key === taskKey
+              ? { ...u, percent: Math.round(((off + CHUNK) / file.size) * 30) }
+              : u,
+          ),
+        );
       }
       sha256Hex = hasher.digest('hex');
+      setUploading((prev) =>
+        prev.map((u) => (u.key === taskKey ? { ...u, percent: 30 } : u)),
+      );
 
       // 批内去重：同一 sha256 只保留第一个任务，其余直接跳过（进行中去重，完成后由后端秒传兜底）
       if (seenSha256Ref.current.has(sha256Hex)) {
@@ -238,11 +262,21 @@ export default function KbDetailPage() {
         localStorage.setItem(sessKey, String(sessionId));
       }
       const total = Math.ceil(file.size / chunkSize);
+      let lastT = performance.now();
       for (let i = 0; i < total; i++) {
         const part = i + 1;
         if (done.has(part)) continue;
-        await uploadApi.uploadPart(sessionId, part, file.slice(i * chunkSize, (i + 1) * chunkSize));
+        const slice = file.slice(i * chunkSize, (i + 1) * chunkSize);
+        await uploadApi.uploadPart(sessionId, part, slice);
+        const now = performance.now();
+        const sec = (now - lastT) / 1000;
+        lastT = now;
         done.add(part);
+        const bps = slice.size / sec;
+        const pct = Math.round((done.size / total) * 100);
+        setUploading((prev) =>
+          prev.map((u) => (u.key === taskKey ? { ...u, percent: pct, speed: formatSpeed(bps) } : u)),
+        );
       }
       await uploadApi.complete(sessionId);
       localStorage.removeItem(sessKey);
@@ -255,6 +289,7 @@ export default function KbDetailPage() {
     } finally {
       // 任务结束后从批内去重集合移除，允许用户删除后再次上传同一文件
       if (sha256Hex) seenSha256Ref.current.delete(sha256Hex);
+      setTimeout(() => setUploading((prev) => prev.filter((u) => u.key !== taskKey)), 800);
     }
   };
 
@@ -590,6 +625,38 @@ export default function KbDetailPage() {
               </Button>
             </Upload>
           </Tooltip>
+          {uploading.length > 0 && (
+            <Popover
+              title="上传中"
+              trigger="click"
+              content={
+                <div style={{ width: 320, maxHeight: 300, overflow: 'auto' }}>
+                  {uploading.map((u) => (
+                    <div key={u.key} style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8 }}>
+                      <Typography.Text
+                        style={{ fontSize: 12, flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}
+                        title={u.name}
+                      >
+                        {u.name}
+                      </Typography.Text>
+                      <div style={{ width: 160 }}>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                          <Progress percent={u.percent} size="small" style={{ margin: 0, flex: 1 }} />
+                          <Typography.Text type="secondary" style={{ fontSize: 11, whiteSpace: 'nowrap' }}>
+                            {u.speed ?? ''}
+                          </Typography.Text>
+                        </div>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              }
+            >
+              <Badge count={uploading.length} size="small">
+                <Button icon={<CloudUploadOutlined />} />
+              </Badge>
+            </Popover>
+          )}
         </Space>
       </div>
 

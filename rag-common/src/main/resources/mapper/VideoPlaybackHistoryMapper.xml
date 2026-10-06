@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "https://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.rag.api.infrastructure.persistence.mapper.VideoPlaybackHistoryMapper">
+
+    <resultMap id="BaseResultMap" type="com.rag.api.infrastructure.persistence.entity.VideoPlaybackHistoryEntity">
+        <id column="id" property="id"/>
+        <result column="tenant_id" property="tenantId"/>
+        <result column="user_id" property="userId"/>
+        <result column="file_id" property="fileId"/>
+        <result column="file_name" property="fileName"/>
+        <result column="position_ms" property="positionMs"/>
+        <result column="duration_ms" property="durationMs"/>
+        <result column="created_at" property="createdAt"/>
+        <result column="updated_at" property="updatedAt"/>
+        <result column="deleted" property="deleted"/>
+    </resultMap>
+
+    <sql id="Base_Column_List">
+        id, tenant_id, user_id, file_id, file_name, position_ms, duration_ms, created_at, updated_at, deleted
+    </sql>
+
+    <insert id="insert" useGeneratedKeys="true" keyProperty="id">
+        INSERT INTO video_playback_history (tenant_id, user_id, file_id, file_name, position_ms, duration_ms)
+        VALUES (#{tenantId}, #{userId}, #{fileId}, #{fileName}, #{positionMs}, #{durationMs})
+    </insert>
+
+    <select id="selectListByTenantUser" resultMap="BaseResultMap">
+        SELECT <include refid="Base_Column_List"/>
+        FROM video_playback_history
+        WHERE deleted = 0 AND tenant_id = #{tenantId} AND user_id = #{userId}
+        ORDER BY updated_at DESC
+        LIMIT #{limit}
+    </select>
+
+    <select id="selectLatestByTenantUserFile" resultMap="BaseResultMap">
+        SELECT <include refid="Base_Column_List"/>
+        FROM video_playback_history
+        WHERE deleted = 0 AND tenant_id = #{tenantId} AND user_id = #{userId} AND file_id = #{fileId}
+        ORDER BY updated_at DESC
+        LIMIT 1
+    </select>
+
+</mapper>

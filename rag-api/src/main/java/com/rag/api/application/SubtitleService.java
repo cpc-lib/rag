@@ -1,7 +1,5 @@
 package com.rag.api.application;
 
-import com.baomidou.mybatisplus.core.conditions.query.QueryWrapper;
-import com.baomidou.mybatisplus.core.conditions.update.UpdateWrapper;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.rag.api.common.BizException;
@@ -168,11 +166,7 @@ public class SubtitleService {
 
     public List<Dtos.SubtitleListItem> list() {
         TenantContext.Session s = TenantContext.require();
-        List<SubtitleEntity> rows = subtitleMapper.selectList(
-                new QueryWrapper<SubtitleEntity>()
-                        .eq("tenant_id", s.tenantId())
-                        .eq("user_id", s.userId())
-                        .orderByDesc("updated_at"));
+        List<SubtitleEntity> rows = subtitleMapper.selectListByTenantUser(s.tenantId(), s.userId());
         return rows.stream().map(this::toListItem).toList();
     }
 
@@ -180,9 +174,7 @@ public class SubtitleService {
      * 读取详情行（按序号升序）；旧记录详情表为空时从 srt_content 懒迁移。
      */
     private List<SubtitleCueEntity> requireCues(SubtitleEntity e) {
-        List<SubtitleCueEntity> rows = cueMapper.selectList(new QueryWrapper<SubtitleCueEntity>()
-                .eq("subtitle_id", e.getId())
-                .orderByAsc("seq"));
+        List<SubtitleCueEntity> rows = cueMapper.selectListBySubtitleId(e.getId());
         if (!rows.isEmpty()) {
             return rows;
         }
@@ -192,9 +184,7 @@ public class SubtitleService {
         }
         log.info("字幕记录 {} 无详情行，从 srt_content 迁移 {} 条", e.getId(), cues.size());
         insertCues(e.getTenantId(), e.getId(), cues, null);
-        return cueMapper.selectList(new QueryWrapper<SubtitleCueEntity>()
-                .eq("subtitle_id", e.getId())
-                .orderByAsc("seq"));
+        return cueMapper.selectListBySubtitleId(e.getId());
     }
 
     // ---------------- 翻译 ----------------
@@ -206,8 +196,7 @@ public class SubtitleService {
         SubtitleEntity e = requireOwned(id);
         String lang = req.targetLang() == null ? "" : req.targetLang().trim();
         // 目标语言必须是租户维护列表中的语言
-        if (lang.isEmpty() || langMapper.selectCount(new QueryWrapper<TranslateLangEntity>()
-                .eq("tenant_id", s.tenantId()).eq("name", lang)) == 0) {
+        if (lang.isEmpty() || langMapper.countByTenantIdAndName(s.tenantId(), lang) == 0) {
             throw BizException.badRequest("目标语言不存在，请先在语言维护窗口中添加");
         }
         List<SubtitleCueEntity> rows = requireCues(e);
@@ -235,9 +224,7 @@ public class SubtitleService {
             row.setTranslatedText(translatedText);
             cueMapper.updateById(row);
             // 同步备份表，保证删除字幕后文件库归档仍能还原最新译文
-            cueBackupMapper.update(null, new UpdateWrapper<SubtitleCueBackupEntity>()
-                    .eq("subtitle_id", e.getId()).eq("seq", row.getSeq())
-                    .set("translated_text", translatedText));
+            cueBackupMapper.updateTranslatedTextBySubtitleIdAndSeq(e.getId(), row.getSeq(), translatedText);
         }
         e.setTargetLang(lang);
         subtitleMapper.updateById(e);
@@ -250,9 +237,7 @@ public class SubtitleService {
     public List<Dtos.TranslateLangView> listLangs() {
         userManageService.requireMenu("subtitle");
         String tenantId = TenantContext.require().tenantId();
-        return langMapper.selectList(new QueryWrapper<TranslateLangEntity>()
-                        .eq("tenant_id", tenantId)
-                        .orderByAsc("sort_no", "id"))
+        return langMapper.selectListByTenantId(tenantId)
                 .stream().map(r -> new Dtos.TranslateLangView(r.getId(), r.getName())).toList();
     }
 
@@ -264,15 +249,13 @@ public class SubtitleService {
         if (n.isEmpty() || n.length() > 50) {
             throw BizException.badRequest("语言名称需为 1~50 个字符");
         }
-        if (langMapper.selectCount(new QueryWrapper<TranslateLangEntity>()
-                .eq("tenant_id", tenantId).eq("name", n)) > 0) {
+        if (langMapper.countByTenantIdAndName(tenantId, n) > 0) {
             throw BizException.badRequest("语言已存在: " + n);
         }
         TranslateLangEntity row = new TranslateLangEntity();
         row.setTenantId(tenantId);
         row.setName(n);
-        row.setSortNo(langMapper.selectCount(new QueryWrapper<TranslateLangEntity>()
-                .eq("tenant_id", tenantId)).intValue() + 1);
+        row.setSortNo(langMapper.countByTenantId(tenantId).intValue() + 1);
         langMapper.insert(row);
         return listLangs();
     }
@@ -285,7 +268,7 @@ public class SubtitleService {
         if (row == null || !row.getTenantId().equals(tenantId)) {
             throw BizException.notFound("语言不存在");
         }
-        langMapper.deleteById(id);
+        langMapper.logicDeleteById(id);
     }
 
     /** 勾选序号校验与规范化：1 起转 0 下标，去重升序；空/null = 全部。 */
@@ -488,9 +471,9 @@ public class SubtitleService {
     public void delete(long id) {
         userManageService.requireMenu("subtitle");
         SubtitleEntity e = requireOwned(id);
-        cueMapper.delete(new QueryWrapper<SubtitleCueEntity>().eq("subtitle_id", e.getId()));
+        cueMapper.logicDeleteBySubtitleId(e.getId());
         fileLibraryService.removeSubtitleUpload(e.getId());
-        subtitleMapper.deleteById(e.getId());
+        subtitleMapper.logicDeleteById(e.getId());
         log.info("字幕记录已删除 subtitle={}", e.getId());
     }
 
@@ -514,24 +497,16 @@ public class SubtitleService {
             boolean contentChanged = !text.equals(row.getContent());
             boolean translatedChanged = !Objects.equals(translated, row.getTranslatedText());
             if (contentChanged || translatedChanged) {
-                // updateById 默认跳过 null 字段，清空译文需用 UpdateWrapper 显式 set
-                UpdateWrapper<SubtitleCueEntity> uw = new UpdateWrapper<SubtitleCueEntity>()
-                        .eq("id", row.getId());
-                // 同步更新备份表（按 subtitle_id + seq 定位）
-                UpdateWrapper<SubtitleCueBackupEntity> buw = new UpdateWrapper<SubtitleCueBackupEntity>()
-                        .eq("subtitle_id", e.getId()).eq("seq", row.getSeq());
+                // updateById 默认跳过 null 字段，清空译文需显式 set
                 if (contentChanged) {
-                    uw.set("content", text);
-                    buw.set("content", text);
                     row.setContent(text);
                 }
                 if (translatedChanged) {
-                    uw.set("translated_text", translated);
-                    buw.set("translated_text", translated);
                     row.setTranslatedText(translated);
                 }
-                cueMapper.update(null, uw);
-                cueBackupMapper.update(null, buw);
+                cueMapper.updateContentAndTranslatedById(row.getId(), row.getContent(), row.getTranslatedText());
+                cueBackupMapper.updateContentAndTranslatedBySubtitleIdAndSeq(
+                        e.getId(), row.getSeq(), row.getContent(), row.getTranslatedText());
             }
         }
         // 同步归档到文件库（每次保存新增一条，文件名带目标语言；归档失败不阻断保存主流程）
@@ -596,8 +571,7 @@ public class SubtitleService {
     }
 
     private Dtos.SubtitleListItem toListItem(SubtitleEntity e) {
-        Long cnt = cueMapper.selectCount(new QueryWrapper<SubtitleCueEntity>()
-                .eq("subtitle_id", e.getId()));
+        Long cnt = cueMapper.countBySubtitleId(e.getId());
         int count = cnt == null ? 0 : cnt.intValue();
         if (count == 0) {
             // 旧记录未迁移：按原始 SRT 估算条数

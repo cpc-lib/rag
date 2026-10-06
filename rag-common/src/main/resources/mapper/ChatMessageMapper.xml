@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.rag.api.infrastructure.persistence.mapper.ChatMessageMapper">
+
+    <sql id="columns">id, tenant_id, user_id, session_id, kb_id, question, answer, citations, token_usage, created_at</sql>
+
+    <select id="selectByTenantIdAndSessionId" resultType="com.rag.api.infrastructure.persistence.entity.ChatMessageEntity">
+        SELECT <include refid="columns"/> FROM chat_message WHERE tenant_id = #{tenantId} AND session_id = #{sessionId} AND deleted = 0 ORDER BY id ASC
+    </select>
+
+    <select id="sumTokenUsageByTenantIdSince" resultType="java.lang.Long">
+        SELECT COALESCE(SUM(token_usage), 0) FROM chat_message WHERE tenant_id = #{tenantId} AND created_at &gt;= #{since} AND deleted = 0
+    </select>
+
+    <insert id="insert" useGeneratedKeys="true" keyProperty="id">
+        INSERT INTO chat_message (tenant_id, user_id, session_id, kb_id, question, answer, citations, token_usage, created_at)
+        VALUES (#{tenantId}, #{userId}, #{sessionId}, #{kbId}, #{question}, #{answer}, #{citations}, #{tokenUsage}, #{createdAt})
+    </insert>
+
+    <update id="logicDeleteByTenantIdAndSessionId">
+        UPDATE chat_message SET deleted = 1 WHERE tenant_id = #{tenantId} AND session_id = #{sessionId} AND deleted = 0
+    </update>
+</mapper>

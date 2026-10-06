@@ -1,7 +1,5 @@
 package com.rag.api.application;
 
-import com.baomidou.mybatisplus.core.conditions.query.QueryWrapper;
-import com.baomidou.mybatisplus.core.conditions.update.UpdateWrapper;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.rag.api.common.BizException;
 import com.rag.api.infrastructure.llm.LlmClient;
@@ -15,7 +13,6 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
-import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.List;
 
@@ -40,8 +37,7 @@ public class ChatSessionService {
     }
 
     public List<Dtos.ChatSessionView> list(String tenantId, long userId) {
-        return sessionMapper.selectList(new QueryWrapper<ChatSessionEntity>()
-                        .eq("tenant_id", tenantId).eq("user_id", userId).orderByDesc("updated_at"))
+        return sessionMapper.selectByTenantIdAndUserId(tenantId, userId)
                 .stream().map(this::toView).toList();
     }
 
@@ -54,9 +50,8 @@ public class ChatSessionService {
     @Transactional
     public void delete(String tenantId, long userId, long id) {
         requireOwned(tenantId, userId, id);
-        messageMapper.delete(new QueryWrapper<ChatMessageEntity>()
-                .eq("tenant_id", tenantId).eq("session_id", id));
-        sessionMapper.deleteById(id);
+        messageMapper.logicDeleteByTenantIdAndSessionId(tenantId, id);
+        sessionMapper.logicDeleteById(id);
         log.info("问答会话已删除 tenant={} user={} session={}", tenantId, userId, id);
     }
 
@@ -71,8 +66,7 @@ public class ChatSessionService {
 
     /** 刷新会话更新时间（插入新消息后调用，使会话按最近活跃排序）。 */
     public void touch(long sessionId) {
-        sessionMapper.update(null, new UpdateWrapper<ChatSessionEntity>()
-                .eq("id", sessionId).set("updated_at", LocalDateTime.now()));
+        sessionMapper.touchUpdatedAt(sessionId);
     }
 
     /** 取全部历史，映射为 LLM 多轮消息（每轮 user + assistant）。 */
@@ -88,9 +82,7 @@ public class ChatSessionService {
     }
 
     private List<ChatMessageEntity> loadMessages(String tenantId, long sessionId) {
-        return messageMapper.selectList(new QueryWrapper<ChatMessageEntity>()
-                .eq("tenant_id", tenantId).eq("session_id", sessionId)
-                .orderByAsc("id"));
+        return messageMapper.selectByTenantIdAndSessionId(tenantId, sessionId);
     }
 
     private List<Dtos.ChatMessageView> messageViews(List<ChatMessageEntity> rows) {

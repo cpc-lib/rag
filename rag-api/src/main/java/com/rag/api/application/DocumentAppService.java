@@ -1,7 +1,5 @@
 package com.rag.api.application;
 
-import com.baomidou.mybatisplus.core.conditions.query.QueryWrapper;
-import com.baomidou.mybatisplus.core.conditions.update.UpdateWrapper;
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.rag.api.common.BizException;
@@ -76,12 +74,7 @@ public class DocumentAppService {
 
     /** 秒传查询：同租户同知识库下相同 SHA-256 的文档（取最新一条），命中则无需重复上传。 */
     public DocumentEntity findKbDocBySha256(String tenantId, long kbId, String sha256) {
-        return documentMapper.selectOne(new QueryWrapper<DocumentEntity>()
-                .eq("tenant_id", tenantId)
-                .eq("kb_id", kbId)
-                .eq("sha256", sha256)
-                .orderByDesc("id")
-                .last("LIMIT 1"));
+        return documentMapper.selectOneBySha256(tenantId, kbId, sha256);
     }
 
     /**
@@ -179,17 +172,10 @@ public class DocumentAppService {
         modelService.requireEnabled(doc.getTenantId(), ModelService.EMBEDDING);
 
         // 断点续跑：切片已落库说明解析/切片已完成，直接从向量化继续
-        boolean resume = chunkMapper.selectCount(new QueryWrapper<ChunkEntity>()
-                .eq("document_id", doc.getId()).ne("status", "DELETED")) > 0;
+        boolean resume = chunkMapper.countActiveByDocumentId(doc.getId()) > 0;
         String nextStatus = resume ? "EMBEDDING" : "PARSING";
         int nextProgress = resume ? 45 : 0;
-        int updated = documentMapper.update(null, new UpdateWrapper<DocumentEntity>()
-                .eq("id", doc.getId())
-                .in("status", "UPLOADED", "STOPPED", "FAILED")
-                .set("status", nextStatus)
-                .set("progress", nextProgress)
-                .set("error_msg", null)
-                .set("stop_requested", 0));
+        int updated = documentMapper.startProcessing(doc.getId(), nextStatus, nextProgress);
         if (updated != 1) {
             throw BizException.badRequest("文档正在处理中，请勿重复开始");
         }
@@ -235,14 +221,10 @@ public class DocumentAppService {
         if (!Set.of("PARSING", "CHUNKING", "EMBEDDING", "INDEXING").contains(doc.getStatus())) {
             throw BizException.badRequest("文档当前不在处理中");
         }
-        documentMapper.update(null, new UpdateWrapper<DocumentEntity>()
-                .eq("id", doc.getId()).set("stop_requested", 1));
-        int cancelled = taskMapper.update(null, new UpdateWrapper<PipelineTaskEntity>()
-                .eq("document_id", doc.getId()).eq("status", "PENDING")
-                .set("status", "CANCELLED"));
+        documentMapper.updateStopRequestedById(doc.getId(), 1);
+        int cancelled = taskMapper.cancelPendingByDocumentId(doc.getId());
         if (cancelled > 0) {
-            documentMapper.update(null, new UpdateWrapper<DocumentEntity>()
-                    .eq("id", doc.getId()).set("status", "STOPPED"));
+            documentMapper.updateStatusById(doc.getId(), "STOPPED");
             doc.setStatus("STOPPED");
         }
         log.info("文档停止请求已受理 doc={} 排队任务直接取消={}", doc.getId(), cancelled > 0);
@@ -251,8 +233,7 @@ public class DocumentAppService {
 
     public Page<DocumentEntity> list(long kbId, long page, long size) {
         knowledgeBaseService.getOwned(kbId);
-        return documentMapper.selectPage(new Page<>(page, size),
-                new QueryWrapper<DocumentEntity>().eq("kb_id", kbId).orderByDesc("id"));
+        return documentMapper.selectPageByKbId(new Page<>(page, size), kbId);
     }
 
     /** 使用原文件和知识库当前切片策略重新解析；人工切片由 Worker 保留。 */
@@ -272,12 +253,7 @@ public class DocumentAppService {
         // 与上传一致：未启用向量模型时快速失败，不投递必然失败的任务
         modelService.requireEnabled(doc.getTenantId(), ModelService.EMBEDDING);
 
-        int updated = documentMapper.update(null, new UpdateWrapper<DocumentEntity>()
-                .eq("id", doc.getId())
-                .in("status", "READY", "FAILED")
-                .set("status", "PARSING")
-                .set("progress", 0)
-                .set("error_msg", null));
+        int updated = documentMapper.reparseById(doc.getId());
         if (updated != 1) {
             throw BizException.badRequest("文档正在处理，请完成后再重新解析");
         }
@@ -335,9 +311,9 @@ public class DocumentAppService {
         }
         minio.deleteObject(doc.getObjectKey());
 
-        chunkMapper.delete(new QueryWrapper<ChunkEntity>().eq("document_id", doc.getId()));
-        taskMapper.delete(new QueryWrapper<PipelineTaskEntity>().eq("document_id", doc.getId()));
-        documentMapper.deleteById(doc.getId());
+        chunkMapper.logicDeleteByDocumentId(doc.getId());
+        taskMapper.logicDeleteByDocumentId(doc.getId());
+        documentMapper.logicDeleteById(doc.getId());
         fileLibraryService.removeByDocument(doc.getId());
         log.info("文档已删除 doc={} kb={}", doc.getId(), kb.getId());
     }
