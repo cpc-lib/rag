@@ -14,10 +14,14 @@ import org.springframework.http.MediaType;
 import org.springframework.http.client.reactive.ReactorClientHttpConnector;
 import org.springframework.stereotype.Component;
 import org.springframework.web.reactive.function.client.WebClient;
+import org.springframework.web.reactive.function.client.WebClientRequestException;
 import org.springframework.web.reactive.function.client.WebClientResponseException;
 import reactor.netty.http.client.HttpClient;
+import reactor.netty.http.client.PrematureCloseException;
 import reactor.netty.resources.ConnectionProvider;
+import reactor.util.retry.Retry;
 
+import java.io.IOException;
 import java.math.BigDecimal;
 import java.time.Duration;
 import java.util.ArrayList;
@@ -60,6 +64,46 @@ public class LlmClient {
     private int timeoutSeconds;
 
     private static final String DEFAULT_EMBED_BASE = "https://dashscope.aliyuncs.com/compatible-mode/v1";
+
+    /** 非流式调用的网络层重试次数（仅重试响应开始前的连接异常与网关瞬时错误）。 */
+    private static final long RETRY_MAX_ATTEMPTS = 2;
+
+    /**
+     * 非流式调用的有限重试：上游网关偶发在返回响应前断连
+     * （PrematureCloseException "Connection prematurely closed BEFORE response"、Connection reset）
+     * 或返回 408/429/502/503/504，这类错误发生在业务响应之前、重试安全。
+     * 仅用于非流式接口；流式接口中途断连重试会导致增量重复，不启用。
+     */
+    private Retry networkRetry() {
+        return Retry.backoff(RETRY_MAX_ATTEMPTS, Duration.ofMillis(800))
+                .maxBackoff(Duration.ofSeconds(5))
+                .filter(this::isRetryableNetworkError)
+                .doBeforeRetry(rs -> log.warn("LLM 非流式调用异常，准备第 {} 次重试: {}",
+                        rs.totalRetries() + 1, rs.failure().getMessage()))
+                .onRetryExhaustedThrow((spec, sig) -> sig.failure());
+    }
+
+    private boolean isRetryableNetworkError(Throwable t) {
+        Throwable c = t;
+        while (c != null) {
+            if (c instanceof PrematureCloseException
+                    || c instanceof WebClientRequestException
+                    || c instanceof IOException) {
+                return true;
+            }
+            if (c instanceof WebClientResponseException wce) {
+                int sc = wce.getStatusCode().value();
+                return sc == 408 || sc == 429 || sc == 502 || sc == 503 || sc == 504;
+            }
+            c = c.getCause();
+        }
+        return false;
+    }
+
+    /** 重试场景下 block 的总等待上限：单次超时 ×（重试次数+1），再预留退避时间。 */
+    private Duration blockTimeout(int timeoutSeconds) {
+        return Duration.ofSeconds((long) (timeoutSeconds + 8) * (RETRY_MAX_ATTEMPTS + 1));
+    }
 
     private WebClient build(String baseUrl, String apiKey, int timeoutSeconds) {
         // 不使用连接池：LLM 调用低频，避免跨问答复用到被云端 LB/防火墙 RST 的空闲连接（Connection reset）
@@ -107,7 +151,8 @@ public class LlmClient {
                     .bodyValue(body)
                     .retrieve()
                     .bodyToMono(JsonNode.class)
-                    .block(Duration.ofSeconds(timeoutSeconds));
+                    .retryWhen(networkRetry())
+                    .block(blockTimeout(timeoutSeconds));
             if (resp == null || !resp.has("choices")) {
                 throw new IllegalStateException("LLM 响应缺少 choices");
             }
@@ -189,7 +234,8 @@ public class LlmClient {
                     .bodyValue(body)
                     .retrieve()
                     .bodyToMono(JsonNode.class)
-                    .block();
+                    .retryWhen(networkRetry())
+                    .block(blockTimeout(timeoutSeconds));
         } catch (WebClientResponseException e) {
             throw new IllegalStateException("Embedding 调用失败: " + upstreamError(e), e);
         } catch (Exception e) {

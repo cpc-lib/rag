@@ -1,6 +1,7 @@
 package com.rag.api.application;
 
 import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.rag.api.common.BizException;
 import com.rag.api.common.TenantContext;
@@ -24,6 +25,7 @@ import org.springframework.web.multipart.MultipartFile;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
 import java.util.Objects;
 import java.util.Set;
@@ -312,30 +314,47 @@ public class SubtitleService {
 
     /**
      * 翻译一批并保证返回条数与输入严格一致。
-     * 模型返回条数不符时（常见于弱模型合并/漏译相邻短句），不做整批反馈重试（实测重试常更差），
-     * 而是二分小批重译——批量越小模型越不易出错；批次不大于 SPLIT_MIN 仍失败则逐条兜底。
-     * 典型路径：25 条失败 → 12+13 两个小批成功，共 3 次调用（原方案需 1+1+25 次）。
+     * 输出协议要求模型回显条目序号（[{"n":1,"t":"..."}]），按序号对齐后：
+     * - 模型多给条目（如 25 条返回 26 个）直接丢弃多余项，零额外调用；
+     * - 仅缺失少数条目时，只把缺失条目组成小批补译（而非整批二分）；
+     * - 整批调用失败（网络/格式异常）或全部缺失时，大批二分小批重译；不大于 SPLIT_MIN 仍失败则逐条兜底。
      */
     private List<String> translateBatch(List<String> texts, List<String> before, List<String> after,
                                         ModelEntity m, String targetLabel) {
-        List<String> translated;
+        String[] aligned;
         try {
-            translated = callTranslate(texts, before, after, m, targetLabel);
+            aligned = callTranslate(texts, before, after, m, targetLabel);
         } catch (BizException be) {
-            // 整批调用失败（超时/返回格式异常等）：按条数不符同样走二分/逐条降级
+            // 整批调用失败（网络/超时/返回格式异常等）：全部按缺失处理，走二分/逐条降级
             log.warn("批量翻译调用失败（{} 条）: {}", texts.size(), be.getMessage());
-            translated = List.of();
+            aligned = new String[texts.size()];
         }
-        if (translated.size() == texts.size()) {
-            return translated;
+        List<Integer> missing = new ArrayList<>();
+        for (int i = 0; i < aligned.length; i++) {
+            if (aligned[i] == null) {
+                missing.add(i);
+            }
+        }
+        if (missing.isEmpty()) {
+            return Arrays.asList(aligned);
+        }
+        if (missing.size() < texts.size()) {
+            // 部分成功：模型漏给/个别条目序号异常，仅补译缺失条目（递归保证补译失败也能逐条兜底）
+            log.warn("批量翻译按序号对齐缺失 {}/{} 条，仅补译缺失条目", missing.size(), texts.size());
+            List<String> missTexts = missing.stream().map(texts::get).toList();
+            List<String> filled = translateBatch(missTexts, List.of(), List.of(), m, targetLabel);
+            for (int k = 0; k < missing.size(); k++) {
+                aligned[missing.get(k)] = filled.get(k);
+            }
+            return Arrays.asList(aligned);
         }
         if (texts.size() <= SPLIT_MIN) {
-            log.warn("批量翻译条数不符（{} != {}），降级为逐条翻译", translated.size(), texts.size());
+            log.warn("批量翻译全部缺失（{} 条），降级为逐条翻译", texts.size());
             return translateOneByOne(texts, m, targetLabel);
         }
         int mid = texts.size() / 2;
-        log.warn("批量翻译条数不符（{} != {}），二分重译 {}/{} 条",
-                translated.size(), texts.size(), mid, texts.size() - mid);
+        log.warn("批量翻译全部缺失（{} 条），二分重译 {}/{} 条",
+                texts.size(), mid, texts.size() - mid);
         // 子批内部条目彼此相邻即互为上下文，不再附带跨批上下文
         List<String> out = new ArrayList<>(texts.size());
         out.addAll(translateBatch(texts.subList(0, mid), List.of(), List.of(), m, targetLabel));
@@ -343,13 +362,14 @@ public class SubtitleService {
         return out;
     }
 
-    /** 调用 LLM 翻译一批字幕。 */
-    private List<String> callTranslate(List<String> texts, List<String> before, List<String> after,
-                                       ModelEntity m, String targetLabel) {
+    /** 调用 LLM 翻译一批字幕；返回与输入等长的数组，无法对齐的条目为 null（由上层补译/兜底）。 */
+    private String[] callTranslate(List<String> texts, List<String> before, List<String> after,
+                                   ModelEntity m, String targetLabel) {
         // 系统提示词来自租户级字幕翻译模板（支持 {{目标语言}} 占位符），模板不存在时自动播种默认值
         String system = promptTemplateService.renderSubtitle(
                 promptTemplateService.getSubtitleTemplate(TenantContext.require().tenantId()), targetLabel);
 
+        int n = texts.size();
         StringBuilder user = new StringBuilder();
         user.append("请将下面的字幕翻译成").append(targetLabel).append("。\n\n");
         if (!before.isEmpty()) {
@@ -359,8 +379,8 @@ public class SubtitleService {
             }
             user.append("\n");
         }
-        user.append("[待翻译·请逐条对应输出]（以下共 ").append(texts.size()).append(" 条）\n");
-        for (int i = 0; i < texts.size(); i++) {
+        user.append("[待翻译]（以下共 ").append(n).append(" 条）\n");
+        for (int i = 0; i < n; i++) {
             user.append(i + 1).append(". ").append(texts.get(i)).append("\n");
         }
         if (!after.isEmpty()) {
@@ -369,13 +389,15 @@ public class SubtitleService {
                 user.append("- ").append(after.get(i)).append("\n");
             }
         }
-        user.append("\n输出格式：只允许输出一个 JSON 字符串数组，不要 markdown 代码围栏、序号或任何解释文字。")
-                .append("数组必须恰好包含 ").append(texts.size())
-                .append(" 个字符串元素，与上面 ").append(texts.size())
-                .append(" 条输入顺序一一对应；每条字幕即使本身含多句话，也只能产出一个元素，禁止合并或拆分。")
-                .append("元素只能是字符串；字符串内双引号用 \\\" 转义、换行用 \\n 表示，空条目输出 \"\"。")
-                .append("示例（输入 2 条）：[")
-                .append("\"译文1\",\"译文2\"]");
+        user.append("\n输出格式：只允许输出一个 JSON 数组，不要 markdown 代码围栏、序号标题或任何解释文字。\n")
+                .append("数组必须恰好包含 ").append(n)
+                .append(" 个对象元素，与上面的 ").append(n)
+                .append(" 条字幕一一对应；每个对象形如 {\"n\":序号,\"t\":\"译文\"}，")
+                .append("其中 n 为该条字幕的输入序号（从 1 开始，用于机器核对，不是正文），t 为该条译文。\n")
+                .append("每条字幕即使本身含多句话，也只能产出一个对象，禁止合并、拆分、遗漏或新增；")
+                .append("n 必须覆盖 1~").append(n).append(" 且不重复。\n")
+                .append("t 只能是字符串；内部双引号用 \\\" 转义、换行用 \\n 表示，空条目输出 \"\"。\n")
+                .append("示例（输入 2 条）：[{\"n\":1,\"t\":\"译文1\"},{\"n\":2,\"t\":\"译文2\"}]");
 
         try {
             var msg = llmClient.chatOnce(m.getBaseUrl(), m.getApiKey(), m.getModel(),
@@ -386,7 +408,7 @@ public class SubtitleService {
                             java.math.BigDecimal.valueOf(0.95), 4096),
                     120);
             String content = msg.path("content").asText("");
-            return parseJsonArray(content, texts);
+            return parseAligned(content, texts);
         } catch (BizException be) {
             throw be;
         } catch (Exception ex) {
@@ -398,24 +420,92 @@ public class SubtitleService {
     private List<String> translateOneByOne(List<String> texts, ModelEntity m, String targetLabel) {
         List<String> out = new ArrayList<>(texts.size());
         for (String t : texts) {
+            String translated = null;
             try {
-                out.add(callTranslate(List.of(t), List.of(), List.of(), m, targetLabel).get(0));
+                String[] r = callTranslate(List.of(t), List.of(), List.of(), m, targetLabel);
+                translated = r[0];
             } catch (Exception ex) {
                 log.warn("单条翻译失败，保留原文: {}", ex.getMessage());
-                out.add(t);
             }
+            out.add(translated != null ? translated : t);
         }
         return out;
     }
 
-    /** 从模型输出中提取 JSON 字符串数组；单条场景严格校验并容错"原文+译文"双元素，批量场景条数交由上层校验以支持纠错重试。 */
-    private List<String> parseJsonArray(String content, List<String> texts) {
+    /**
+     * 解析模型输出并按条目对齐，返回长度等于输入条数的数组，缺失/无法对应的位置为 null。
+     * 支持两种输出：
+     * 1) 对象数组 [{"n":1,"t":"..."}]（当前协议）：按 n（1 起）映射，越界/重复/非法项忽略，缺号为 null；
+     * 2) 字符串数组 ["..."]（旧版系统模板或模型未遵循新协议）：数量与输入一致时按位置采用；
+     *    单条场景容错 [原文,译文] 双元素；其余数量不符视为整批未对齐（抛异常，由上层二分/逐条）。
+     */
+    private String[] parseAligned(String content, List<String> texts) {
         int expected = texts.size();
         if (content == null || content.isBlank()) {
             throw new BizException(com.rag.api.common.ErrorCode.UPSTREAM, "模型返回空内容");
         }
-        String s = content.trim();
-        // 去除 markdown 代码围栏
+        String s = stripCodeFence(content.trim());
+        // 截取首个 [ 到末个 ]
+        int start = s.indexOf('[');
+        int end = s.lastIndexOf(']');
+        if (start < 0 || end < start) {
+            throw new BizException(com.rag.api.common.ErrorCode.UPSTREAM,
+                    "模型返回非 JSON 数组格式: " + truncate(s));
+        }
+        String json = s.substring(start, end + 1);
+        try {
+            JsonNode arr = objectMapper.readTree(json);
+            if (!arr.isArray()) {
+                throw new BizException(com.rag.api.common.ErrorCode.UPSTREAM,
+                        "模型返回非 JSON 数组格式: " + truncate(s));
+            }
+            if (arr.size() > 0 && arr.get(0).isObject()) {
+                return alignBySeq(arr, expected);
+            }
+            List<String> flat = objectMapper.readValue(json, new TypeReference<List<String>>() {});
+            return alignByPosition(flat, texts);
+        } catch (BizException be) {
+            throw be;
+        } catch (IOException e) {
+            throw new BizException(com.rag.api.common.ErrorCode.UPSTREAM,
+                    "解析翻译结果 JSON 失败: " + e.getMessage());
+        }
+    }
+
+    /** 对象数组按 n（1 起）对齐；非法/越界/重复序号忽略，缺号位置为 null。 */
+    private String[] alignBySeq(JsonNode arr, int expected) {
+        String[] out = new String[expected];
+        for (JsonNode item : arr) {
+            JsonNode nNode = item.get("n");
+            JsonNode tNode = item.get("t");
+            if (nNode == null || !nNode.canConvertToInt() || tNode == null || !tNode.isTextual()) {
+                continue;
+            }
+            int idx = nNode.asInt() - 1;
+            if (idx < 0 || idx >= expected || out[idx] != null) {
+                continue;
+            }
+            out[idx] = tNode.asText();
+        }
+        return out;
+    }
+
+    /** 旧版字符串数组：数量一致按位置采用；单条保留 [原文,译文] 容错；数量不符无法可靠对齐，抛异常走二分。 */
+    private String[] alignByPosition(List<String> arr, List<String> texts) {
+        int expected = texts.size();
+        if (arr.size() == expected) {
+            return arr.toArray(new String[0]);
+        }
+        if (expected == 1 && arr.size() == 2) {
+            String src = texts.get(0);
+            return new String[]{arr.get(0).trim().equals(src.trim()) ? arr.get(1) : arr.get(0)};
+        }
+        throw new BizException(com.rag.api.common.ErrorCode.UPSTREAM,
+                "翻译条数不匹配（" + arr.size() + " != " + expected + "）且未携带条目序号，无法对齐");
+    }
+
+    /** 去除 markdown 代码围栏（```json ... ```）。 */
+    private String stripCodeFence(String s) {
         if (s.startsWith("```")) {
             int fence = s.indexOf("\n");
             if (fence > 0) {
@@ -426,34 +516,7 @@ public class SubtitleService {
             }
             s = s.trim();
         }
-        // 截取首个 [ 到末个 ]
-        int start = s.indexOf('[');
-        int end = s.lastIndexOf(']');
-        if (start < 0 || end < start) {
-            throw new BizException(com.rag.api.common.ErrorCode.UPSTREAM,
-                    "模型返回非 JSON 数组格式: " + truncate(s));
-        }
-        String json = s.substring(start, end + 1);
-        try {
-            List<String> arr = objectMapper.readValue(json, new TypeReference<List<String>>() {});
-            if (expected == 1) {
-                // 单条场景严格校验：容错 [原文, 译文] 双元素（取与原文不同的那条），其余条数异常抛出由逐条兜底保留原文
-                if (arr.size() == 1) {
-                    return arr;
-                }
-                if (arr.size() == 2) {
-                    String src = texts.get(0);
-                    return List.of(arr.get(0).trim().equals(src.trim()) ? arr.get(1) : arr.get(0));
-                }
-                throw new BizException(com.rag.api.common.ErrorCode.UPSTREAM,
-                        "翻译条数不匹配（" + arr.size() + " != 1）");
-            }
-            // 批量场景不在此校验条数：原样返回，由上层二分小批重译/逐条兜底保证条数对齐
-            return arr;
-        } catch (IOException e) {
-            throw new BizException(com.rag.api.common.ErrorCode.UPSTREAM,
-                    "解析翻译结果 JSON 失败: " + e.getMessage());
-        }
+        return s;
     }
 
     private String truncate(String s) {
