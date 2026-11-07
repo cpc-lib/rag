@@ -1,5 +1,6 @@
 package com.rag.worker.pipeline.chunk;
 
+import com.rag.worker.pipeline.ParseService;
 import com.rag.worker.pipeline.TokenCounter;
 import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Component;
@@ -212,16 +213,16 @@ public class ChunkSupport {
 
     /** Markdown 表格按行组切分，每片保留表头 + 分隔行（指南 §16）。 */
     public List<String> splitTable(String mdTable, int maxTokens) {
-        String[] rows = mdTable.split("\n", -1);
-        if (rows.length < 3) {
-            return List.of(mdTable);
+        List<String> rows = normalizeTable(List.of(mdTable.split("\n", -1)));
+        if (rows.size() < 3) {
+            return List.of(String.join("\n", rows));
         }
-        String header = rows[0];
-        String sep = rows[1];
+        String header = rows.get(0);
+        String sep = rows.get(1);
         List<String> out = new ArrayList<>();
         List<String> group = new ArrayList<>();
-        for (int i = 2; i < rows.length; i++) {
-            String row = rows[i];
+        for (int i = 2; i < rows.size(); i++) {
+            String row = rows.get(i);
             int groupTokens = tokens(header + "\n" + sep + "\n" + String.join("\n", group) + "\n" + row);
             if (!group.isEmpty() && (groupTokens > maxTokens || group.size() >= 50)) {
                 out.add(header + "\n" + sep + "\n" + String.join("\n", group));
@@ -233,6 +234,172 @@ public class ChunkSupport {
             out.add(header + "\n" + sep + "\n" + String.join("\n", group));
         }
         return out;
+    }
+
+    /**
+     * 跨页表格续接（ISSUE RAG-008）：上一页以 Markdown 表格结尾、下一页以表格行开头时，
+     * 将续接行并入上一页表格，只保留一份表头；下一页重复相同表头时自动去重。
+     * 表头不同视为另一张表，不合并；可连续处理跨 3 页及以上的表格。
+     */
+    public List<ParseService.RawPage> mergeContinuedTables(List<ParseService.RawPage> pages) {
+        List<ParseService.RawPage> out = new ArrayList<>();
+        for (ParseService.RawPage page : pages) {
+            if (page == null || page.text() == null || page.text().isBlank()) {
+                out.add(page);
+                continue;
+            }
+            List<String> current = new ArrayList<>(List.of(page.text().split("\n", -1)));
+            int leadingEnd = leadingTableEnd(current);
+            boolean merged = false;
+            if (leadingEnd > 0) {
+                int idx = lastNonBlank(out);
+                if (idx >= 0) {
+                    List<String> prev = new ArrayList<>(List.of(out.get(idx).text().split("\n", -1)));
+                    int prevStart = trailingTableStart(prev);
+                    if (prevStart >= 0) {
+                        List<String> mergedTable = mergeTable(
+                                prev.subList(prevStart, prev.size()), current.subList(0, leadingEnd));
+                        if (mergedTable != null) {
+                            List<String> rebuilt = new ArrayList<>(prev.subList(0, prevStart));
+                            rebuilt.addAll(mergedTable);
+                            out.set(idx, new ParseService.RawPage(out.get(idx).page(),
+                                    String.join("\n", rebuilt).strip()));
+                            String rest = String.join("\n",
+                                    current.subList(leadingEnd, current.size())).strip();
+                            if (!rest.isEmpty()) {
+                                out.add(new ParseService.RawPage(page.page(), rest));
+                            }
+                            merged = true;
+                        }
+                    }
+                }
+            }
+            if (!merged) {
+                out.add(page);
+            }
+        }
+        return out;
+    }
+
+    /** 页首连续表格块的结束下标；页首不是表格行时返回 0。 */
+    private int leadingTableEnd(List<String> lines) {
+        int start = 0;
+        while (start < lines.size() && lines.get(start).isBlank()) {
+            start++;
+        }
+        if (start >= lines.size() || !TABLE_LINE.matcher(lines.get(start)).matches()) {
+            return 0;
+        }
+        int end = start;
+        while (end < lines.size() && TABLE_LINE.matcher(lines.get(end)).matches()) {
+            end++;
+        }
+        return end;
+    }
+
+    /** 页尾连续表格块的起始下标；要求块内含表头分隔行，否则视为普通文本返回 -1。 */
+    private int trailingTableStart(List<String> lines) {
+        int end = lines.size() - 1;
+        while (end >= 0 && lines.get(end).isBlank()) {
+            end--;
+        }
+        if (end < 0 || !TABLE_LINE.matcher(lines.get(end)).matches()) {
+            return -1;
+        }
+        int start = end;
+        while (start > 0 && TABLE_LINE.matcher(lines.get(start - 1)).matches()) {
+            start--;
+        }
+        boolean hasHeader = start + 1 <= end && TABLE_SEP.matcher(lines.get(start + 1)).find();
+        return hasHeader ? start : -1;
+    }
+
+    private int lastNonBlank(List<ParseService.RawPage> pages) {
+        for (int i = pages.size() - 1; i >= 0; i--) {
+            ParseService.RawPage page = pages.get(i);
+            if (page != null && page.text() != null && !page.text().isBlank()) {
+                return i;
+            }
+        }
+        return -1;
+    }
+
+    /** 合并两段表格；表头不一致或没有续接数据时返回 null。 */
+    private List<String> mergeTable(List<String> prevTable, List<String> nextTable) {
+        List<String> prev = normalizeTable(prevTable);
+        if (prev.size() < 2 || !TABLE_SEP.matcher(prev.get(1)).find()) {
+            return null;
+        }
+        List<String> next = normalizeTable(nextTable);
+        List<String> data;
+        if (next.size() >= 2 && TABLE_SEP.matcher(next.get(1)).find()) {
+            // 下一页重复表头：表头一致才可续接
+            if (!headerKey(prev.get(0)).equals(headerKey(next.get(0)))) {
+                return null;
+            }
+            data = next.subList(2, next.size());
+        } else {
+            data = next;
+        }
+        List<String> merged = new ArrayList<>(prev);
+        for (String row : data) {
+            if (!TABLE_SEP.matcher(row).find()) {
+                merged.add(row);
+            }
+        }
+        return merged.size() == prev.size() ? null : normalizeTable(merged);
+    }
+
+    private String headerKey(String headerLine) {
+        return String.join("|", rowCells(headerLine)).replaceAll("\\s+", "");
+    }
+
+    /**
+     * 表格行列归一化：以表头列数为准，补齐缺失单元格、把多余单元格并入最后一列，
+     * 避免残缺行在 Markdown / 切片后与表头错位。列数一致的行保持原样。
+     */
+    private List<String> normalizeTable(List<String> lines) {
+        if (lines.isEmpty()) {
+            return lines;
+        }
+        int cols = rowCells(lines.get(0)).size();
+        if (cols == 0) {
+            return lines;
+        }
+        List<String> out = new ArrayList<>(lines.size());
+        for (int i = 0; i < lines.size(); i++) {
+            String line = lines.get(i);
+            List<String> cells = rowCells(line);
+            if (i == 1 && TABLE_SEP.matcher(line).find()) {
+                out.add(cells.size() == cols ? line : "|" + " --- |".repeat(cols));
+                continue;
+            }
+            if (cells.size() == cols) {
+                out.add(line);
+                continue;
+            }
+            List<String> fixed = new ArrayList<>(cells.subList(0, Math.min(cols, cells.size())));
+            if (cells.size() > cols) {
+                fixed.set(cols - 1, String.join(" ", cells.subList(cols - 1, cells.size())));
+            }
+            while (fixed.size() < cols) {
+                fixed.add("");
+            }
+            out.add("| " + String.join(" | ", fixed) + " |");
+        }
+        return out;
+    }
+
+    /** 拆分表格行单元格，保留单元格内原始空白与转义竖线。 */
+    private List<String> rowCells(String line) {
+        String s = line.strip();
+        if (s.startsWith("|")) {
+            s = s.substring(1);
+        }
+        if (s.endsWith("|") && !s.endsWith("\\|")) {
+            s = s.substring(0, s.length() - 1);
+        }
+        return new ArrayList<>(List.of(s.split("(?<!\\\\)\\|", -1)));
     }
 
     /** 代码按行切分（超长代码块的兜底）。 */

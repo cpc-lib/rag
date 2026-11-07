@@ -5,6 +5,7 @@ import com.rag.api.infrastructure.persistence.entity.DocumentEntity;
 import com.rag.api.infrastructure.persistence.entity.ModelEntity;
 import com.rag.worker.infrastructure.storage.MinioStorage;
 import com.rag.worker.infrastructure.llm.VisionClient;
+import com.rag.worker.pipeline.table.TableModel;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.pdfbox.cos.COSName;
@@ -15,6 +16,10 @@ import org.apache.pdfbox.pdmodel.graphics.PDXObject;
 import org.apache.pdfbox.pdmodel.graphics.image.PDImageXObject;
 import org.apache.pdfbox.rendering.PDFRenderer;
 import org.apache.pdfbox.text.PDFTextStripper;
+import org.apache.poi.ss.usermodel.CellType;
+import org.apache.poi.ss.usermodel.DataFormatter;
+import org.apache.poi.ss.util.CellRangeAddress;
+import org.apache.poi.xssf.usermodel.XSSFCell;
 import org.apache.poi.xssf.usermodel.XSSFRow;
 import org.apache.poi.xssf.usermodel.XSSFSheet;
 import org.apache.poi.xssf.usermodel.XSSFWorkbook;
@@ -31,7 +36,10 @@ import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 
 /**
@@ -50,6 +58,9 @@ public class ParseService {
     private static final Set<String> TEXT_EXTS = Set.of(
             "txt", "md", "json", "sql", "xml", "yml", "yaml", "properties", "log", "ini", "conf",
             "java", "py", "go", "js", "jsx", "ts", "tsx", "sh");
+
+    /** Excel 单元格显示格式化（日期/金额/编号按单元格格式输出，避免变成浮点串）。 */
+    private static final DataFormatter FORMATTER = new DataFormatter();
 
     public record ParseOutcome(List<RawPage> pages, List<String> warnings) {
     }
@@ -98,29 +109,19 @@ public class ParseService {
             return plainText(bytes);
         }
         int cols = rows.stream().mapToInt(List::size).max().orElse(0);
-        StringBuilder sb = new StringBuilder();
-        sb.append("| ").append(rowToMd(rows.get(0), cols)).append(" |\n");
-        sb.append('|');
-        for (int i = 0; i < Math.max(1, cols); i++) {
-            sb.append(" --- |");
+        if (cols == 0) {
+            return plainText(bytes);
         }
-        sb.append('\n');
-        for (int i = 1; i < rows.size(); i++) {
-            sb.append("| ").append(rowToMd(rows.get(i), cols)).append(" |\n");
-        }
-        return new ParseOutcome(List.of(new RawPage(0, sb.toString())), new ArrayList<>());
-    }
-
-    private String rowToMd(List<String> row, int cols) {
-        StringBuilder sb = new StringBuilder();
-        for (int i = 0; i < cols; i++) {
-            if (i > 0) {
-                sb.append(" | ");
+        List<List<TableModel.Cell>> grid = new ArrayList<>();
+        for (List<String> row : rows) {
+            List<TableModel.Cell> cells = new ArrayList<>(cols);
+            for (int i = 0; i < cols; i++) {
+                cells.add(TableModel.Cell.of(i < row.size() ? row.get(i) : ""));
             }
-            String cell = i < row.size() ? row.get(i) : "";
-            sb.append(cell.replace("|", "\\|").replace('\n', ' '));
+            grid.add(cells);
         }
-        return sb.toString();
+        String markdown = new TableModel(null, 0, grid).toMarkdown();
+        return new ParseOutcome(List.of(new RawPage(0, markdown)), new ArrayList<>());
     }
 
     /** 最小 RFC4180 CSV 解析：支持双引号包裹、引号转义与字段内换行。 */
@@ -219,78 +220,129 @@ public class ParseService {
         return null;
     }
 
-    /** Word 表格 → Markdown 表格（指南 §16，供表格保护与切片）。 */
+    /** Word 表格 → 统一表格模型（指南 §16）：保留 gridSpan 横向合并，供后续切片重复表头。 */
     private String docxTableToMarkdown(XWPFTable table) {
-        List<List<String>> rows = new ArrayList<>();
-        int maxCols = 0;
+        List<List<TableModel.Cell>> grid = new ArrayList<>();
         for (XWPFTableRow row : table.getRows()) {
-            List<String> cells = row.getTableCells().stream()
-                    .map(XWPFTableCell::getText)
-                    .map(t -> t == null ? "" : t.replace("\\", "\\\\")
-                            .replace("|", "\\|").replaceAll("\\s+", " ").strip())
-                    .toList();
-            rows.add(cells);
-            maxCols = Math.max(maxCols, cells.size());
+            List<TableModel.Cell> cells = new ArrayList<>();
+            for (XWPFTableCell cell : row.getTableCells()) {
+                cells.add(new TableModel.Cell(cell.getText(), docxGridSpan(cell), 1));
+            }
+            if (!cells.isEmpty()) {
+                grid.add(cells);
+            }
         }
-        if (rows.isEmpty() || maxCols == 0) {
-            return "";
-        }
-        StringBuilder sb = new StringBuilder();
-        sb.append(toMdRow(rows.get(0), maxCols)).append('\n');
-        sb.append('|').append("---|".repeat(maxCols)).append('\n');
-        for (int r = 1; r < rows.size(); r++) {
-            sb.append(toMdRow(rows.get(r), maxCols)).append('\n');
-        }
-        return sb.toString();
+        return new TableModel(null, 0, grid).toMarkdown();
     }
 
-    private String toMdRow(List<String> cells, int cols) {
-        StringBuilder sb = new StringBuilder("|");
-        for (int c = 0; c < cols; c++) {
-            sb.append(c < cells.size() ? cells.get(c) : "").append('|');
+    /** Word 横向合并：gridSpan 表示单元格横跨的网格列数。 */
+    private int docxGridSpan(XWPFTableCell cell) {
+        try {
+            var tcPr = cell.getCTTc().getTcPr();
+            if (tcPr != null && tcPr.getGridSpan() != null && tcPr.getGridSpan().getVal() != null) {
+                return tcPr.getGridSpan().getVal().intValue();
+            }
+        } catch (Exception ignored) {
         }
-        return sb.toString();
+        return 1;
     }
 
     private ParseOutcome parseXlsx(byte[] bytes) {
+        try {
+            return new ParseOutcome(xlsxPages(bytes), new ArrayList<>());
+        } catch (Exception e) {
+            throw new IllegalStateException("Excel 解析失败: " + e.getMessage(), e);
+        }
+    }
+
+    /**
+     * Excel → 每 Sheet 一页 Markdown 表格（首行表头）。包级可见用于多 Sheet 回归测试。
+     * 合并区域按 colspan/rowspan 展开，保证表头与数据行列对齐。
+     */
+    static List<RawPage> xlsxPages(byte[] bytes) throws Exception {
         List<RawPage> pages = new ArrayList<>();
         try (XSSFWorkbook workbook = new XSSFWorkbook(new ByteArrayInputStream(bytes))) {
             for (int s = 0; s < workbook.getNumberOfSheets(); s++) {
                 XSSFSheet sheet = workbook.getSheetAt(s);
-                List<List<String>> rows = new ArrayList<>();
-                int maxCols = 0;
-                for (int r = 0; r <= sheet.getLastRowNum(); r++) {
-                    XSSFRow row = sheet.getRow(r);
-                    if (row == null) {
-                        continue;
-                    }
-                    List<String> cells = new ArrayList<>();
-                    for (int c = 0; c < row.getLastCellNum(); c++) {
-                        var cell = row.getCell(c);
-                        cells.add(cell == null ? "" : cell.toString().replace("\\", "\\\\")
-                                .replace("|", "\\|").replaceAll("\\s+", " ").strip());
-                    }
-                    if (cells.stream().anyMatch(v -> !v.isEmpty())) {
-                        rows.add(cells);
-                        maxCols = Math.max(maxCols, cells.size());
-                    }
+                List<List<TableModel.Cell>> grid = xlsxGrid(sheet);
+                if (grid.isEmpty()) {
+                    continue;
                 }
-                if (!rows.isEmpty()) {
-                    String sheetName = workbook.getSheetName(s);
-                    StringBuilder sb = new StringBuilder("# ")
-                            .append(sheetName == null ? "Sheet" + s : sheetName).append("\n\n")
-                            .append(toMdRow(rows.get(0), maxCols)).append('\n')
-                            .append('|').append("---|".repeat(maxCols)).append('\n');
-                    for (int r = 1; r < rows.size(); r++) {
-                        sb.append(toMdRow(rows.get(r), maxCols)).append('\n');
+                String sheetName = workbook.getSheetName(s);
+                String markdown = new TableModel(sheetName, s, grid).toMarkdown();
+                pages.add(new RawPage(s, "# " + (sheetName == null ? "Sheet" + s : sheetName)
+                        + "\n\n" + markdown));
+            }
+        }
+        return pages;
+    }
+
+    /** 读取 Sheet 为单元格网格：预扫描合并区域，跳过被覆盖格子并在起点写入跨度。 */
+    private static List<List<TableModel.Cell>> xlsxGrid(XSSFSheet sheet) {
+        Map<Long, CellRangeAddress> mergeStart = new HashMap<>();
+        Set<Long> covered = new HashSet<>();
+        int maxCols = 0;
+        for (CellRangeAddress region : sheet.getMergedRegions()) {
+            mergeStart.put(cellKey(region.getFirstRow(), region.getFirstColumn()), region);
+            for (int r = region.getFirstRow(); r <= region.getLastRow(); r++) {
+                for (int c = region.getFirstColumn(); c <= region.getLastColumn(); c++) {
+                    if (r != region.getFirstRow() || c != region.getFirstColumn()) {
+                        covered.add(cellKey(r, c));
                     }
-                    pages.add(new RawPage(s, sb.toString()));
                 }
             }
-        } catch (Exception e) {
-            throw new IllegalStateException("Excel 解析失败: " + e.getMessage(), e);
+            maxCols = Math.max(maxCols, region.getLastColumn() + 1);
         }
-        return new ParseOutcome(pages, new ArrayList<>());
+        for (int r = 0; r <= sheet.getLastRowNum(); r++) {
+            XSSFRow row = sheet.getRow(r);
+            if (row != null && row.getLastCellNum() > 0) {
+                maxCols = Math.max(maxCols, row.getLastCellNum());
+            }
+        }
+        List<List<TableModel.Cell>> grid = new ArrayList<>();
+        for (int r = 0; r <= sheet.getLastRowNum(); r++) {
+            XSSFRow row = sheet.getRow(r);
+            List<TableModel.Cell> cells = new ArrayList<>();
+            for (int c = 0; c < maxCols; c++) {
+                long key = cellKey(r, c);
+                if (covered.contains(key)) {
+                    continue;
+                }
+                XSSFCell cell = row == null ? null : row.getCell(c);
+                CellRangeAddress region = mergeStart.get(key);
+                String text = xlsxCellText(cell);
+                if (region != null) {
+                    cells.add(new TableModel.Cell(text,
+                            region.getLastColumn() - region.getFirstColumn() + 1,
+                            region.getLastRow() - region.getFirstRow() + 1));
+                } else {
+                    cells.add(TableModel.Cell.of(text));
+                }
+            }
+            if (cells.stream().anyMatch(c -> !c.text().isBlank())) {
+                grid.add(cells);
+            }
+        }
+        return grid;
+    }
+
+    private static long cellKey(int row, int col) {
+        return ((long) row << 32) | (col & 0xffffffffL);
+    }
+
+    /** 用 DataFormatter 保留日期/金额/编号的显示格式；公式单元格保持原值输出。 */
+    private static String xlsxCellText(XSSFCell cell) {
+        if (cell == null) {
+            return "";
+        }
+        try {
+            if (cell.getCellType() == CellType.FORMULA) {
+                return cell.toString();
+            }
+            return FORMATTER.formatCellValue(cell);
+        } catch (Exception e) {
+            return cell.toString();
+        }
     }
 
     /** 单页最多抽取的图片数，避免整页图标/水印放大 Vision 调用成本。 */
@@ -541,29 +593,28 @@ public class ParseService {
         sb.append(block.strip());
     }
 
-    /** HTML 表格 → Markdown 表格。 */
+    /** HTML 表格 → 统一表格模型：保留 colspan/rowspan，避免合并单元格导致列错位。 */
     private String htmlTableToMarkdown(org.jsoup.nodes.Element table) {
-        List<org.jsoup.nodes.Element> rows = table.select("tr");
-        if (rows.isEmpty()) {
-            return "";
+        List<List<TableModel.Cell>> grid = new ArrayList<>();
+        for (org.jsoup.nodes.Element row : table.select("tr")) {
+            List<TableModel.Cell> cells = new ArrayList<>();
+            for (org.jsoup.nodes.Element cell : row.select("td, th")) {
+                cells.add(new TableModel.Cell(cell.text(),
+                        htmlSpan(cell.attr("colspan")), htmlSpan(cell.attr("rowspan"))));
+            }
+            if (!cells.isEmpty()) {
+                grid.add(cells);
+            }
         }
-        List<List<String>> data = new ArrayList<>();
-        int maxCols = 0;
-        for (org.jsoup.nodes.Element row : rows) {
-            List<String> cells = row.select("td, th").stream()
-                    .map(c -> c.text().replace("\\", "\\\\").replace("|", "\\|")
-                            .replaceAll("\\s+", " ").strip())
-                    .toList();
-            data.add(cells);
-            maxCols = Math.max(maxCols, cells.size());
+        return new TableModel(null, 0, grid).toMarkdown();
+    }
+
+    private int htmlSpan(String value) {
+        try {
+            return value == null || value.isBlank() ? 1 : Math.max(1, Integer.parseInt(value.strip()));
+        } catch (NumberFormatException e) {
+            return 1;
         }
-        StringBuilder sb = new StringBuilder();
-        sb.append(toMdRow(data.get(0), maxCols)).append('\n');
-        sb.append('|').append("---|".repeat(maxCols)).append('\n');
-        for (int r = 1; r < data.size(); r++) {
-            sb.append(toMdRow(data.get(r), maxCols)).append('\n');
-        }
-        return sb.toString();
     }
 
     private String extOf(String fileName) {

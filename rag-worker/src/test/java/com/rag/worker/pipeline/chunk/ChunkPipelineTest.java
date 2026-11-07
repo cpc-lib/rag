@@ -60,4 +60,65 @@ class ChunkPipelineTest {
         assertEquals(52, groups.get(0).lines().count());
         assertEquals(3, groups.get(1).lines().count());
     }
+
+    @Test
+    void crossPageTableContinuationIsMergedWithSingleHeader() {
+        List<ParseService.RawPage> pages = List.of(
+                new ParseService.RawPage(0, "说明文字\n\n|编号|金额|\n|---|---|\n|A1|100|"),
+                new ParseService.RawPage(1, "|A2|200|\n|A3|300|\n\n后记"));
+
+        List<ParseService.RawPage> merged = support.mergeContinuedTables(pages);
+
+        assertEquals(2, merged.size());
+        assertEquals("说明文字\n\n|编号|金额|\n|---|---|\n|A1|100|\n|A2|200|\n|A3|300|",
+                merged.get(0).text());
+        assertEquals("后记", merged.get(1).text());
+        assertEquals(1, merged.get(1).page());
+    }
+
+    @Test
+    void repeatedHeaderOnNextPageIsDeduplicated() {
+        List<ParseService.RawPage> pages = List.of(
+                new ParseService.RawPage(0, "|编号|金额|\n|---|---|\n|A1|100|"),
+                new ParseService.RawPage(1, "| 编号 | 金额 |\n| --- | --- |\n|A2|200|"));
+
+        String text = support.mergeContinuedTables(pages).get(0).text();
+
+        assertEquals(1, text.split("编号", -1).length - 1, text);
+        assertTrue(text.contains("|A2|200|"), text);
+    }
+
+    @Test
+    void tableSpanningThreePagesMergesAllRows() {
+        List<ParseService.RawPage> pages = List.of(
+                new ParseService.RawPage(0, "|编号|金额|\n|---|---|\n|A1|100|"),
+                new ParseService.RawPage(1, "|A2|200|"),
+                new ParseService.RawPage(2, "|A3|300|\n|A4|400|"));
+
+        List<ParseService.RawPage> merged = support.mergeContinuedTables(pages);
+
+        assertEquals(1, merged.size());
+        assertEquals(4, merged.get(0).text().lines().filter(l -> l.startsWith("|A")).count());
+        assertEquals(1, merged.get(0).text().split("编号", -1).length - 1);
+    }
+
+    @Test
+    void differentHeaderIsNotMerged() {
+        List<ParseService.RawPage> pages = List.of(
+                new ParseService.RawPage(0, "|编号|金额|\n|---|---|\n|A1|100|"),
+                new ParseService.RawPage(1, "|姓名|年龄|\n|---|---|\n|张三|20|"));
+
+        assertEquals(2, support.mergeContinuedTables(pages).size());
+    }
+
+    @Test
+    void splitTablePadsRaggedRowsToHeaderColumns() {
+        String table = "|编号|金额|备注|\n|---|---|---|\n|A1|100|\n|A2|200|超长|多余|";
+
+        List<String> groups = support.splitTable(table, 1000);
+
+        assertEquals(1, groups.size());
+        assertTrue(groups.get(0).contains("| A1 | 100 |  |"), groups.get(0));
+        assertTrue(groups.get(0).contains("| A2 | 200 | 超长 多余 |"), groups.get(0));
+    }
 }

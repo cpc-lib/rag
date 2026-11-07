@@ -23,8 +23,6 @@ import org.springframework.stereotype.Service;
 
 import java.time.Duration;
 import java.util.ArrayList;
-import java.util.Comparator;
-import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -139,21 +137,13 @@ public class RetrievalService {
                 .max().orElse(0.0);
 
         // 3. RRF 融合 → candidateTopK 候选 → 可选 Rerank → topK
-        Map<Long, Double> rrf = new HashMap<>();
-        for (int i = 0; i < vectorHits.size(); i++) {
-            rrf.merge(vectorHits.get(i).chunkId(), 1.0 / (rc.rrfK + i + 1), Double::sum);
-        }
-        for (int i = 0; i < keywordIds.size(); i++) {
-            rrf.merge(keywordIds.get(i), 1.0 / (rc.rrfK + i + 1), Double::sum);
-        }
-        Set<Long> vectorIds = vectorHits.stream().map(MilvusClientWrapper.MilvusHit::chunkId).collect(Collectors.toSet());
-        long overlap = keywordIds.stream().filter(vectorIds::contains).count();
+        List<Long> vectorIds = vectorHits.stream()
+                .map(MilvusClientWrapper.MilvusHit::chunkId).toList();
+        Map<Long, Double> rrf = rrfScores(vectorIds, keywordIds, rc.rrfK);
+        Set<Long> vectorIdSet = new HashSet<>(vectorIds);
+        long overlap = keywordIds.stream().filter(vectorIdSet::contains).count();
         int candidateLimit = Math.max(rc.topK, rc.candidateTopK);
-        List<Long> candidateIds = rrf.entrySet().stream()
-                .sorted(Map.Entry.<Long, Double>comparingByValue().reversed())
-                .limit(candidateLimit)
-                .map(Map.Entry::getKey)
-                .toList();
+        List<Long> candidateIds = rrfFuse(vectorIds, keywordIds, rc.rrfK, candidateLimit);
         log.info("RRF 融合 kb={} rrfK={} 向量={}条 关键词={}条 双路重叠={}条 融合去重={}条 候选={}条 vectorAvailable={} keywordAvailable={}",
                 kbId, rc.rrfK, vectorHits.size(), keywordIds.size(), overlap, rrf.size(),
                 candidateIds.size(), vectorAvailable, keywordAvailable);
@@ -259,6 +249,29 @@ public class RetrievalService {
         RetrievalResult result = new RetrievalResult(citations, bestScore, vectorAvailable, keywordAvailable);
         recordMetrics(result, System.currentTimeMillis() - retrievalStart);
         return result;
+    }
+
+    /**
+     * RRF 融合分数：score = Σ 1/(k + rank)。LinkedHashMap 保序，
+     * 分数相同时按首次出现顺序，保证检索与离线评测结果可复现。
+     */
+    static Map<Long, Double> rrfScores(List<Long> vectorIds, List<Long> keywordIds, int rrfK) {
+        Map<Long, Double> scores = new LinkedHashMap<>();
+        for (int i = 0; i < vectorIds.size(); i++) {
+            scores.merge(vectorIds.get(i), 1.0 / (rrfK + i + 1), Double::sum);
+        }
+        for (int i = 0; i < keywordIds.size(); i++) {
+            scores.merge(keywordIds.get(i), 1.0 / (rrfK + i + 1), Double::sum);
+        }
+        return scores;
+    }
+
+    /** RRF 排序（稳定排序，同分保持向量通道优先的首次出现顺序），检索与离线评测共用。 */
+    public static List<Long> rrfFuse(List<Long> vectorIds, List<Long> keywordIds, int rrfK, int limit) {
+        List<Map.Entry<Long, Double>> entries = new ArrayList<>(
+                rrfScores(vectorIds, keywordIds, rrfK).entrySet());
+        entries.sort(Map.Entry.<Long, Double>comparingByValue().reversed());
+        return entries.stream().limit(Math.max(0, limit)).map(Map.Entry::getKey).toList();
     }
 
     /** 检索指标（ISSUE RAG-004/RAG-011）：延迟、降级率、空召回率，通过 /actuator/metrics 暴露。 */

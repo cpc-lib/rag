@@ -40,7 +40,7 @@ public class StructureStrategy implements ChunkStrategy {
         int size = ctx.params().childSize();
         int overlap = ctx.params().overlap();
         List<ChunkSupport.Block> all = new ArrayList<>();
-        for (var page : ctx.pages()) {
+        for (var page : support.mergeContinuedTables(ctx.pages())) {
             String text = page.text();
             if (text == null || text.isBlank()) {
                 continue;

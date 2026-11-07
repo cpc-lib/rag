@@ -62,10 +62,11 @@ rag/
 | 死信重放 | 已实现 | `PipelineOpsService` | `POST /api/v1/ops/pipeline/dlq/replay`（平台管理员） |
 | 队列积压观测 | 已实现 | `PipelineOpsService#queueDepths` | `GET /api/v1/ops/pipeline/queues`（平台管理员） |
 | PDF 内嵌图片理解 | 已实现（OCR 可直接用，Vision 需配置） | `ParseService#extractImagesText` | 图文混排 PDF 检索图片内文字；图片描述追加到对应页码文本 |
+| 表格结构化（Word/Excel/HTML/CSV） | 已实现 | `pipeline/table/TableModel`、`ChunkSupport#mergeContinuedTables` | 多 Sheet Excel、合并单元格、跨页续接表格可按表头+数据行检索 |
 | 索引版本化 / 双版本切换 | 规划中 | — | 当前为「先删后写」，重建期间旧索引不可读 |
 | PDF 结构化 Block（标题/表格/图片） | 规划中 | — | 当前为文本层 + OCR + 版面排序 |
-| 统一表格结构化模型 | 规划中 | — | 当前按各解析器分别输出文本 |
-| RAG Evaluation 基线 | 规划中 | — | 尚未建立固定评测集与指标流水线 |
+| RAG Evaluation 基线（召回侧） | 已实现 | `rag-api/.../eval/RetrievalMetrics`、`RetrievalBaselineTest` | `mvn -f rag-api/pom.xml test -Dtest=RetrievalBaselineTest`，报告输出 `rag-api/target/eval/retrieval-baseline.json` |
+| RAG Evaluation 答案指标 | 规划中 | — | Faithfulness / Answer Relevance 需在线模型评测 |
 
 ### 索引与重建语义
 
@@ -144,7 +145,8 @@ npm run dev        # http://localhost:5173
 
 ```bash
 mvn -f rag-api/pom.xml clean compile -DskipTests
-mvn -f rag-worker/pom.xml clean test          # 唯一测试：ChunkPipelineTest
+mvn -f rag-api/pom.xml test                   # 租户隔离 + RAG 检索指标基线
+mvn -f rag-worker/pom.xml clean test          # 切片 / 解析 / 表格 / 状态机测试
 
 cd knowledge-console
 npm run typecheck                             # tsc --noEmit

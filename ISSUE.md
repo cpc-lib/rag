@@ -5,7 +5,7 @@
 > **审查基准提交**：[`44525dce952ca37a22230400881f47a9b8ff9b06`](https://github.com/cpc-lib/rag/commit/44525dce952ca37a22230400881f47a9b8ff9b06)（提交时间：2026-10-11 UTC）  
 > **整理日期**：2026-11-07  
 > **性质**：静态源码审查 / 待办 ISSUE；**未执行部署、端到端测试或生产压测**  
-> **状态**：P0（RAG-001 ~ RAG-005）基本修复，RAG-003/005 少量增强项待办；P1 已完成 RAG-006、RAG-011、RAG-012；复选框反映当前进度
+> **状态**：P0（RAG-001 ~ RAG-005）基本修复，RAG-003/005 少量增强项待办；P1 已完成 RAG-006、RAG-008、RAG-011、RAG-012，RAG-009/010 部分完成；复选框反映当前进度
 
 ## 0. 审查结论
 
@@ -100,8 +100,8 @@ flowchart TD
 | RAG-005 | P0 | 数据安全 | 防止 Milvus 探测失败触发危险重建 | [x] |
 | RAG-006 | P1 | 兼容性 | 统一文件上传白名单、解析器与切片路由 | [x] |
 | RAG-007 | P1 | 多模态 | 升级 PDF Layout / 内嵌图片抽取与理解 | 部分完成 |
-| RAG-008 | P1 | 内容质量 | 完善表格结构化抽取与跨页、跨块保护 | [ ] |
-| RAG-009 | P1 | 质量保障 | 建立 RAG Evaluation 与回归测试基线 | [ ] |
+| RAG-008 | P1 | 内容质量 | 完善表格结构化抽取与跨页、跨块保护 | [x] |
+| RAG-009 | P1 | 质量保障 | 建立 RAG Evaluation 与回归测试基线 | 部分完成 |
 | RAG-010 | P1 | 安全性 | 补齐多租户检索隔离与引用访问测试 | 部分完成 |
 | RAG-011 | P1 | 运维 | 入库状态机、重试恢复、可观测性闭环 | [x] |
 | RAG-012 | P1 | 文档一致性 | 修复 README / AGENTS / 规格与代码偏差 | [x] |
@@ -247,22 +247,24 @@ flowchart TD
 
 ### RAG-008：完善表格结构化与跨块保护
 
-- [ ] 对 Word、Excel、HTML、PDF 表格统一内部模型，保留表头、行列关系、合并单元格。
-- [ ] 同时生成原始结构、Markdown、可搜索 Summary（可选）及源位置。
-- [ ] 大表格按行组切分、重复表头，避免数据行与表头脱离。
-- [ ] 不将表格中的精确数字或主键只依赖 LLM Summary 表达。
-- [ ] 为跨页/超大表格、多 Sheet Excel 添加回归用例。
+- [x] 对 Word、Excel、HTML、CSV 表格统一内部模型（`worker/pipeline/table/TableModel`），保留表头、行列关系与合并单元格（Excel 合并区域、HTML colspan/rowspan、Word gridSpan）。
+- [x] 同时生成原始结构（Cell 网格）、Markdown、源位置（page / Sheet 名）；可搜索 Summary 为可选项，本轮未生成（精确值始终保留在 Markdown 中）。
+- [x] 大表格按行组切分、重复表头，避免数据行与表头脱离（`ChunkSupport.splitTable`）。
+- [x] 不将表格中的精确数字或主键只依赖 LLM Summary 表达（Excel 用 `DataFormatter` 保留日期/金额/编号显示格式，Markdown 保留原值）。
+- [x] 为跨页/超大表格、多 Sheet Excel 添加回归用例（`ChunkPipelineTest` 跨页续接/重复表头/三页表格/残缺行列；`ParseServiceTableTest` 多 Sheet、合并单元格；`TableModelTest` 行列对齐）。
+
+> PDF 表格仍走文本层 + `PDF_LAYOUT` 切片，bbox 级表格识别归入 RAG-007，未在本项实现。
 
 **验收**：金额、编号、日期、表头与所属行查询准确；重建后引用能回溯原表。
 
 ### RAG-009：建立 RAG Evaluation 基线
 
-- [ ] 建立固定评测集：普通问答、相似段落、精确编号、跨文档、多跳推理、表格、图片、无答案问题。
-- [ ] 检索指标：Recall@K、Precision@K、MRR@K、nDCG@K。
-- [ ] 答案指标：Faithfulness、Answer Relevance、Citation Precision、拒答正确率。
-- [ ] 记录基线版本、数据集、配置、模型、评测脚本与结果。
-- [ ] 在 CI 引入轻量确定性测试；昂贵的模型评测采用可复现的手动/按需流程。
-- [ ] 对 Rerank、Chunk Strategy、Top-K 变更输出前后对比。
+- [x] 建立固定评测集：普通问答、相似段落、精确编号、跨文档、多跳推理、表格、图片、无答案问题（`rag-api/src/test/resources/eval/retrieval-dataset.json`，测试校验八类齐全）。
+- [x] 检索指标：Recall@K、Precision@K、MRR@K、nDCG@K（`rag-api/src/test/java/com/rag/api/eval/RetrievalMetrics.java`）。
+- [ ] 答案指标：Faithfulness、Answer Relevance、Citation Precision、拒答正确率（需在线模型评测，按需执行）。
+- [x] 记录基线版本、数据集、配置、模型、评测脚本与结果（数据集内记录 `version/rrfK/topK/embeddingModel/rerank` 与基线值；每次测试输出 `rag-api/target/eval/retrieval-baseline.json`）。
+- [x] 在 CI 引入轻量确定性测试；昂贵的模型评测采用可复现的手动/按需流程（`RetrievalBaselineTest` 离线复用生产 `RetrievalService.rrfFuse`，不依赖 ES/Milvus/LLM）。
+- [ ] 对 Rerank、Chunk Strategy、Top-K 变更输出前后对比（RRF 基线已可复用，端到端对比需在线环境）。
 
 **验收**：同一份测试集可重复生成报告，关键指标回退有可追踪原因；无固定数据支撑时不宣称“准确率提高”。
 
