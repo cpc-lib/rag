@@ -17,6 +17,7 @@ import com.rag.api.infrastructure.persistence.mapper.PipelineTaskMapper;
 import com.rag.api.infrastructure.search.EsSearchClient;
 import com.rag.api.infrastructure.search.MilvusClientWrapper;
 import com.rag.api.infrastructure.storage.MinioStorage;
+import com.rag.api.interfaces.dto.Dtos;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
@@ -286,6 +287,41 @@ public class DocumentAppService {
         publisher.publish(msg);
         log.info("文档重新解析任务已投递 doc={} task={}", doc.getId(), task.getId());
         return doc;
+    }
+
+    /**
+     * 文档级索引对账（RAG-003）：DB 可索引 child 数与 ES/Milvus 实际条数逐一比对。
+     * 只读操作，任一存储探测失败不影响另一路结果，便于定位单边缺失或残留索引。
+     */
+    public Dtos.IndexStatusView indexStatus(long documentId) {
+        DocumentEntity doc = documentMapper.selectById(documentId);
+        if (doc == null) {
+            throw BizException.notFound("文档不存在");
+        }
+        KnowledgeBaseEntity kb = knowledgeBaseService.getOwned(doc.getKbId());
+        long dbCount = chunkMapper.selectChildrenByDocumentId(documentId).size();
+
+        Long esCount = null;
+        String esError = null;
+        try {
+            esCount = es.countByDocument(kb.getEsIndex(), documentId);
+        } catch (Exception e) {
+            esError = e.getMessage();
+        }
+        Long milvusCount = null;
+        String milvusError = null;
+        try {
+            milvusCount = milvus.countByDocument(kb.getMilvusCollection(), documentId,
+                    (int) Math.min(dbCount, 100_000));
+        } catch (Exception e) {
+            milvusError = e.getMessage();
+        }
+        boolean consistent = esCount != null && milvusCount != null
+                && esCount == dbCount && milvusCount == dbCount;
+        log.info("索引对账 doc={} db={} es={} milvus={} consistent={}",
+                documentId, dbCount, esCount, milvusCount, consistent);
+        return new Dtos.IndexStatusView(documentId, dbCount, esCount,
+                milvusCount, consistent, esError, milvusError);
     }
 
     public String downloadUrl(long documentId) {

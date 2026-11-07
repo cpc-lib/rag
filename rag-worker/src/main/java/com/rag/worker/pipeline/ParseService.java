@@ -71,7 +71,7 @@ public class ParseService {
                 if (TEXT_EXTS.contains(ext)) {
                     yield plainText(bytes);
                 }
-                throw new IllegalStateException("不支持的文件类型: " + ext);
+                throw new NonRetryableException("不支持的文件类型: " + ext);
             }
         };
     }

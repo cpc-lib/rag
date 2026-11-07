@@ -5,7 +5,7 @@
 > **审查基准提交**：[`44525dce952ca37a22230400881f47a9b8ff9b06`](https://github.com/cpc-lib/rag/commit/44525dce952ca37a22230400881f47a9b8ff9b06)（提交时间：2026-10-11 UTC）  
 > **整理日期**：2026-11-07  
 > **性质**：静态源码审查 / 待办 ISSUE；**未执行部署、端到端测试或生产压测**  
-> **状态**：P0（RAG-001 ~ RAG-005）已修复；P1 部分完成（RAG-006、RAG-012）；复选框反映当前进度
+> **状态**：P0（RAG-001 ~ RAG-005）基本修复，RAG-003/005 少量增强项待办；P1 已完成 RAG-006、RAG-011、RAG-012；复选框反映当前进度
 
 ## 0. 审查结论
 
@@ -93,18 +93,18 @@ flowchart TD
 
 | 编号 | 优先级 | 类型 | ISSUE | 状态 |
 |---|---|---|---|---|
-| RAG-001 | P0 | 功能缺口 | 接入 Qwen3-Rerank，打通二阶段精排 | [ ] |
-| RAG-002 | P0 | 可靠性 | 修复 RabbitMQ 提前 ACK 与并发拒绝后任务遗漏 | [ ] |
-| RAG-003 | P0 | 数据一致性 | 修复 Elasticsearch Bulk 部分失败与双索引不一致 | [ ] |
-| RAG-004 | P0 | 可用性 | Embedding 失败时支持 ES-only 检索降级 | [ ] |
-| RAG-005 | P0 | 数据安全 | 防止 Milvus 探测失败触发危险重建 | [ ] |
-| RAG-006 | P1 | 兼容性 | 统一文件上传白名单、解析器与切片路由 | [ ] |
+| RAG-001 | P0 | 功能缺口 | 接入 Qwen3-Rerank，打通二阶段精排 | [x] |
+| RAG-002 | P0 | 可靠性 | 修复 RabbitMQ 提前 ACK 与并发拒绝后任务遗漏 | [x] |
+| RAG-003 | P0 | 数据一致性 | 修复 Elasticsearch Bulk 部分失败与双索引不一致 | 部分完成 |
+| RAG-004 | P0 | 可用性 | Embedding 失败时支持 ES-only 检索降级 | [x] |
+| RAG-005 | P0 | 数据安全 | 防止 Milvus 探测失败触发危险重建 | 部分完成 |
+| RAG-006 | P1 | 兼容性 | 统一文件上传白名单、解析器与切片路由 | [x] |
 | RAG-007 | P1 | 多模态 | 升级 PDF Layout / 内嵌图片抽取与理解 | [ ] |
 | RAG-008 | P1 | 内容质量 | 完善表格结构化抽取与跨页、跨块保护 | [ ] |
 | RAG-009 | P1 | 质量保障 | 建立 RAG Evaluation 与回归测试基线 | [ ] |
 | RAG-010 | P1 | 安全性 | 补齐多租户检索隔离与引用访问测试 | [ ] |
-| RAG-011 | P1 | 运维 | 入库状态机、重试恢复、可观测性闭环 | [ ] |
-| RAG-012 | P1 | 文档一致性 | 修复 README / AGENTS / 规格与代码偏差 | [ ] |
+| RAG-011 | P1 | 运维 | 入库状态机、重试恢复、可观测性闭环 | [x] |
+| RAG-012 | P1 | 文档一致性 | 修复 README / AGENTS / 规格与代码偏差 | [x] |
 | RAG-013 | P2 | 检索质量 | Query Rewrite / Multi-Query / 意图识别 | [ ] |
 | RAG-014 | P2 | 检索质量 | ES 中文分词、检索调优与 Recall 性能优化 | [ ] |
 | RAG-015 | P2 | 智能编排 | Agentic RAG 与工具检索统一编排 | [ ] |
@@ -165,7 +165,7 @@ flowchart TD
 - **现状**：`EsIndexer.indexDocs()` 对 `BulkResponse.errors()` 仅警告；`PipelineProcessor.indexAll()` 先写 Milvus，再写 ES，最终可能将不完整索引标记为 READY。
 - **建议实施**：
   - [x] 解析 Bulk 每个 item 的失败状态与原因；失败须抛出可重试异常或执行精准重试。
-  - [ ] 建立文档级索引版本、索引写入统计与对账；明确双写部分失败的补偿机制。
+  - [x] 建立文档级索引写入统计与对账；明确双写部分失败的补偿机制。（新增 `GET /api/v1/documents/{id}/index-status`，比对 DB 可索引 child 数 / ES / Milvus 三方条数；任一路探测失败单独返回 error，不掩盖另一路）
   - [x] INDEXING → READY 前校验预期 children 与两个索引的可检索数量/版本是否一致。
   - [ ] 重建索引期间保证旧索引可读，设计失败回滚或双版本切换策略；避免先删除旧版本后失败导致知识不可用。
   - [ ] 明确删除、重建、手动编辑 chunk 的重索引语义。
@@ -185,7 +185,7 @@ flowchart TD
   - [x] 向量通道失败时仍执行 ES BM25；关键词通道失败时保留向量结果。
   - [x] 双通道均失败时返回明确错误，而不是伪装成“知识库无匹配结果”。
   - [x] 分别记录鉴权、限流、超时与内部错误；对不可恢复的 401 不做无意义持续重试。
-  - [ ] 将 `vector_available` / `keyword_available` / `degraded` 注入 trace 和检索指标。
+  - [x] 将 `vector_available` / `keyword_available` / `degraded` 注入 trace 和检索指标。（SSE `search_result` 已携带；新增 Micrometer 指标 `rag.retrieval.duration` / `rag.retrieval.total` / `rag.retrieval.empty` / `rag.retrieval.channel_unavailable`，经 `/actuator/metrics` 暴露）
 - **验收标准**：分别注入 Embedding 401、429、超时、Milvus 连接失败、ES 不可用，验证降级路径与错误语义。
 - **涉及文件**：[`RetrievalService.java`](https://github.com/cpc-lib/rag/blob/main/rag-api/src/main/java/com/rag/api/application/RetrievalService.java)、`LlmClient.java`。
 
@@ -211,9 +211,24 @@ flowchart TD
 
 **现状**：`README.md` 宣称 CSV、代码文件等支持，但 `DocumentAppService.ALLOWED_EXT` 和 `ParseService.parse()` 实际支持范围有限；`ChunkStrategyRouter` 对代码扩展名的路由并不等于这些文件能成功上传和解析。
 
-- [ ] 制定格式支持矩阵：扩展名、MIME、解析器、切片模式、图片/表格能力、错误处理。
+- [x] 制定格式支持矩阵：扩展名、MIME、解析器、切片模式、图片/表格能力、错误处理。
+
+| 扩展名 | 解析器 | AUTO 切片 | 说明 / 错误处理 |
+|---|---|---|---|
+| `txt` `md` | 文本直读（去 BOM） | PARENT_CHILD | 空文件解析为空页，切片阶段给出"未提取到可检索内容" |
+| `json` `xml` `yml` `yaml` `sql` `log` `ini` `conf` `properties` | 文本直读 | PARENT_CHILD | 不解析结构，按原文切片 |
+| `java` `py` `go` `js` `jsx` `ts` `tsx` | 文本直读 | CODE | 代码切片按语言结构 |
+| `csv` | RFC4180 解析 → Markdown 表格 | PARENT_CHILD | 支持引号内逗号/换行与 BOM |
+| `docx` `xlsx` | Apache POI | PARENT_CHILD / TABLE | 扫描件无文本时返回告警 |
+| `pdf` | PDFBox 2.x 文本层 + 扫描页 Tess4J OCR | PDF_LAYOUT | OCR 不可用时降级为文本层并告警 |
+| `html` `htm` | jsoup 去标签 | HTML | — |
+| `png` `jpg` `jpeg` | OCR + Vision | PARENT_CHILD | Vision 未配置/失败时保留 OCR 文本 |
+| `ppt` `pptx` | 不支持 | — | 上传白名单直接拒绝（`NonRetryableException` 不会进入重试） |
+
+> MIME 不参与路由：统一按扩展名白名单校验（`DocumentAppService.ALLOWED_EXT`），伪造 Content-Type 不会绕过限制；超大文件由 multipart 上限拦截。
+
 - [x] 按业务优先级补齐 CSV、JSON、PPT/PPTX、代码文件等，或删去文档中尚不支持的承诺。（已补齐 CSV/JSON/常见代码文件并统一上传白名单、解析器与 UI 声明；PPT/PPTX 尚未支持，文档未作承诺）
-- [ ] 增加空文件、错误扩展名、伪造 MIME、编码异常与超大文件测试。
+- [x] 增加空文件、错误扩展名、伪造 MIME、编码异常与超大文件测试。（`ParseServiceFormatTest` 覆盖空文件、CSV 引号逗号/BOM、JSON/代码直读、不支持扩展名；伪造 MIME 由扩展名白名单消解，超大文件由 multipart 上限拦截）
 - [x] 确保上传校验、Worker 解析、切片策略和 UI 声明完全一致。
 
 **验收**：每个宣称支持的文件格式均能完成 `upload → parse → index → retrieve` 集成测试；未支持类型被明确拒绝。
@@ -265,22 +280,22 @@ flowchart TD
 
 ### RAG-011：入库状态机、故障恢复与可观测性
 
-- [ ] 明确 `UPLOADED → PARSING → CHUNKING → EMBEDDING → INDEXING → READY` 与 `FAILED/STOPPED` 的合法转换。
-- [ ] 追踪 `taskId / documentId / tenantId / kbId / stage / retryCount / errorCode`。
-- [ ] 区分用户主动停止、短暂失败、不可重试配置错误。
-- [ ] 增加 Worker 崩溃恢复、僵尸任务扫描、死信重放、幂等重建。
-- [ ] 监控队列积压、解析耗时、Embedding 429、索引失败、检索延迟 P95、降级率与空召回率。
-- [ ] 核对上传完成后需要手动启动处理的 UI 说明与操作引导。
+- [x] 明确 `UPLOADED → PARSING → CHUNKING → EMBEDDING → INDEXING → READY` 与 `FAILED/STOPPED` 的合法转换。（`worker/pipeline/DocumentStage` 集中定义允许的转换，`PipelineProcessor.setStage` 对非法转换直接抛错）
+- [x] 追踪 `taskId / documentId / tenantId / kbId / stage / retryCount / errorCode`。（结构化日志已带全字段；errorCode 取值 `STOPPED_BY_USER / RETRYABLE / RETRY_EXHAUSTED / NON_RETRYABLE`）
+- [x] 区分用户主动停止、短暂失败、不可重试配置错误。（`StoppedException` → CANCELLED；`NonRetryableException` → 直接 FAILED；其余进入延迟重试/DLQ）
+- [x] 增加 Worker 崩溃恢复、僵尸任务扫描、死信重放、幂等重建。（`StaleTaskRecovery` 重投僵尸任务；`POST /api/v1/ops/pipeline/dlq/replay` 重放 DLQ；claim 条件领取 + 先删后写保证幂等）
+- [x] 监控队列积压、解析耗时、Embedding 429、索引失败、检索延迟 P95、降级率与空召回率。（`GET /api/v1/ops/pipeline/queues`；Worker 阶段耗时日志 `stage=... costMs=...`；API 侧 Micrometer 检索/降级/空召回/Rerank 指标）
+- [x] 核对上传完成后需要手动启动处理的 UI 说明与操作引导。（知识库详情页已提示"上传后需手动点击开始处理"）
 
 **验收**：任意阶段故障有可查原因、可恢复路径和对应监控；不存在永久无归属的 PENDING/RUNNING 任务。
 
 ### RAG-012：保持 README、AGENTS、设计规格与代码一致
 
-- [ ] 将 `README.md`、`AGENTS.md` 与 `RAG_DOCUMENT_PROCESSING_PIPELINE.md` 区分为“已实现”“规划中”“依赖配置”。
+- [x] 将 `README.md`、`AGENTS.md` 与 `RAG_DOCUMENT_PROCESSING_PIPELINE.md` 区分为“已实现”“规划中”“依赖配置”。（README 新增“能力实现与验收”矩阵，逐项标注状态）
 - [x] Rerank 未接入前不得描述为当前主链路已实现；接入完成后同步更新。
 - [x] 文件类型只列实际可上传、可解析、可检索的范围。
 - [x] 统一模块说明、Java 版本、Flyway 规范与构建方式；以当前 `AGENTS.md` 约束为准。
-- [ ] 为每个能力提供源码入口和端到端验收方法。
+- [x] 为每个能力提供源码入口和端到端验收方法。（见 README“能力实现与验收”表）
 
 **验收**：用户按 README 完成配置后，不会因隐藏前提或已过时描述导致必然失败。
 

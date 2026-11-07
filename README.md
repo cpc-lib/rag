@@ -29,10 +29,12 @@
 
 ## 模块结构
 
-三个模块各自独立 pom.xml，**无 Maven 父子聚合**：
+三个后端模块各自独立 pom.xml（均以 `spring-boot-starter-parent` 为 parent，**模块间无父子继承**），根目录另有纯聚合 `pom.xml` 仅用于一键构建：
 
 ```
 rag/
+├── pom.xml             # 聚合构建（packaging=pom，仅含 modules）
+├── rag-common/         # 公共 jar：25 张表实体 + Mapper + MyBatis XML + 自动填充配置
 ├── rag-api/            # REST API + SSE 问答 + 鉴权 + 管理后台接口（端口 8080）
 ├── rag-worker/         # 非 Web 进程，RabbitMQ 消费者，文档解析/切片/向量化/双写/视频转码
 ├── knowledge-console/  # React 管理控制台（端口 5173，/api 代理到 8080）
@@ -40,8 +42,29 @@ rag/
 └── rag-api/src/main/resources/db/migration/  # Flyway 迁移脚本
 ```
 
-- rag-api 与 rag-worker 是两套独立的实体类（`com.rag.api.*` / `com.rag.worker.*`），不可互相引用
+- 持久层统一在 `rag-common`（`com.rag.api.infrastructure.persistence.*`），api 与 worker 共享实体/Mapper/XML，**不存在两套实体类**
+- 构建顺序：`mvn clean install`（根目录 reactor 自动先装 rag-common）；单独构建 api/worker 前需先 install rag-common
 - 两个后端进程必须连接同一套中间件，并使用相同的 JWT 密钥与模型配置
+
+## 能力实现与验收
+
+> 状态含义：**已实现** = 代码可运行；**依赖配置** = 需在模型/系统配置页启用；**规划中** = 尚未实现，不应按现有能力宣传。
+
+| 能力 | 状态 | 源码入口 | 验收方法 |
+|---|---|---|---|
+| 混合检索（向量 + BM25 + RRF） | 已实现 | `rag-api/.../RetrievalService` | 提问后查看 SSE `search_result` 的 citations 与 `degraded` 字段 |
+| Rerank 二阶段精排 | 依赖配置（RERANK 模型） | `RerankClient`、`RetrievalService#rerankIfEnabled` | 启用前后对比 Top-K 顺序；`/actuator/metrics/rag.rerank.outcome` |
+| 检索通道降级 | 已实现 | `RetrievalService` 通道级 try/catch | 停用 ES 或 Embedding 后提问：仍返回引用且 `degraded=true`；双通道故障返回 UPSTREAM 错误 |
+| 检索可观测性 | 已实现 | Micrometer 指标 `rag.retrieval.*` | `GET /actuator/metrics/rag.retrieval.duration`（含 P95） |
+| 上传 → 解析 → 切片 → 双写 | 已实现 | `DocumentAppService`、`PipelineProcessor` | 上传后点击「开始处理」，文档状态到 READY 且进度 100 |
+| 双索引一致性校验 | 已实现 | `PipelineProcessor#indexAll` | `GET /api/v1/documents/{id}/index-status` 返回 `consistent=true` |
+| 任务可靠性（claim / 重试 / 僵尸恢复） | 已实现 | `IngestConsumer`、`StaleTaskRecovery` | 并发饱和不丢任务；重启后超时 PENDING/RUNNING 被重投 |
+| 死信重放 | 已实现 | `PipelineOpsService` | `POST /api/v1/ops/pipeline/dlq/replay`（平台管理员） |
+| 队列积压观测 | 已实现 | `PipelineOpsService#queueDepths` | `GET /api/v1/ops/pipeline/queues`（平台管理员） |
+| 索引版本化 / 双版本切换 | 规划中 | — | 当前为「先删后写」，重建期间旧索引不可读 |
+| PDF 结构化 Block（标题/表格/图片） | 规划中 | — | 当前为文本层 + OCR + 版面排序 |
+| 统一表格结构化模型 | 规划中 | — | 当前按各解析器分别输出文本 |
+| RAG Evaluation 基线 | 规划中 | — | 尚未建立固定评测集与指标流水线 |
 
 ## 快速开始
 

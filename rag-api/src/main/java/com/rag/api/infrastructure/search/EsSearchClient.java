@@ -72,10 +72,34 @@ public class EsSearchClient {
             }
             BulkResponse resp = client.bulk(bulk.build());
             if (resp.errors()) {
-                log.warn("ES bulk 存在部分错误 index={} size={}", index, docs.size());
+                // 部分 item 失败不能视为成功，否则调用方会把不完整索引当作已就绪
+                List<String> failures = new ArrayList<>();
+                for (var item : resp.items()) {
+                    if (item.error() != null) {
+                        failures.add("id=" + item.id() + " status=" + item.status()
+                                + " reason=" + item.error().reason());
+                    }
+                }
+                log.error("ES bulk 部分写入失败 index={} 失败={}/{} 首个原因: {}",
+                        index, failures.size(), docs.size(), failures.isEmpty() ? "unknown" : failures.get(0));
+                throw new BizException(ErrorCode.UPSTREAM, "ES 部分写入失败（" + failures.size()
+                        + "/" + docs.size() + "）: " + (failures.isEmpty() ? "unknown" : failures.get(0)));
             }
+        } catch (BizException e) {
+            throw e;
         } catch (Exception e) {
             throw new BizException(ErrorCode.UPSTREAM, "ES 写入失败: " + e.getMessage());
+        }
+    }
+
+    /** 统计某文档在 ES 中的切片数（索引对账用）。 */
+    public long countByDocument(String index, long documentId) {
+        try {
+            var resp = client.count(c -> c.index(index)
+                    .query(q -> q.term(t -> t.field("documentId").value(String.valueOf(documentId)))));
+            return resp.count();
+        } catch (Exception e) {
+            throw new BizException(ErrorCode.UPSTREAM, "ES 统计文档切片数失败: " + e.getMessage());
         }
     }
 

@@ -178,6 +178,17 @@ public class MilvusClientWrapper {
         return resp.getQueryResults().size();
     }
 
+    /** 统计某文档在集合中的向量数（索引对账用，limit=expected+1 足以判定是否一致）。 */
+    public long countByDocument(String collection, long documentId, int expected) {
+        var resp = client().query(io.milvus.v2.service.vector.request.QueryReq.builder()
+                .collectionName(collection)
+                .filter("document_id == " + documentId)
+                .outputFields(List.of("chunk_id"))
+                .limit(Math.max(1, expected + 1))
+                .build());
+        return resp == null || resp.getQueryResults() == null ? 0 : resp.getQueryResults().size();
+    }
+
     public void insert(String collection, List<long[]> ids, List<float[]> vectors) {
         List<JsonObject> rows = new ArrayList<>(ids.size());
         for (int i = 0; i < ids.size(); i++) {

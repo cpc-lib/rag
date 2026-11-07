@@ -57,6 +57,10 @@ public class PipelineProcessor {
     private final DocProgressPublisher docProgressPublisher;
 
     public void process(RetryPublisher.IngestMessage msg, PipelineTaskEntity task) {
+        long startedAt = System.currentTimeMillis();
+        log.info("流水线开始 task={} doc={} tenant={} kb={} type={} retry={} resume={}",
+                msg.taskId(), msg.documentId(), msg.tenantId(), msg.kbId(), msg.type(),
+                task.getRetryCount(), msg.resume());
         DocumentEntity doc = documentMapper.selectById(msg.documentId());
         if (doc == null) {
             throw new IllegalStateException("文档不存在: " + msg.documentId());
@@ -70,7 +74,7 @@ public class PipelineProcessor {
         ModelEntity vision = findEnabled(msg.tenantId(), VISION);
         ModelEntity embedding = findEnabled(msg.tenantId(), EMBEDDING);
         if (embedding == null) {
-            throw new IllegalStateException("租户未启用向量(EMBEDDING)模型，无法处理文档");
+            throw new NonRetryableException("租户未启用向量(EMBEDDING)模型，无法处理文档");
         }
         if ("PARSE".equalsIgnoreCase(msg.type())) {
             parseFlow(doc, kb, vision, embedding, msg.resume());
@@ -78,6 +82,8 @@ public class PipelineProcessor {
             reindexFlow(doc, kb, embedding);
         }
         task.setStatus("SUCCESS");
+        log.info("流水线成功 task={} doc={} costMs={}",
+                msg.taskId(), msg.documentId(), System.currentTimeMillis() - startedAt);
     }
 
     private ModelEntity findEnabled(String tenantId, String type) {
@@ -92,13 +98,17 @@ public class PipelineProcessor {
             log.info("文档从断点继续处理（跳过解析/切片）doc={}", doc.getId());
         } else {
             setStage(doc, "PARSING", 5);
+            long parseStart = System.currentTimeMillis();
             ParseService.ParseOutcome outcome = parseService.parse(doc, vision);
             doc.setPageCount(outcome.pages().size());
             doc.setWarning(outcome.warnings().isEmpty() ? null : String.join("；", outcome.warnings()));
             setStage(doc, "PARSING", 20);
+            log.info("阶段完成 doc={} stage=PARSING costMs={} pages={} warnings={}",
+                    doc.getId(), System.currentTimeMillis() - parseStart, outcome.pages().size(), outcome.warnings());
             checkStop(doc);
 
             setStage(doc, "CHUNKING", 25);
+            long chunkStart = System.currentTimeMillis();
             ChunkContext chunkCtx = new ChunkContext(doc.getTenantId(), doc.getId(), doc.getFileName(),
                     doc.getObjectKey(), outcome.pages(), chunkParams(kb));
             ChunkStrategy strategy = strategyRouter.route(kb.getChunkStrategy(), doc.getFileName());
@@ -110,9 +120,9 @@ public class PipelineProcessor {
             setStage(doc, "CHUNKING", 40);
             int children = plans.stream().mapToInt(p -> p.children().size()).sum();
             int parents = (int) plans.stream().filter(ChunkPlan::parentChild).count();
-            log.info("文档解析切片完成 doc={} strategy={} pages={} parents={} children={} warnings={}",
-                    doc.getId(), strategy.mode(), outcome.pages().size(), parents, children,
-                    outcome.warnings());
+            log.info("阶段完成 doc={} stage=CHUNKING costMs={} strategy={} pages={} parents={} children={} warnings={}",
+                    doc.getId(), System.currentTimeMillis() - chunkStart, strategy.mode(), outcome.pages().size(),
+                    parents, children, outcome.warnings());
         }
         checkStop(doc);
         indexAll(doc, kb, embedding, 45, 78, 85);
@@ -157,7 +167,7 @@ public class PipelineProcessor {
     private void indexAll(DocumentEntity doc, KnowledgeBaseEntity kb, ModelEntity embedding,
                           int embStart, int embEnd, int idxStart) {
         if (embedding.getModel() == null) {
-            throw new IllegalStateException("启用的向量(EMBEDDING)模型缺少模型名称");
+            throw new NonRetryableException("启用的向量(EMBEDDING)模型缺少模型名称");
         }
         List<ChunkEntity> chunks = chunkMapper.selectChildrenByDocumentId(doc.getId());
         if (chunks.isEmpty()) {
@@ -174,6 +184,7 @@ public class PipelineProcessor {
             return;
         }
         setStage(doc, "EMBEDDING", embStart);
+        long embedStart = System.currentTimeMillis();
         List<String> contents = chunks.stream().map(c -> embeddingText(doc, c)).toList();
         int totalBatches = (contents.size() + 9) / 10;
         List<float[]> vectors;
@@ -194,9 +205,12 @@ public class PipelineProcessor {
             throw ce;
         }
         setStage(doc, "EMBEDDING", embEnd);
+        log.info("阶段完成 doc={} stage=EMBEDDING costMs={} chunks={} batches={}",
+                doc.getId(), System.currentTimeMillis() - embedStart, chunks.size(), totalBatches);
         checkStop(doc);
 
         setStage(doc, "INDEXING", idxStart);
+        long indexStart = System.currentTimeMillis();
         int dim = embedding.getEmbeddingDim() == null ? vectors.get(0).length : embedding.getEmbeddingDim();
         milvusIndexer.ensureCollection(kb.getMilvusCollection(), dim);
         milvusIndexer.deleteByDocument(kb.getMilvusCollection(), doc.getId());
@@ -220,8 +234,8 @@ public class PipelineProcessor {
             throw new IllegalStateException("双索引写入数量不一致 doc=" + doc.getId()
                     + " expected=" + chunks.size() + " es=" + esCount + " milvus=" + milvusCount);
         }
-        log.info("双索引一致性校验通过 doc={} chunks={} es={} milvus={}",
-                doc.getId(), chunks.size(), esCount, milvusCount);
+        log.info("阶段完成 doc={} stage=INDEXING costMs={} chunks={} es={} milvus={}",
+                doc.getId(), System.currentTimeMillis() - indexStart, chunks.size(), esCount, milvusCount);
     }
 
     /**
@@ -324,6 +338,12 @@ public class PipelineProcessor {
     }
 
     private void setStage(DocumentEntity doc, String status, int progress) {
+        DocumentStage from = DocumentStage.of(doc.getStatus());
+        DocumentStage to = DocumentStage.of(status);
+        if (!DocumentStage.canTransit(from, to)) {
+            throw new IllegalStateException("非法文档状态转换 doc=" + doc.getId()
+                    + " " + from + " -> " + to);
+        }
         doc.setStatus(status);
         doc.setProgress(progress);
         documentMapper.updateById(doc);

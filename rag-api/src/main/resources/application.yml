@@ -60,7 +60,7 @@ management:
   endpoints:
     web:
       exposure:
-        include: health,info
+        include: health,info,metrics
   health:
     # RabbitMQ 为可选组件（仅文档处理链路依赖，Worker 端需自备），健康检查禁用避免无 RabbitMQ 时 /actuator/health 抛异常
     rabbit:

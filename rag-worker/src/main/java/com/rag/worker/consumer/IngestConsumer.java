@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.rabbitmq.client.Channel;
 import com.rag.worker.mq.RetryPublisher;
 import com.rag.worker.mq.TenantMqSemaphore;
+import com.rag.worker.pipeline.NonRetryableException;
 import com.rag.worker.pipeline.PipelineProcessor;
 import com.rag.worker.pipeline.StoppedException;
 import com.rag.api.infrastructure.persistence.entity.DocumentEntity;
@@ -110,7 +111,22 @@ public class IngestConsumer {
             // 用户主动停止：任务置 CANCELLED，不进入重试
             task.setStatus("CANCELLED");
             taskMapper.updateById(task);
-            log.info("任务已被用户停止 task={}", msg.taskId());
+            log.info("任务已被用户停止 task={} doc={} errorCode=STOPPED_BY_USER",
+                    msg.taskId(), msg.documentId());
+        } catch (NonRetryableException e) {
+            // 配置/输入错误重试无意义：直接终态，保留可查原因
+            String error = e.getMessage() == null ? e.getClass().getSimpleName() : e.getMessage();
+            task.setStatus("FAILED");
+            task.setErrorMsg(abbreviate(error));
+            taskMapper.updateById(task);
+            DocumentEntity doc = documentMapper.selectById(msg.documentId());
+            if (doc != null) {
+                doc.setStatus("FAILED");
+                doc.setErrorMsg(abbreviate(error));
+                documentMapper.updateById(doc);
+            }
+            log.error("任务不可重试，已置 FAILED task={} doc={} errorCode=NON_RETRYABLE reason={}",
+                    msg.taskId(), msg.documentId(), error);
         } catch (Exception e) {
             handleFailure(msg, task, e);
         } finally {
@@ -138,7 +154,8 @@ public class IngestConsumer {
             taskMapper.updateById(task);
             long delay = retryBaseDelayMs * nextRetry;
             retryPublisher.publishRetry(msg, delay);
-            log.info("任务将延迟 {}ms 后第 {} 次重试 task={}", delay, nextRetry, msg.taskId());
+            log.info("任务将延迟 {}ms 后第 {}/{} 次重试 task={} doc={} errorCode=RETRYABLE",
+                    delay, nextRetry, maxRetry, msg.taskId(), msg.documentId());
         } else {
             task.setStatus("FAILED");
             taskMapper.updateById(task);
@@ -152,7 +169,8 @@ public class IngestConsumer {
                 retryPublisher.publishDlq(msg);
             } catch (Exception ignored) {
             }
-            log.error("任务重试超限，已入 DLQ task={}", msg.taskId());
+            log.error("任务重试超限，已入 DLQ task={} doc={} retry={} errorCode=RETRY_EXHAUSTED",
+                    msg.taskId(), msg.documentId(), nextRetry);
         }
     }
 

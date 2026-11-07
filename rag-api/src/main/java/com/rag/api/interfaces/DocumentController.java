@@ -4,6 +4,7 @@ import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import com.rag.api.application.DocumentAppService;
 import com.rag.api.common.ApiResult;
 import com.rag.api.infrastructure.persistence.entity.DocumentEntity;
+import com.rag.api.interfaces.dto.Dtos;
 import lombok.RequiredArgsConstructor;
 import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
@@ -53,6 +54,12 @@ public class DocumentController {
     @PostMapping("/api/v1/documents/{id}/reparse")
     public ApiResult<DocumentEntity> reparse(@PathVariable long id) {
         return ApiResult.ok(documentAppService.reparse(id));
+    }
+
+    /** 文档级双索引对账：DB / ES / Milvus 三方条数比对，用于确认写入是否一致。 */
+    @GetMapping("/api/v1/documents/{id}/index-status")
+    public ApiResult<Dtos.IndexStatusView> indexStatus(@PathVariable long id) {
+        return ApiResult.ok(documentAppService.indexStatus(id));
     }
 
     @GetMapping("/api/v1/documents/{id}/download-url")

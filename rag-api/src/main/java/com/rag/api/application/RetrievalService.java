@@ -16,10 +16,12 @@ import com.rag.api.infrastructure.persistence.mapper.KnowledgeBaseMapper;
 import com.rag.api.infrastructure.search.EsSearchClient;
 import com.rag.api.infrastructure.search.MilvusClientWrapper;
 import com.rag.api.infrastructure.storage.MinioStorage;
+import io.micrometer.core.instrument.MeterRegistry;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.HashMap;
@@ -70,8 +72,10 @@ public class RetrievalService {
     private final EsSearchClient es;
     private final MinioStorage minio;
     private final EtcdService etcdService;
+    private final MeterRegistry meterRegistry;
 
     public RetrievalResult retrieve(TenantContext.Session session, long kbId, String question) {
+        long retrievalStart = System.currentTimeMillis();
         KnowledgeBaseEntity kb = kbMapper.selectById(kbId);
         if (kb == null) {
             throw BizException.notFound("知识库不存在");
@@ -120,8 +124,15 @@ public class RetrievalService {
         }
         // 双通道均不可用属于基础设施故障，必须显式报错，不能伪装成"知识库无匹配"
         if (!vectorAvailable && !keywordAvailable) {
+            meterRegistry.counter("rag.retrieval.channel_unavailable", "channel", "all").increment();
             throw new BizException(ErrorCode.UPSTREAM,
                     "向量检索与关键词检索均不可用，请检查向量模型与 Elasticsearch 配置");
+        }
+        if (!vectorAvailable) {
+            meterRegistry.counter("rag.retrieval.channel_unavailable", "channel", "vector").increment();
+        }
+        if (!keywordAvailable) {
+            meterRegistry.counter("rag.retrieval.channel_unavailable", "channel", "keyword").increment();
         }
         double bestScore = vectorHits.stream().mapToDouble(MilvusClientWrapper.MilvusHit::score)
                 .max().orElse(0.0);
@@ -244,7 +255,20 @@ public class RetrievalService {
             usedTokens += citationTokens;
             seq++;
         }
-        return new RetrievalResult(citations, bestScore, vectorAvailable, keywordAvailable);
+        RetrievalResult result = new RetrievalResult(citations, bestScore, vectorAvailable, keywordAvailable);
+        recordMetrics(result, System.currentTimeMillis() - retrievalStart);
+        return result;
+    }
+
+    /** 检索指标（ISSUE RAG-004/RAG-011）：延迟、降级率、空召回率，通过 /actuator/metrics 暴露。 */
+    private void recordMetrics(RetrievalResult result, long costMs) {
+        String degraded = Boolean.toString(result.degraded());
+        meterRegistry.timer("rag.retrieval.duration", "degraded", degraded)
+                .record(Duration.ofMillis(Math.max(0, costMs)));
+        meterRegistry.counter("rag.retrieval.total", "degraded", degraded).increment();
+        if (result.citations().isEmpty()) {
+            meterRegistry.counter("rag.retrieval.empty", "degraded", degraded).increment();
+        }
     }
 
     /**
@@ -259,6 +283,7 @@ public class RetrievalService {
         }
         ModelEntity rerank = modelService.findEnabled(kb.getTenantId(), ModelService.RERANK);
         if (rerank == null || rerank.getModel() == null) {
+            meterRegistry.counter("rag.rerank.outcome", "outcome", "not_configured").increment();
             return rrfOrdered;
         }
         Map<Long, ChunkEntity> candidates = chunkMapper.selectByIds(candidateIds).stream()
@@ -266,6 +291,7 @@ public class RetrievalService {
                 .collect(Collectors.toMap(ChunkEntity::getId, Function.identity(), (a, b) -> a));
         List<Long> validIds = candidateIds.stream().filter(candidates::containsKey).toList();
         if (validIds.isEmpty()) {
+            meterRegistry.counter("rag.rerank.outcome", "outcome", "no_candidate").increment();
             return List.of();
         }
         List<String> documents = validIds.stream().map(id -> candidates.get(id).getContent()).toList();
@@ -274,6 +300,7 @@ public class RetrievalService {
             List<RerankClient.RerankHit> hits = rerankClient.rerank(
                     rerank.getBaseUrl(), rerank.getApiKey(), rerank.getModel(), question, documents, topK);
             if (hits.isEmpty()) {
+                meterRegistry.counter("rag.rerank.outcome", "outcome", "empty").increment();
                 log.warn("Rerank 返回空结果，降级使用 RRF 排序 kb={}", kb.getId());
                 return rrfOrdered;
             }
@@ -287,6 +314,7 @@ public class RetrievalService {
                 }
             }
             if (ordered.isEmpty()) {
+                meterRegistry.counter("rag.rerank.outcome", "outcome", "invalid").increment();
                 log.warn("Rerank 结果索引全部越界，降级使用 RRF 排序 kb={}", kb.getId());
                 return rrfOrdered;
             }
@@ -300,10 +328,14 @@ public class RetrievalService {
                 }
             }
             List<Long> result = ordered.stream().limit(topK).toList();
+            long cost = System.currentTimeMillis() - start;
+            meterRegistry.counter("rag.rerank.outcome", "outcome", "applied").increment();
+            meterRegistry.timer("rag.rerank.duration").record(Duration.ofMillis(cost));
             log.info("Rerank 精排完成 kb={} 候选={}条 返回={}条 耗时={}ms ids={}",
-                    kb.getId(), validIds.size(), hits.size(), System.currentTimeMillis() - start, result);
+                    kb.getId(), validIds.size(), hits.size(), cost, result);
             return result;
         } catch (Exception e) {
+            meterRegistry.counter("rag.rerank.outcome", "outcome", "error").increment();
             log.warn("Rerank 调用失败，降级使用 RRF 排序 kb={}: {}", kb.getId(), e.getMessage());
             return rrfOrdered;
         }
