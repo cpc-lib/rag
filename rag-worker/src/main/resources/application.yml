@@ -69,7 +69,8 @@ rag:
     tessdata: ${RAG_OCR_TESSDATA:}
     langs: ${RAG_OCR_LANGS:chi_sim+eng}
   es:
-    analyzer: ${RAG_ES_ANALYZER:standard}
+    # 与 rag-api 保持一致：cjk 为 ES 内置中文二元分词（无需插件）；修改后需删除旧索引并重建文档索引
+    analyzer: ${RAG_ES_ANALYZER:cjk}
   llm:
     timeout-seconds: 60
   worker:

@@ -5,7 +5,7 @@
 > **审查基准提交**：[`44525dce952ca37a22230400881f47a9b8ff9b06`](https://github.com/cpc-lib/rag/commit/44525dce952ca37a22230400881f47a9b8ff9b06)（提交时间：2026-10-11 UTC）  
 > **整理日期**：2026-11-07  
 > **性质**：静态源码审查 / 待办 ISSUE；**未执行部署、端到端测试或生产压测**  
-> **状态**：P0（RAG-001 ~ RAG-005）基本修复，RAG-003 采用「先写后删」（别名级双版本并行读取列为后续增强），RAG-005 少量增强项待办；P1 已完成 RAG-006、RAG-008、RAG-010、RAG-011、RAG-012，RAG-007/009 部分完成；复选框反映当前进度
+> **状态**：P0（RAG-001 ~ RAG-005）基本修复，RAG-003 采用「先写后删」（别名级双版本并行读取列为后续增强），RAG-005 少量增强项待办；P1 已完成 RAG-006、RAG-008、RAG-010、RAG-011、RAG-012，RAG-007/009 部分完成；P2 RAG-014 部分完成（真实数据调优待评测）；复选框反映当前进度
 
 ## 0. 审查结论
 
@@ -106,7 +106,7 @@ flowchart TD
 | RAG-011 | P1 | 运维 | 入库状态机、重试恢复、可观测性闭环 | [x] |
 | RAG-012 | P1 | 文档一致性 | 修复 README / AGENTS / 规格与代码偏差 | [x] |
 | RAG-013 | P2 | 检索质量 | Query Rewrite / Multi-Query / 意图识别 | [ ] |
-| RAG-014 | P2 | 检索质量 | ES 中文分词、检索调优与 Recall 性能优化 | [ ] |
+| RAG-014 | P2 | 检索质量 | ES 中文分词、检索调优与 Recall 性能优化 | 部分完成 |
 | RAG-015 | P2 | 智能编排 | Agentic RAG 与工具检索统一编排 | [ ] |
 
 ---
@@ -317,11 +317,11 @@ flowchart TD
 
 ### RAG-014：ES 分词与召回参数优化（建议增强）
 
-- [ ] 检查 `rag.es.analyzer` 实际配置与中文检索效果（当前代码默认 `standard`）。
-- [ ] 对中文、英文、数字、订单号、接口名进行分层评测。
+- [x] 检查 `rag.es.analyzer` 实际配置与中文检索效果（当前代码默认 `standard`）。（默认改为 ES 内置 `cjk` 二元分词，rag-api/rag-worker 一致，`RAG_ES_ANALYZER` 可覆盖）
+- [ ] 对中文、英文、数字、订单号、接口名进行分层评测。（已提供 `content.exact` 精确字段用于编号/接口名整串加权，仍需真实数据评测）
 - [ ] 用真实数据调节 `vectorTopN / keywordTopN / RRF k / candidateTopK / finalTopK`。
-- [ ] 检查建索引时 mapping/analyzer 变化对应的迁移策略。
-- [ ] 监控两路重叠率、空召回率、P50/P95 延迟和查询吞吐。
+- [x] 检查建索引时 mapping/analyzer 变化对应的迁移策略。（README「ES 分词与检索调优」说明：已存在索引不会更新 mapping，需删除索引并重建；`ensureIndex` 日志提示）
+- [x] 监控两路重叠率、空召回率、P50/P95 延迟和查询吞吐。（新增 `rag.retrieval.channel_overlap`；`rag.retrieval.duration` 配置 0.5/0.95 分位；空召回与降级计数沿用）
 
 **验收**：调优结果可复现，且精确匹配与自然语言召回均不出现不可接受的回退。
 

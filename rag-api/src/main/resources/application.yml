@@ -61,6 +61,11 @@ management:
     web:
       exposure:
         include: health,info,metrics
+  metrics:
+    distribution:
+      # 检索延迟 P50/P95 通过 /actuator/metrics/rag.retrieval.duration 暴露
+      percentiles:
+        rag.retrieval.duration: 0.5,0.95
   health:
     # RabbitMQ 为可选组件（仅文档处理链路依赖，Worker 端需自备），健康检查禁用避免无 RabbitMQ 时 /actuator/health 抛异常
     rabbit:
@@ -71,6 +76,9 @@ rag:
     secret: ${RAG_JWT_SECRET:rag-dev-secret-key-change-me-32bytes!!}
     ttl-hours: 2
     renew-minutes: 10
+  es:
+    # 文本分词器：cjk 为 ES 内置中文二元分词（无需插件）；修改后需删除旧索引并重建文档索引
+    analyzer: ${RAG_ES_ANALYZER:cjk}
   minio:
     endpoint: http://${MIDDLEWARE_HOST:192.168.1.200}:${MINIO_PORT:9000}
     access-key: ${MINIO_USER:minioadmin}

@@ -26,16 +26,17 @@ public class EsIndexer {
 
     private final ElasticsearchClient client;
 
-    @Value("${rag.es.analyzer:standard}")
+    @Value("${rag.es.analyzer:cjk}")
     private String analyzer;
 
     public void ensureIndex(String index) {
         try {
             boolean exists = client.indices().exists(e -> e.index(index)).value();
             if (exists) {
-                log.info("ES 索引已存在（跳过创建）: {}", index);
+                log.info("ES 索引已存在（跳过创建）: {}；analyzer/mapping 变更需删除索引并重建文档", index);
                 return;
             }
+            // 与 rag-api 的 EsSearchClient 保持一致：content.exact 支持精确匹配，analyzer 默认 cjk
             String mapping = """
                     {"mappings":{"properties":{
                       "chunkId":{"type":"keyword"},
@@ -43,7 +44,8 @@ public class EsIndexer {
                       "kbId":{"type":"keyword"},
                       "fileName":{"type":"keyword"},
                       "page":{"type":"integer"},
-                      "content":{"type":"text","analyzer":"%s"}
+                      "content":{"type":"text","analyzer":"%s",
+                        "fields":{"exact":{"type":"keyword","ignore_above":256}}}
                     }}}
                     """.formatted(analyzer);
             client.indices().create(c -> c.index(index).withJson(new StringReader(mapping)));

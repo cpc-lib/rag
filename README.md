@@ -65,6 +65,7 @@ rag/
 | 表格结构化（Word/Excel/HTML/CSV） | 已实现 | `pipeline/table/TableModel`、`ChunkSupport#mergeContinuedTables` | 多 Sheet Excel、合并单元格、跨页续接表格可按表头+数据行检索 |
 | 重建索引可用性（先写后删） | 已实现 | `PipelineProcessor#indexAll`、`EsIndexer#deleteStale`、`MilvusIndexer#deleteStale` | 新版本写入成功后才清理陈旧 chunk；重建期间旧索引保持可读，失败重试幂等收敛 |
 | 索引别名级双版本切换 | 规划中 | — | 尚未实现 ES alias / Milvus 双集合并行读取 |
+| ES 中文分词与检索调优 | 部分实现 | `EsSearchClient`、`EsIndexer` | 默认 `cjk` 分词 + `content.exact` 精确字段 + 检索指标；真实数据分层调优待评测 |
 | PDF 结构化 Block（标题/表格/图片） | 规划中 | — | 当前为文本层 + OCR + 版面排序 |
 | RAG Evaluation 基线（召回侧） | 已实现 | `rag-api/.../eval/RetrievalMetrics`、`RetrievalBaselineTest` | `mvn -f rag-api/pom.xml test -Dtest=RetrievalBaselineTest`，报告输出 `rag-api/target/eval/retrieval-baseline.json` |
 | RAG Evaluation 答案指标 | 规划中 | — | Faithfulness / Answer Relevance 需在线模型评测 |
@@ -78,6 +79,14 @@ rag/
 - **手动编辑切片**：编辑 AUTO child 会使其脱离 parent，后续重解析不再覆盖该切片。
 - **Milvus 维度变更**：仅当集合被确认（行数探测成功且为 0）为空时允许重建，且需显式开启 `rag.milvus.allow-auto-recreate=true`；drop 前输出 `[AUDIT]` 日志。
 - **回滚**：当前不做别名级双版本并行读取；旧索引在新版本写入完成前保持可读，重建前如需完整快照仍由运维对 Milvus / ES 执行。
+
+### ES 分词与检索调优
+
+- **分词器**：`rag.es.analyzer` 默认 `cjk`（ES 内置中文二元分词，无需安装插件），可用 `RAG_ES_ANALYZER` 覆盖；rag-api 与 rag-worker 必须保持一致。
+- **精确匹配**：`content` 增加 `content.exact`（keyword，ignore_above=256）子字段，订单号、错误码、接口名整串命中时加权 2.0，避免分词后语义漂移。
+- **mapping/analyzer 迁移**：已创建的索引不会自动更新 mapping。修改 analyzer 或 mapping 后需删除该知识库索引并重新解析文档（`DELETE /api/v1/knowledge-bases/{id}` 会删除索引，或由运维手动删除后重建）；否则新老索引分词规则不一致。
+- **检索参数**：`vectorTopN / keywordTopN / rrf-k / candidateTopK / topK / finalTopK / max-context-tokens` 可由 etcd `/rag/config/global/retrieval` 热更覆盖，真实数据调参前请先用固定评测集记录基线。
+- **可观测指标**：`rag.retrieval.duration`（P50/P95）、`rag.retrieval.total`、`rag.retrieval.empty`、`rag.retrieval.channel_unavailable`、`rag.retrieval.channel_overlap`、`rag.rerank.outcome`，通过 `/actuator/metrics` 查询。
 
 ## 快速开始
 

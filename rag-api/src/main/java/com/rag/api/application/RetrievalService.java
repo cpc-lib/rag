@@ -142,6 +142,8 @@ public class RetrievalService {
         Map<Long, Double> rrf = rrfScores(vectorIds, keywordIds, rc.rrfK);
         Set<Long> vectorIdSet = new HashSet<>(vectorIds);
         long overlap = keywordIds.stream().filter(vectorIdSet::contains).count();
+        meterRegistry.counter("rag.retrieval.channel_overlap", "overlap", overlap > 0 ? "yes" : "no")
+                .increment();
         int candidateLimit = Math.max(rc.topK, rc.candidateTopK);
         List<Long> candidateIds = rrfFuse(vectorIds, keywordIds, rc.rrfK, candidateLimit);
         log.info("RRF 融合 kb={} rrfK={} 向量={}条 关键词={}条 双路重叠={}条 融合去重={}条 候选={}条 vectorAvailable={} keywordAvailable={}",

@@ -29,7 +29,7 @@ public class EsSearchClient {
     private final String analyzer;
 
     public EsSearchClient(ElasticsearchClient client,
-                          @Value("${rag.es.analyzer:standard}") String analyzer) {
+                          @Value("${rag.es.analyzer:cjk}") String analyzer) {
         this.client = client;
         this.analyzer = analyzer;
     }
@@ -38,9 +38,10 @@ public class EsSearchClient {
         try {
             boolean exists = client.indices().exists(e -> e.index(index)).value();
             if (exists) {
-                log.info("ES 索引已存在（跳过创建）: {}", index);
+                log.info("ES 索引已存在（跳过创建）: {}；analyzer/mapping 变更需删除索引并重建文档", index);
                 return;
             }
+            // content.exact 用于订单号/接口名/错误码等精确匹配；analyzer 默认 cjk（内置中文二元分词）
             String mapping = """
                     {"mappings":{"properties":{
                       "chunkId":{"type":"keyword"},
@@ -48,7 +49,8 @@ public class EsSearchClient {
                       "kbId":{"type":"keyword"},
                       "fileName":{"type":"keyword"},
                       "page":{"type":"integer"},
-                      "content":{"type":"text","analyzer":"%s"}
+                      "content":{"type":"text","analyzer":"%s",
+                        "fields":{"exact":{"type":"keyword","ignore_above":256}}}
                     }}}
                     """.formatted(analyzer);
             client.indices().create(c -> c.index(index).withJson(new StringReader(mapping)));
@@ -112,11 +114,21 @@ public class EsSearchClient {
         }
     }
 
-    /** BM25 关键词检索，返回按相关度排序的 chunkId。 */
+    /**
+     * BM25 关键词检索，返回按相关度排序的 chunkId。
+     * 正文分词匹配 + 精确子字段加权：订单号/接口名等整串命中时优先；
+     * 只回传 chunkId、关闭 total 统计，降低大索引下的网络与计数开销。
+     */
     public List<Long> search(String index, String keyword, int topK) {
         try {
             SearchResponse<EsDoc> resp = client.search(s -> s.index(index)
-                            .query(q -> q.match(m -> m.field("content").query(keyword)))
+                            .query(q -> q.bool(b -> b
+                                    .should(sh -> sh.match(m -> m.field("content").query(keyword)))
+                                    .should(sh -> sh.term(t -> t.field("content.exact")
+                                            .value(keyword).boost(2.0f)))
+                                    .minimumShouldMatch("1")))
+                            .trackTotalHits(t -> t.enabled(false))
+                            .source(src -> src.filter(f -> f.includes("chunkId")))
                             .size(topK),
                     EsDoc.class);
             List<Long> ids = new ArrayList<>();
