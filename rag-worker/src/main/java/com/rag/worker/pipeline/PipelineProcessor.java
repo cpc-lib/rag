@@ -158,7 +158,9 @@ public class PipelineProcessor {
     }
 
     /**
-     * 全量重嵌 + 双写索引（先删旧后写新）。
+     * 全量重嵌 + 双写索引（先写新后删旧）。
+     * 写入新版本期间旧索引保持可读；双路写入成功后才按 chunk_id 清理陈旧条目，
+     * 任一步失败由 MQ 重试幂等收敛，避免"先删后写"中途失败导致知识不可用。
      *
      * @param embStart 向量化阶段起始进度
      * @param embEnd   向量化阶段结束进度
@@ -212,20 +214,24 @@ public class PipelineProcessor {
         setStage(doc, "INDEXING", idxStart);
         long indexStart = System.currentTimeMillis();
         int dim = embedding.getEmbeddingDim() == null ? vectors.get(0).length : embedding.getEmbeddingDim();
+        List<Long> keepIds = chunks.stream().map(ChunkEntity::getId).toList();
         milvusIndexer.ensureCollection(kb.getMilvusCollection(), dim);
-        milvusIndexer.deleteByDocument(kb.getMilvusCollection(), doc.getId());
         List<long[]> ids = chunks.stream().map(c -> new long[]{c.getId(), doc.getId()}).toList();
-        milvusIndexer.insert(kb.getMilvusCollection(), ids, vectors);
+        // 先写新版本（upsert 按 chunk_id 覆盖），旧向量在新版本写完前一直可读
+        milvusIndexer.upsert(kb.getMilvusCollection(), ids, vectors);
         setStage(doc, "INDEXING", idxStart + (100 - idxStart) / 2);
 
         esIndexer.ensureIndex(kb.getEsIndex());
-        esIndexer.deleteByDocument(kb.getEsIndex(), doc.getId());
         esIndexer.indexDocs(kb.getEsIndex(), chunks.stream()
                 .map(c -> new EsIndexer.EsDoc(c.getId(), doc.getId(), kb.getId(),
                         doc.getFileName(), c.getPage() == null ? 0 : c.getPage(),
                         embeddingText(doc, c)))
                 .toList());
         setStage(doc, "INDEXING", 95);
+
+        // 双路新索引均已写成功，再清理旧版本残留；失败由 MQ 重试幂等收敛
+        milvusIndexer.deleteStale(kb.getMilvusCollection(), doc.getId(), keepIds);
+        esIndexer.deleteStale(kb.getEsIndex(), doc.getId(), keepIds);
 
         // 双写一致性校验：两侧数量必须等于预期 child 数，否则不允许进入 READY
         long esCount = esIndexer.countByDocument(kb.getEsIndex(), doc.getId());

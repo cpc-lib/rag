@@ -13,7 +13,6 @@ import io.milvus.v2.service.collection.request.HasCollectionReq;
 import io.milvus.v2.service.collection.request.LoadCollectionReq;
 import io.milvus.v2.common.IndexParam;
 import io.milvus.v2.service.vector.request.DeleteReq;
-import io.milvus.v2.service.vector.request.InsertReq;
 import jakarta.annotation.PreDestroy;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
@@ -192,7 +191,22 @@ public class MilvusIndexer {
      */
     private static final int INSERT_BATCH = 500;
 
-    public void insert(String collection, List<long[]> ids, List<float[]> vectors) {
+    /**
+     * 按 chunk_id 主键 upsert：重建索引时切片 ID 不变，普通 insert 会产生重复主键行，
+     * 导致 countByDocument 翻倍并让检索出现重复命中。
+     */
+    public void upsert(String collection, List<long[]> ids, List<float[]> vectors) {
+        List<JsonObject> rows = buildRows(ids, vectors);
+        for (int from = 0; from < rows.size(); from += INSERT_BATCH) {
+            int to = Math.min(from + INSERT_BATCH, rows.size());
+            client().upsert(io.milvus.v2.service.vector.request.UpsertReq.builder()
+                    .collectionName(collection)
+                    .data(rows.subList(from, to)).build());
+        }
+        log.info("Milvus 向量 upsert 完成 collection={} 条数={}", collection, rows.size());
+    }
+
+    private List<JsonObject> buildRows(List<long[]> ids, List<float[]> vectors) {
         List<JsonObject> rows = new ArrayList<>(ids.size());
         for (int i = 0; i < ids.size(); i++) {
             JsonObject row = new JsonObject();
@@ -205,12 +219,67 @@ public class MilvusIndexer {
             row.add("vector", vec);
             rows.add(row);
         }
-        for (int from = 0; from < rows.size(); from += INSERT_BATCH) {
-            int to = Math.min(from + INSERT_BATCH, rows.size());
-            client().insert(InsertReq.builder().collectionName(collection)
-                    .data(rows.subList(from, to)).build());
+        return rows;
+    }
+
+    /** Milvus query 单次返回上限，超过该值需要分页；单文档切片数达到该量级会告警。 */
+    private static final int QUERY_LIMIT = 16384;
+    private static final int DELETE_BATCH = 500;
+
+    /**
+     * 删除该文档中不属于本次写入集合的陈旧向量。
+     * 必须在 upsert 成功之后调用：写入失败时旧向量保持不变，索引仍可读；
+     * 清理失败则抛错交由 MQ 重试，重试路径幂等收敛。
+     */
+    public void deleteStale(String collection, long documentId, List<Long> keepIds) {
+        if (keepIds.isEmpty()) {
+            deleteByDocument(collection, documentId);
+            return;
         }
-        log.info("Milvus 向量写入完成 collection={} 条数={}", collection, rows.size());
+        java.util.Set<Long> keep = new java.util.HashSet<>(keepIds);
+        List<Long> stale = new ArrayList<>();
+        try {
+            var resp = client().query(io.milvus.v2.service.vector.request.QueryReq.builder()
+                    .collectionName(collection)
+                    .filter("document_id == " + documentId)
+                    .outputFields(List.of("chunk_id"))
+                    .limit(QUERY_LIMIT)
+                    .build());
+            if (resp != null && resp.getQueryResults() != null) {
+                for (var result : resp.getQueryResults()) {
+                    Object value = result.getEntity() == null ? null : result.getEntity().get("chunk_id");
+                    if (value instanceof Number n && !keep.contains(n.longValue())) {
+                        stale.add(n.longValue());
+                    }
+                }
+                if (resp.getQueryResults().size() >= QUERY_LIMIT) {
+                    log.warn("Milvus 旧向量查询达到单次上限，可能存在未清理的陈旧索引 collection={} doc={} limit={}",
+                            collection, documentId, QUERY_LIMIT);
+                }
+            }
+        } catch (Exception e) {
+            throw new IllegalStateException("Milvus 查询旧向量失败，已中止陈旧索引清理 collection="
+                    + collection + " doc=" + documentId + ": " + e.getMessage(), e);
+        }
+        if (stale.isEmpty()) {
+            log.info("Milvus 无陈旧向量需要清理 collection={} doc={}", collection, documentId);
+            return;
+        }
+        try {
+            for (int from = 0; from < stale.size(); from += DELETE_BATCH) {
+                int to = Math.min(from + DELETE_BATCH, stale.size());
+                String ids = stale.subList(from, to).stream()
+                        .map(String::valueOf)
+                        .collect(java.util.stream.Collectors.joining(","));
+                client().delete(DeleteReq.builder().collectionName(collection)
+                        .filter("chunk_id in [" + ids + "]").build());
+            }
+            log.info("Milvus 陈旧向量清理完成 collection={} doc={} 删除={}条",
+                    collection, documentId, stale.size());
+        } catch (Exception e) {
+            throw new IllegalStateException("Milvus 陈旧向量清理失败 collection=" + collection
+                    + " doc=" + documentId + ": " + e.getMessage(), e);
+        }
     }
 
     /**

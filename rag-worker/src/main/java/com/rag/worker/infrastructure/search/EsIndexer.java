@@ -1,6 +1,7 @@
 package com.rag.worker.infrastructure.search;
 
 import co.elastic.clients.elasticsearch.ElasticsearchClient;
+import co.elastic.clients.elasticsearch._types.FieldValue;
 import co.elastic.clients.elasticsearch.core.BulkRequest;
 import co.elastic.clients.elasticsearch.core.BulkResponse;
 import lombok.RequiredArgsConstructor;
@@ -81,6 +82,30 @@ public class EsIndexer {
             log.info("ES bulk 写入完成 index={} 条数={}", index, docs.size());
         } catch (Exception e) {
             throw new IllegalStateException("ES 写入失败: " + e.getMessage(), e);
+        }
+    }
+
+    /**
+     * 仅删除该文档中不属于本次写入集合的陈旧 chunk。
+     * 必须在 indexDocs 成功之后调用：写入失败时旧索引保持不变，检索仍可读；
+     * 清理失败则抛错交由 MQ 重试，重试路径幂等收敛。
+     */
+    public void deleteStale(String index, long documentId, List<Long> keepIds) {
+        if (keepIds.isEmpty()) {
+            deleteByDocument(index, documentId);
+            return;
+        }
+        try {
+            List<FieldValue> keep = keepIds.stream()
+                    .map(id -> FieldValue.of(String.valueOf(id)))
+                    .toList();
+            var resp = client.deleteByQuery(d -> d.index(index).query(q -> q.bool(b -> b
+                    .filter(f -> f.term(t -> t.field("documentId").value(String.valueOf(documentId))))
+                    .mustNot(mn -> mn.terms(t -> t.field("chunkId").terms(v -> v.value(keep)))))));
+            log.info("ES 陈旧索引清理完成 index={} doc={} 删除={}条", index, documentId, resp.deleted());
+        } catch (Exception e) {
+            throw new IllegalStateException("ES 陈旧索引清理失败 index=" + index
+                    + " doc=" + documentId + ": " + e.getMessage(), e);
         }
     }
 

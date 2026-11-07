@@ -63,7 +63,8 @@ rag/
 | 队列积压观测 | 已实现 | `PipelineOpsService#queueDepths` | `GET /api/v1/ops/pipeline/queues`（平台管理员） |
 | PDF 内嵌图片理解 | 已实现（OCR 可直接用，Vision 需配置） | `ParseService#extractImagesText` | 图文混排 PDF 检索图片内文字；图片描述追加到对应页码文本 |
 | 表格结构化（Word/Excel/HTML/CSV） | 已实现 | `pipeline/table/TableModel`、`ChunkSupport#mergeContinuedTables` | 多 Sheet Excel、合并单元格、跨页续接表格可按表头+数据行检索 |
-| 索引版本化 / 双版本切换 | 规划中 | — | 当前为「先删后写」，重建期间旧索引不可读 |
+| 重建索引可用性（先写后删） | 已实现 | `PipelineProcessor#indexAll`、`EsIndexer#deleteStale`、`MilvusIndexer#deleteStale` | 新版本写入成功后才清理陈旧 chunk；重建期间旧索引保持可读，失败重试幂等收敛 |
+| 索引别名级双版本切换 | 规划中 | — | 尚未实现 ES alias / Milvus 双集合并行读取 |
 | PDF 结构化 Block（标题/表格/图片） | 规划中 | — | 当前为文本层 + OCR + 版面排序 |
 | RAG Evaluation 基线（召回侧） | 已实现 | `rag-api/.../eval/RetrievalMetrics`、`RetrievalBaselineTest` | `mvn -f rag-api/pom.xml test -Dtest=RetrievalBaselineTest`，报告输出 `rag-api/target/eval/retrieval-baseline.json` |
 | RAG Evaluation 答案指标 | 规划中 | — | Faithfulness / Answer Relevance 需在线模型评测 |
@@ -73,9 +74,10 @@ rag/
 - **删除文档**：DB 逻辑删除后删除 ES / Milvus 中该 `documentId` 的全部条目；任一路删除失败会抛错，由重试或人工补偿，避免残留孤儿索引。
 - **重新解析（PARSE）**：只删除 `status=AUTO` 的旧切片，人工切片保留；新切片落库后重建双索引。
 - **重建索引（REINDEX）**：保留既有切片（含人工），仅重新 Embedding 并重写双索引，切片 ID 不变。
+- **写入顺序（先写后删）**：Milvus 按 `chunk_id` upsert、ES 按 `_id` 覆盖，双路新索引写成功后才删除不属于本次集合的旧 chunk；写入失败不清理旧索引，MQ 重试幂等收敛。
 - **手动编辑切片**：编辑 AUTO child 会使其脱离 parent，后续重解析不再覆盖该切片。
 - **Milvus 维度变更**：仅当集合被确认（行数探测成功且为 0）为空时允许重建，且需显式开启 `rag.milvus.allow-auto-recreate=true`；drop 前输出 `[AUDIT]` 日志。
-- **回滚**：当前不支持双版本并行读取；重建前如需保留旧索引，需由运维对 Milvus / ES 做快照。
+- **回滚**：当前不做别名级双版本并行读取；旧索引在新版本写入完成前保持可读，重建前如需完整快照仍由运维对 Milvus / ES 执行。
 
 ## 快速开始
 
