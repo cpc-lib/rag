@@ -5,7 +5,7 @@
 > **审查基准提交**：[`44525dce952ca37a22230400881f47a9b8ff9b06`](https://github.com/cpc-lib/rag/commit/44525dce952ca37a22230400881f47a9b8ff9b06)（提交时间：2026-10-11 UTC）  
 > **整理日期**：2026-11-07  
 > **性质**：静态源码审查 / 待办 ISSUE；**未执行部署、端到端测试或生产压测**  
-> **状态**：P0（RAG-001 ~ RAG-005）基本修复，RAG-003 采用「先写后删」（别名级双版本并行读取列为后续增强），RAG-005 少量增强项待办；P1 已完成 RAG-006、RAG-008、RAG-010、RAG-011、RAG-012，RAG-007/009 部分完成；P2 RAG-013/014 部分完成（Query 改写、Multi-Query、中文分词与指标已实现，真实评测/调优待补）；复选框反映当前进度
+> **状态**：P0（RAG-001 ~ RAG-005）基本修复，RAG-003 采用「先写后删」（别名级双版本并行读取列为后续增强），RAG-005 少量增强项待办；P1 已完成 RAG-006、RAG-008、RAG-010、RAG-011、RAG-012，RAG-007/009 部分完成；P2 RAG-013/014/015 部分完成（Query 改写、Multi-Query、中文分词、指标与工具/KB 统一编排已实现，真实模型评测与端到端验收待补）；复选框反映当前进度
 
 ## 0. 审查结论
 
@@ -107,7 +107,7 @@ flowchart TD
 | RAG-012 | P1 | 文档一致性 | 修复 README / AGENTS / 规格与代码偏差 | [x] |
 | RAG-013 | P2 | 检索质量 | Query Rewrite / Multi-Query / 意图识别 | 部分完成 |
 | RAG-014 | P2 | 检索质量 | ES 中文分词、检索调优与 Recall 性能优化 | 部分完成 |
-| RAG-015 | P2 | 智能编排 | Agentic RAG 与工具检索统一编排 | [ ] |
+| RAG-015 | P2 | 智能编排 | Agentic RAG 与工具检索统一编排 | 部分完成 |
 
 ---
 
@@ -330,11 +330,12 @@ flowchart TD
 
 **现状**：`ChatOrchestrator` 已实现天气/Tavily 工具的 Function Calling，但工具命中时走工具路径，知识库路径未与工具检索整合为统一的多步骤推理链。
 
-- [ ] 将知识库检索能力注册为受权限控制的可调用工具。
-- [ ] 允许模型在知识库、外部工具、重新检索之间规划有限轮次。
-- [ ] 引入 step / token / timeout 预算，避免无界循环。
-- [ ] 每次检索保留来源和引用，不让工具摘要取代可验证证据。
-- [ ] 权限与审计对齐现有多租户模型。
+- [x] 将知识库检索能力注册为受权限控制的可调用工具。（启用外部工具时注册 `kb_search`，执行统一走 `RetrievalService#retrieve` 的租户/KB 校验）
+- [x] 允许模型在知识库、外部工具、重新检索之间规划有限轮次。（`runToolLoop` 支持天气/Tavily/kb_search 连续调用，`rag.agentic.max-rounds` 默认 3）
+- [x] 引入 step / token / timeout 预算，避免无界循环。（轮次上限 + 每次模型调用超时 + 意图/生成 maxTokens + 检索上下文 Token Budget）
+- [x] 每次检索保留来源和引用，不让工具摘要取代可验证证据。（kb_search 结果按 chunkId 去重累积 citations 并推送 `search_result`，工具消息仅作为推理输入）
+- [x] 权限与审计对齐现有多租户模型。（工具授权沿用 `userManageService.toolAllowed`；每次调用输出 `[AUDIT] tool call tenant/user/kb/tool`）
+- [ ] 剩余：真实模型环境下验证「工具+知识库」复杂问题的端到端质量，以及超时/权限拒绝的确定行为。
 
 **验收**：复杂问题能在有限轮次内组合知识库与外部工具回答；超时、无答案、权限拒绝有确定行为。
 

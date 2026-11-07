@@ -31,15 +31,12 @@ import java.util.concurrent.atomic.AtomicLong;
  * SSE 流式问答编排：
  * session → search_start → search_result(引用/工具) → message* → done|error。
  * 工具按标准 function-calling 实现：预判命中后，assistant 的 tool_calls 与 role=tool
- * 结果消息按协议回传，模型可连续调用（最多 {@link #MAX_TOOL_ROUNDS} 轮），最终答案流式生成。
+ * 结果消息按协议回传，模型可在 {@code rag.agentic.max-rounds} 限制内连续调用，最终答案流式生成。
  */
 @Slf4j
 @Service
 @RequiredArgsConstructor
 public class ChatOrchestrator {
-
-    /** 单次问答中模型最多连续调用工具的轮数（预判为第 1 轮）。 */
-    private static final int MAX_TOOL_ROUNDS = 2;
 
     private final ModelService modelService;
     private final ChatSessionService chatSessionService;
@@ -57,6 +54,8 @@ public class ChatOrchestrator {
 
     @Value("${rag.llm.timeout-seconds:60}")
     private int timeoutSeconds;
+    @Value("${rag.agentic.max-rounds:3}")
+    private int maxRounds;
 
     public void stream(TenantContext.Session session, long kbId, String question, Long promptId,
                        Long sessionId, SseEmitter emitter) {
@@ -117,7 +116,8 @@ public class ChatOrchestrator {
                     toolHit = intentCalls.isArray() && !intentCalls.isEmpty();
                     if (toolHit) {
                         runToolLoop(cfg, template, question, toolDefs, intentParams, params,
-                                intent, toolsCfg, answer, promptTokens, completionTokens, emitter);
+                                intent, toolsCfg, session, kbId, citations, answer,
+                                promptTokens, completionTokens, emitter);
                     }
                 } catch (Exception e) {
                     log.warn("工具调用失败（降级为纯知识库问答）: {}", e.getMessage());
@@ -166,13 +166,15 @@ public class ChatOrchestrator {
     }
 
     /**
-     * 标准 function-calling 工具循环（跳过知识库检索）：
-     * system + user 起步，追加预判的 assistant tool_calls，执行工具后以 role=tool 回传结果；
+     * Agentic 工具循环：工具与知识库检索统一编排。
+     * system + user 起步，追加预判的 assistant tool_calls，执行工具（含 kb_search）后以 role=tool 回传结果；
      * 模型若在非流式轮直接给出完整答案则直接采用，否则最终强制不调工具、流式生成。
      */
     private void runToolLoop(ModelEntity cfg, PromptTemplateEntity template, String question,
                              JsonNode toolDefs, LlmClient.ChatParams intentParams,
                              LlmClient.ChatParams params, JsonNode intent, ToolConfigEntity toolsCfg,
+                             TenantContext.Session session, long kbId,
+                             List<RetrievalService.Citation> citations,
                              StringBuilder answer, AtomicLong promptTokens, AtomicLong completionTokens,
                              SseEmitter emitter) {
         String systemPrompt = promptTemplateService.render(
@@ -183,11 +185,11 @@ public class ChatOrchestrator {
 
         // 预判的 assistant 消息（含 tool_calls）+ 工具执行结果
         messages.add(assistantFromResponse(intent));
-        executeCalls(intent.path("tool_calls"), toolsCfg, messages, emitter);
+        executeCalls(intent.path("tool_calls"), toolsCfg, session, kbId, citations, messages, emitter);
 
         int round = 1;
         boolean answered = false;
-        while (round < MAX_TOOL_ROUNDS) {
+        while (round < Math.max(1, maxRounds)) {
             JsonNode resp;
             try {
                 resp = llmClient.chatOnce(cfg.getBaseUrl(), cfg.getApiKey(), cfg.getModel(),
@@ -208,7 +210,7 @@ public class ChatOrchestrator {
                 break;
             }
             round++;
-            executeCalls(calls, toolsCfg, messages, emitter);
+            executeCalls(calls, toolsCfg, session, kbId, citations, messages, emitter);
         }
 
         if (!answered) {
@@ -220,11 +222,15 @@ public class ChatOrchestrator {
 
     /** 执行一轮内的全部工具调用，结果以 role=tool 消息追加。 */
     private void executeCalls(JsonNode toolCalls, ToolConfigEntity toolsCfg,
+                              TenantContext.Session session, long kbId,
+                              List<RetrievalService.Citation> citations,
                               List<LlmClient.LlmMessage> messages, SseEmitter emitter) {
         for (JsonNode call : toolCalls) {
             String id = call.path("id").asText();
             String name = call.path("function").path("name").asText();
             JsonNode args = safeParse(call.path("function").path("arguments").asText("{}"));
+            log.info("[AUDIT] tool call tenant={} user={} kb={} tool={}",
+                    session.tenantId(), session.userId(), kbId, name);
             String result = switch (name) {
                 case "query_weather" -> {
                     String location = args.path("location").asText();
@@ -237,10 +243,38 @@ public class ChatOrchestrator {
                     send(emitter, "search_start", Map.of("stage", "tool", "tool", "tavily"));
                     yield tavilyClient.search(toolsCfg.getTavilyApiKey(), query);
                 }
+                case "kb_search" -> {
+                    String query = questionFallback(args);
+                    send(emitter, "search_start", Map.of("stage", "kb", "tool", "kb_search"));
+                    try {
+                        RetrievalService.RetrievalResult rr =
+                                retrievalService.retrieve(session, kbId, query);
+                        // 多次检索按 chunkId 去重累积，工具摘要不能取代可验证引用
+                        for (RetrievalService.Citation c : rr.citations()) {
+                            if (citations.stream().noneMatch(x -> x.chunkId() == c.chunkId())) {
+                                citations.add(c);
+                            }
+                        }
+                        send(emitter, "search_result", Map.of("citations", citations,
+                                "degraded", rr.degraded(),
+                                "vectorAvailable", rr.vectorAvailable(),
+                                "keywordAvailable", rr.keywordAvailable()));
+                        yield buildMaterial(rr.citations());
+                    } catch (Exception e) {
+                        log.warn("知识库工具检索失败 tenant={} kb={}: {}",
+                                session.tenantId(), kbId, e.getMessage());
+                        yield "知识库检索失败：" + e.getMessage();
+                    }
+                }
                 default -> "工具不存在：" + name;
             };
             messages.add(new LlmClient.LlmMessage("tool", result, id, null));
         }
+    }
+
+    private String questionFallback(JsonNode args) {
+        String query = args.path("query").asText("");
+        return query.isBlank() ? "知识库检索" : query;
     }
 
     /** 最终生成（流式），tools/toolChoice 非空时随请求携带；最后一帧的 usage 写入 token 统计。 */
@@ -263,7 +297,10 @@ public class ChatOrchestrator {
                 .blockLast();
     }
 
-    /** 按开关与用户授权组装可用工具定义；都不可用返回 null。 */
+    /**
+     * 按开关与用户授权组装可用工具定义；都不可用返回 null。
+     * 仅当启用至少一个外部工具时才注册 kb_search，避免纯知识库问答多一次意图模型调用。
+     */
     private JsonNode buildToolDefs(TenantContext.Session session, ToolConfigEntity tools) {
         boolean weatherOn = userManageService.toolAllowed("weather",
                 Boolean.TRUE.equals(tools.getWeatherEnabled()));
@@ -280,6 +317,8 @@ public class ChatOrchestrator {
         if (tavilyOn) {
             defs.add(llmClient.tavilyTool());
         }
+        // 知识库检索作为工具参与多步推理；执行时仍走 retrieve 的租户/KB 归属校验
+        defs.add(llmClient.kbSearchTool());
         return objectMapper.valueToTree(defs);
     }
 

@@ -57,6 +57,7 @@ rag/
 | 检索通道降级 | 已实现 | `RetrievalService` 通道级 try/catch | 停用 ES 或 Embedding 后提问：仍返回引用且 `degraded=true`；双通道故障返回 UPSTREAM 错误 |
 | 检索可观测性 | 已实现 | Micrometer 指标 `rag.retrieval.*` | `GET /actuator/metrics/rag.retrieval.duration`（含 P95） |
 | Query 改写 / Multi-Query | 已实现（默认关闭） | `QueryRewriteService`、`RetrievalService#retrieve(..., extraQueries)` | 开启 `rag.query-rewrite.enabled` 后，RRF 日志出现 `queries=N` 且多路结果去重 |
+| Agentic 工具编排 | 已实现（启用外部工具时） | `ChatOrchestrator`、`LlmClient#kbSearchTool` | 天气/Tavily/`kb_search` 多轮统一编排，引用逐次累积并推送 `search_result` |
 | 上传 → 解析 → 切片 → 双写 | 已实现 | `DocumentAppService`、`PipelineProcessor` | 上传后点击「开始处理」，文档状态到 READY 且进度 100 |
 | 双索引一致性校验 | 已实现 | `PipelineProcessor#indexAll` | `GET /api/v1/documents/{id}/index-status` 返回 `consistent=true` |
 | 任务可靠性（claim / 重试 / 僵尸恢复） | 已实现 | `IngestConsumer`、`StaleTaskRecovery` | 并发饱和不丢任务；重启后超时 PENDING/RUNNING 被重投 |

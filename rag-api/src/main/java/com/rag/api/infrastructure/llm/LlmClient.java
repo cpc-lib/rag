@@ -338,6 +338,19 @@ public class LlmClient {
         return tool("tavily_search", "联网搜索最新资讯，当用户询问实时信息或知识库无相关内容时使用", parameters);
     }
 
+    /** 知识库检索工具：与外部工具同时启用时注册，供模型在多步推理中按需查证。 */
+    public JsonNode kbSearchTool() {
+        ObjectNode query = objectMapper.createObjectNode()
+                .put("type", "string").put("description", "检索关键词或自然语言问题");
+        ObjectNode properties = objectMapper.createObjectNode();
+        properties.set("query", query);
+        ObjectNode parameters = objectMapper.createObjectNode();
+        parameters.put("type", "object");
+        parameters.set("properties", properties);
+        parameters.set("required", objectMapper.createArrayNode().add("query"));
+        return tool("kb_search", "检索当前知识库并返回可引用的原文片段；需要企业内知识或文档依据时使用", parameters);
+    }
+
     private ObjectNode tool(String name, String description, ObjectNode parameters) {
         ObjectNode fn = objectMapper.createObjectNode();
         fn.put("name", name).put("description", description).set("parameters", parameters);

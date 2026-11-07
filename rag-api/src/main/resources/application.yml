@@ -84,6 +84,9 @@ rag:
     enabled: ${RAG_QUERY_REWRITE_ENABLED:false}
     max-queries: ${RAG_QUERY_REWRITE_MAX_QUERIES:3}
     timeout-seconds: ${RAG_QUERY_REWRITE_TIMEOUT:8}
+  agentic:
+    # 工具（天气/Tavily/kb_search）与知识库统一编排的最大推理轮次（预判为第 1 轮）
+    max-rounds: ${RAG_AGENTIC_MAX_ROUNDS:3}
   minio:
     endpoint: http://${MIDDLEWARE_HOST:192.168.1.200}:${MINIO_PORT:9000}
     access-key: ${MINIO_USER:minioadmin}
