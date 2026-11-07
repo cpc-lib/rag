@@ -5,7 +5,7 @@
 > **审查基准提交**：[`44525dce952ca37a22230400881f47a9b8ff9b06`](https://github.com/cpc-lib/rag/commit/44525dce952ca37a22230400881f47a9b8ff9b06)（提交时间：2026-10-11 UTC）  
 > **整理日期**：2026-11-07  
 > **性质**：静态源码审查 / 待办 ISSUE；**未执行部署、端到端测试或生产压测**  
-> **状态**：P0（RAG-001 ~ RAG-005）基本修复，RAG-003/005 少量增强项待办；P1 已完成 RAG-006、RAG-008、RAG-011、RAG-012，RAG-009/010 部分完成；复选框反映当前进度
+> **状态**：P0（RAG-001 ~ RAG-005）基本修复，RAG-003/005 少量增强项待办；P1 已完成 RAG-006、RAG-008、RAG-010、RAG-011、RAG-012，RAG-007/009 部分完成；复选框反映当前进度
 
 ## 0. 审查结论
 
@@ -102,7 +102,7 @@ flowchart TD
 | RAG-007 | P1 | 多模态 | 升级 PDF Layout / 内嵌图片抽取与理解 | 部分完成 |
 | RAG-008 | P1 | 内容质量 | 完善表格结构化抽取与跨页、跨块保护 | [x] |
 | RAG-009 | P1 | 质量保障 | 建立 RAG Evaluation 与回归测试基线 | 部分完成 |
-| RAG-010 | P1 | 安全性 | 补齐多租户检索隔离与引用访问测试 | 部分完成 |
+| RAG-010 | P1 | 安全性 | 补齐多租户检索隔离与引用访问测试 | [x] |
 | RAG-011 | P1 | 运维 | 入库状态机、重试恢复、可观测性闭环 | [x] |
 | RAG-012 | P1 | 文档一致性 | 修复 README / AGENTS / 规格与代码偏差 | [x] |
 | RAG-013 | P2 | 检索质量 | Query Rewrite / Multi-Query / 意图识别 | [ ] |
@@ -272,11 +272,12 @@ flowchart TD
 
 **现状**：查询中存在租户权限检查与按 KB 粒度建索引，尚需验证所有旁路。
 
-- [ ] 对文档、chunk、KB、会话、提示词、索引、预签名 URL 做租户穿透测试。
+- [x] 对文档、chunk、KB、会话、提示词、索引、预签名 URL 做租户穿透测试。（`TenantIsolationCoverageTest` 覆盖文档对账/删除/开始处理/下载、切片查询与新建、会话详情与删除、提示词列表与模板读取、索引命中与预签名 URL）
 - [x] 验证普通用户、租户管理员、平台管理员各自权限，遵守项目既定权限语义。（`TenantIsolationTest` 覆盖普通用户跨租户、同租户读取、平台管理员跨租户读取）
 - [x] 跨租户访问返回不可泄露资源存在性的错误；鉴权前不得生成可见引用。（`KnowledgeBaseService#getOwned`、`RetrievalService#retrieve`、`UserManageService#requireKbAccess` 的跨租户分支统一改为 `NOT_FOUND("知识库不存在")`）
-- [ ] 检查按 ID 批量查询及索引检索路径的租户与 KB 归属约束。
-- [ ] 为并发用户与跨租户访问加入集成测试。
+- [x] 检查按 ID 批量查询及索引检索路径的租户与 KB 归属约束。（`RetrievalService` 对 RRF 候选/父切片/文档按 `kb_id + tenant_id` 二次过滤，Rerank 候选同样过滤；`FileLibraryService#listPlaybackHistory` 的按 ID 回查限定租户与用户）
+- [x] 为并发用户与跨租户访问加入集成测试。（`TenantIsolationCoverageTest#concurrentTenantAccessKeepsThreadLocalIsolation`：多线程交替注入不同 `TenantContext`，断言仅本租户可读、跨租户稳定返回 NOT_FOUND）
+- [ ] 补充：以上为服务层并发/隔离测试；带真实 MySQL/ES/Milvus 的端到端集成测试仍需部署环境后执行。
 
 **验收**：租户 A 用户无法检索、预览、下载或引用租户 B 的文档内容。
 

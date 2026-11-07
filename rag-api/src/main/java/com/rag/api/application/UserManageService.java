@@ -222,6 +222,8 @@ public class UserManageService {
     /** 指定知识库下当前用户可用的提示词：普通用户=被授权的，管理员=全部。 */
     public List<PromptTemplateEntity> visiblePrompts(long kbId) {
         TenantContext.Session s = TenantContext.require();
+        // 先校验知识库归属，避免管理页按 kbId 拉取到其他租户的提示词（RAG-010）
+        requireKbTenant(kbId, s);
         if (s.userType() == 2) {
             List<Long> pids = userPromptMapper.selectByUserId(s.userId()).stream()
                     .map(UserPromptEntity::getPromptId).toList();
@@ -304,6 +306,14 @@ public class UserManageService {
             return true;
         }
         return userFeatureMapper.countByUserIdAndTypeAndCode(s.userId(), TYPE_TOOL, code) > 0;
+    }
+
+    /** 知识库租户归属校验：跨租户统一返回"不存在"，不泄露资源存在性。 */
+    private void requireKbTenant(long kbId, TenantContext.Session s) {
+        KnowledgeBaseEntity kb = kbMapper.selectById(kbId);
+        if (kb == null || (!s.isPlatformAdmin() && !s.tenantId().equals(kb.getTenantId()))) {
+            throw BizException.notFound("知识库不存在");
+        }
     }
 
     /** 普通用户可授权的功能菜单码（目录启用）。 */

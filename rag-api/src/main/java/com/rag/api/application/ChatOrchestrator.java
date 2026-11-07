@@ -75,6 +75,10 @@ public class ChatOrchestrator {
             ChatSessionEntity chatSession = sessionId == null
                     ? chatSessionService.create(session.tenantId(), session.userId(), kbId, titleOf(question))
                     : chatSessionService.requireOwned(session.tenantId(), session.userId(), sessionId);
+            // 会话只能在其创建时的知识库内继续，防止把 A 库历史带入 B 库问答（RAG-010）
+            if (chatSession.getKbId() != null && !chatSession.getKbId().equals(kbId)) {
+                throw BizException.badRequest("会话与知识库不匹配");
+            }
             sid = chatSession.getId();
             List<LlmClient.LlmMessage> history =
                     chatSessionService.historyMessages(session.tenantId(), session.userId(), sid);

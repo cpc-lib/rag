@@ -154,6 +154,8 @@ public class RetrievalService {
         Map<Long, ChunkEntity> chunks = topIds.isEmpty() ? Map.of()
                 : chunkMapper.selectByIds(topIds).stream()
                 .filter(c -> !"DELETED".equals(c.getStatus()))
+                // 索引可能残留其他知识库/租户的 chunk id，必须按本次检索的 KB 归属过滤（RAG-010）
+                .filter(c -> kb.getId().equals(c.getKbId()) && kb.getTenantId().equals(c.getTenantId()))
                 .collect(Collectors.toMap(ChunkEntity::getId, Function.identity(), (a, b) -> a));
         Set<Long> needLoad = new HashSet<>(chunks.keySet());
         chunks.values().forEach(c -> {
@@ -163,6 +165,7 @@ public class RetrievalService {
         });
         Map<Long, ChunkEntity> all = needLoad.equals(chunks.keySet()) ? chunks
                 : chunkMapper.selectByIds(needLoad).stream()
+                .filter(c -> kb.getId().equals(c.getKbId()) && kb.getTenantId().equals(c.getTenantId()))
                 .collect(Collectors.toMap(ChunkEntity::getId, Function.identity(), (a, b) -> a));
 
         Set<Long> docIds = new HashSet<>();
@@ -181,6 +184,8 @@ public class RetrievalService {
         }
         Map<Long, DocumentEntity> docs = docIds.isEmpty() ? Map.of()
                 : documentMapper.selectByIds(docIds).stream()
+                // 引用与预签名 URL 只允许来自当前知识库/租户的文档
+                .filter(d -> kb.getId().equals(d.getKbId()) && kb.getTenantId().equals(d.getTenantId()))
                 .collect(Collectors.toMap(DocumentEntity::getId, Function.identity()));
 
         List<Citation> citations = new ArrayList<>();
@@ -197,8 +202,9 @@ public class RetrievalService {
             }
             long unitKey = child.getParentChunkId() == null ? id : child.getParentChunkId();
             ChunkEntity unit = all.get(unitKey);
-            if (unit == null || "DELETED".equals(unit.getStatus())) {
-                unit = child; // parent 缺失时回退 child 自身
+            if (unit == null || "DELETED".equals(unit.getStatus())
+                    || !unit.getDocumentId().equals(child.getDocumentId())) {
+                unit = child; // parent 缺失或跨文档时回退 child 自身
             }
             // 失效 parent 的 children 仍是独立检索单元，不能用旧 parentId 合并。
             unitKey = unit.getId();
@@ -302,6 +308,7 @@ public class RetrievalService {
         }
         Map<Long, ChunkEntity> candidates = chunkMapper.selectByIds(candidateIds).stream()
                 .filter(c -> !"DELETED".equals(c.getStatus()))
+                .filter(c -> kb.getId().equals(c.getKbId()) && kb.getTenantId().equals(c.getTenantId()))
                 .collect(Collectors.toMap(ChunkEntity::getId, Function.identity(), (a, b) -> a));
         List<Long> validIds = candidateIds.stream().filter(candidates::containsKey).toList();
         if (validIds.isEmpty()) {
