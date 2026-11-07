@@ -25,6 +25,7 @@ import java.time.Duration;
 import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -73,6 +74,15 @@ public class RetrievalService {
     private final MeterRegistry meterRegistry;
 
     public RetrievalResult retrieve(TenantContext.Session session, long kbId, String question) {
+        return retrieve(session, kbId, question, List.of());
+    }
+
+    /**
+     * 多 Query 检索（RAG-013）：原问题 + 改写/扩展 Query 分别召回，
+     * 所有通道结果按 RRF 统一融合、去重后再进入 Rerank 与上下文预算。
+     */
+    public RetrievalResult retrieve(TenantContext.Session session, long kbId, String question,
+                                    List<String> extraQueries) {
         long retrievalStart = System.currentTimeMillis();
         KnowledgeBaseEntity kb = kbMapper.selectById(kbId);
         if (kb == null) {
@@ -84,42 +94,73 @@ public class RetrievalService {
         }
         EtcdService.RetrievalConfig rc = etcdService.retrievalConfig();
 
-        // 1. 向量通道：Query Embedding + Milvus。任一环节失败只关闭向量通道，不影响关键词通道。
+        // 检索 Query 集合：原问题始终保留，改写结果去重追加
+        List<String> queries = new ArrayList<>();
+        queries.add(question);
+        if (extraQueries != null) {
+            for (String q : extraQueries) {
+                if (q != null && !q.isBlank() && !queries.contains(q)) {
+                    queries.add(q);
+                }
+            }
+        }
+
+        // 1. 向量通道：Query Embedding + Milvus。逐 Query 独立降级，全部失败才关闭通道。
         boolean vectorAvailable = true;
-        List<MilvusClientWrapper.MilvusHit> vectorHits = List.of();
+        List<MilvusClientWrapper.MilvusHit> vectorHits = new ArrayList<>();
+        List<List<Long>> vectorLists = new ArrayList<>();
         ModelEntity emb = modelService.findEnabled(kb.getTenantId(), ModelService.EMBEDDING);
         if (emb == null || emb.getModel() == null) {
             vectorAvailable = false;
             log.warn("向量通道不可用（租户未启用向量模型）kb={} tenant={}", kbId, kb.getTenantId());
         } else {
-            long vecStart = System.currentTimeMillis();
-            try {
-                float[] vector = llmClient.embed(emb.getBaseUrl(), emb.getApiKey(),
-                        emb.getModel(), List.of(question)).get(0);
-                vectorHits = milvus.search(kb.getMilvusCollection(), vector, rc.vectorTopN);
-                log.info("向量检索（Milvus）kb={} collection={} topN={} 命中={}条 耗时={}ms",
-                        kbId, kb.getMilvusCollection(), rc.vectorTopN, vectorHits.size(),
-                        System.currentTimeMillis() - vecStart);
-            } catch (Exception e) {
+            int vectorOk = 0;
+            for (int i = 0; i < queries.size(); i++) {
+                long vecStart = System.currentTimeMillis();
+                try {
+                    float[] vector = llmClient.embed(emb.getBaseUrl(), emb.getApiKey(),
+                            emb.getModel(), List.of(queries.get(i))).get(0);
+                    List<MilvusClientWrapper.MilvusHit> hits =
+                            milvus.search(kb.getMilvusCollection(), vector, rc.vectorTopN);
+                    vectorHits.addAll(hits);
+                    vectorLists.add(hits.stream().map(MilvusClientWrapper.MilvusHit::chunkId).toList());
+                    vectorOk++;
+                    log.info("向量检索（Milvus）kb={} query#={} collection={} topN={} 命中={}条 耗时={}ms",
+                            kbId, i, kb.getMilvusCollection(), rc.vectorTopN, hits.size(),
+                            System.currentTimeMillis() - vecStart);
+                } catch (Exception e) {
+                    log.warn("向量检索失败 kb={} query#={} collection={} 耗时={}ms: {}",
+                            kbId, i, kb.getMilvusCollection(),
+                            System.currentTimeMillis() - vecStart, e.getMessage());
+                }
+            }
+            if (vectorOk == 0) {
                 vectorAvailable = false;
-                log.warn("向量检索失败，降级为仅关键词检索 kb={} collection={} 耗时={}ms: {}",
-                        kbId, kb.getMilvusCollection(), System.currentTimeMillis() - vecStart, e.getMessage());
+                log.warn("向量通道全部 Query 检索失败，降级为仅关键词检索 kb={}", kbId);
             }
         }
 
-        // 2. 关键词通道：ES BM25。失败只关闭关键词通道，保留向量结果。
+        // 2. 关键词通道：ES BM25。逐 Query 独立降级，全部失败才关闭通道。
         boolean keywordAvailable = true;
-        List<Long> keywordIds = List.of();
-        long kwStart = System.currentTimeMillis();
-        try {
-            keywordIds = es.search(kb.getEsIndex(), question, rc.keywordTopN);
-            log.info("关键词检索（ES BM25）kb={} index={} topN={} 命中={}条 耗时={}ms",
-                    kbId, kb.getEsIndex(), rc.keywordTopN, keywordIds.size(),
-                    System.currentTimeMillis() - kwStart);
-        } catch (Exception e) {
+        List<List<Long>> keywordLists = new ArrayList<>();
+        int keywordOk = 0;
+        for (int i = 0; i < queries.size(); i++) {
+            long kwStart = System.currentTimeMillis();
+            try {
+                List<Long> ids = es.search(kb.getEsIndex(), queries.get(i), rc.keywordTopN);
+                keywordLists.add(ids);
+                keywordOk++;
+                log.info("关键词检索（ES BM25）kb={} query#={} index={} topN={} 命中={}条 耗时={}ms",
+                        kbId, i, kb.getEsIndex(), rc.keywordTopN, ids.size(),
+                        System.currentTimeMillis() - kwStart);
+            } catch (Exception e) {
+                log.warn("关键词检索失败 kb={} query#={} index={} 耗时={}ms: {}",
+                        kbId, i, kb.getEsIndex(), System.currentTimeMillis() - kwStart, e.getMessage());
+            }
+        }
+        if (keywordOk == 0) {
             keywordAvailable = false;
-            log.warn("关键词检索失败，保留向量结果 kb={} index={} 耗时={}ms: {}",
-                    kbId, kb.getEsIndex(), System.currentTimeMillis() - kwStart, e.getMessage());
+            log.warn("关键词通道全部 Query 检索失败，保留向量结果 kb={}", kbId);
         }
         // 双通道均不可用属于基础设施故障，必须显式报错，不能伪装成"知识库无匹配"
         if (!vectorAvailable && !keywordAvailable) {
@@ -136,18 +177,20 @@ public class RetrievalService {
         double bestScore = vectorHits.stream().mapToDouble(MilvusClientWrapper.MilvusHit::score)
                 .max().orElse(0.0);
 
-        // 3. RRF 融合 → candidateTopK 候选 → 可选 Rerank → topK
-        List<Long> vectorIds = vectorHits.stream()
-                .map(MilvusClientWrapper.MilvusHit::chunkId).toList();
-        Map<Long, Double> rrf = rrfScores(vectorIds, keywordIds, rc.rrfK);
+        // 3. RRF 融合（每个 Query 的每个通道各算一路）→ candidateTopK → 可选 Rerank → topK
+        List<Long> vectorIds = distinct(vectorLists);
+        List<Long> keywordIds = distinct(keywordLists);
+        List<List<Long>> rankedLists = new ArrayList<>(vectorLists);
+        rankedLists.addAll(keywordLists);
+        Map<Long, Double> rrf = rrfScores(rankedLists, rc.rrfK);
         Set<Long> vectorIdSet = new HashSet<>(vectorIds);
         long overlap = keywordIds.stream().filter(vectorIdSet::contains).count();
         meterRegistry.counter("rag.retrieval.channel_overlap", "overlap", overlap > 0 ? "yes" : "no")
                 .increment();
         int candidateLimit = Math.max(rc.topK, rc.candidateTopK);
-        List<Long> candidateIds = rrfFuse(vectorIds, keywordIds, rc.rrfK, candidateLimit);
-        log.info("RRF 融合 kb={} rrfK={} 向量={}条 关键词={}条 双路重叠={}条 融合去重={}条 候选={}条 vectorAvailable={} keywordAvailable={}",
-                kbId, rc.rrfK, vectorHits.size(), keywordIds.size(), overlap, rrf.size(),
+        List<Long> candidateIds = rrfFuse(rankedLists, rc.rrfK, candidateLimit);
+        log.info("RRF 融合 kb={} queries={} rrfK={} 向量={}条 关键词={}条 双路重叠={}条 融合去重={}条 候选={}条 vectorAvailable={} keywordAvailable={}",
+                kbId, queries.size(), rc.rrfK, vectorIds.size(), keywordIds.size(), overlap, rrf.size(),
                 candidateIds.size(), vectorAvailable, keywordAvailable);
         List<Long> topIds = rerankIfEnabled(kb, question, candidateIds, rc.topK);
         log.info("检索最终排序 kb={} topK={} ids={}", kbId, topIds.size(), topIds);
@@ -259,25 +302,42 @@ public class RetrievalService {
         return result;
     }
 
+    /** 多路结果按首次出现顺序去重合并。 */
+    private static List<Long> distinct(List<List<Long>> lists) {
+        Set<Long> merged = new LinkedHashSet<>();
+        for (List<Long> ids : lists) {
+            merged.addAll(ids);
+        }
+        return new ArrayList<>(merged);
+    }
+
     /**
      * RRF 融合分数：score = Σ 1/(k + rank)。LinkedHashMap 保序，
      * 分数相同时按首次出现顺序，保证检索与离线评测结果可复现。
      */
     static Map<Long, Double> rrfScores(List<Long> vectorIds, List<Long> keywordIds, int rrfK) {
+        return rrfScores(List.of(vectorIds, keywordIds), rrfK);
+    }
+
+    /** 多路 RRF：每一路（Query × 通道）独立按名次贡献 1/(k+rank)。 */
+    static Map<Long, Double> rrfScores(List<List<Long>> rankedLists, int rrfK) {
         Map<Long, Double> scores = new LinkedHashMap<>();
-        for (int i = 0; i < vectorIds.size(); i++) {
-            scores.merge(vectorIds.get(i), 1.0 / (rrfK + i + 1), Double::sum);
-        }
-        for (int i = 0; i < keywordIds.size(); i++) {
-            scores.merge(keywordIds.get(i), 1.0 / (rrfK + i + 1), Double::sum);
+        for (List<Long> ids : rankedLists) {
+            for (int i = 0; i < ids.size(); i++) {
+                scores.merge(ids.get(i), 1.0 / (rrfK + i + 1), Double::sum);
+            }
         }
         return scores;
     }
 
     /** RRF 排序（稳定排序，同分保持向量通道优先的首次出现顺序），检索与离线评测共用。 */
     public static List<Long> rrfFuse(List<Long> vectorIds, List<Long> keywordIds, int rrfK, int limit) {
+        return rrfFuse(List.of(vectorIds, keywordIds), rrfK, limit);
+    }
+
+    public static List<Long> rrfFuse(List<List<Long>> rankedLists, int rrfK, int limit) {
         List<Map.Entry<Long, Double>> entries = new ArrayList<>(
-                rrfScores(vectorIds, keywordIds, rrfK).entrySet());
+                rrfScores(rankedLists, rrfK).entrySet());
         entries.sort(Map.Entry.<Long, Double>comparingByValue().reversed());
         return entries.stream().limit(Math.max(0, limit)).map(Map.Entry::getKey).toList();
     }

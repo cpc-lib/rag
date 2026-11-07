@@ -5,7 +5,7 @@
 > **审查基准提交**：[`44525dce952ca37a22230400881f47a9b8ff9b06`](https://github.com/cpc-lib/rag/commit/44525dce952ca37a22230400881f47a9b8ff9b06)（提交时间：2026-10-11 UTC）  
 > **整理日期**：2026-11-07  
 > **性质**：静态源码审查 / 待办 ISSUE；**未执行部署、端到端测试或生产压测**  
-> **状态**：P0（RAG-001 ~ RAG-005）基本修复，RAG-003 采用「先写后删」（别名级双版本并行读取列为后续增强），RAG-005 少量增强项待办；P1 已完成 RAG-006、RAG-008、RAG-010、RAG-011、RAG-012，RAG-007/009 部分完成；P2 RAG-014 部分完成（真实数据调优待评测）；复选框反映当前进度
+> **状态**：P0（RAG-001 ~ RAG-005）基本修复，RAG-003 采用「先写后删」（别名级双版本并行读取列为后续增强），RAG-005 少量增强项待办；P1 已完成 RAG-006、RAG-008、RAG-010、RAG-011、RAG-012，RAG-007/009 部分完成；P2 RAG-013/014 部分完成（Query 改写、Multi-Query、中文分词与指标已实现，真实评测/调优待补）；复选框反映当前进度
 
 ## 0. 审查结论
 
@@ -105,7 +105,7 @@ flowchart TD
 | RAG-010 | P1 | 安全性 | 补齐多租户检索隔离与引用访问测试 | [x] |
 | RAG-011 | P1 | 运维 | 入库状态机、重试恢复、可观测性闭环 | [x] |
 | RAG-012 | P1 | 文档一致性 | 修复 README / AGENTS / 规格与代码偏差 | [x] |
-| RAG-013 | P2 | 检索质量 | Query Rewrite / Multi-Query / 意图识别 | [ ] |
+| RAG-013 | P2 | 检索质量 | Query Rewrite / Multi-Query / 意图识别 | 部分完成 |
 | RAG-014 | P2 | 检索质量 | ES 中文分词、检索调优与 Recall 性能优化 | 部分完成 |
 | RAG-015 | P2 | 智能编排 | Agentic RAG 与工具检索统一编排 | [ ] |
 
@@ -308,10 +308,11 @@ flowchart TD
 
 ### RAG-013：Query Rewrite 与 Multi-Query（建议增强）
 
-- [ ] 多轮问题补全指代，例如“它的限制是什么”重写为独立检索 Query。
-- [ ] 区分无需改写的精确编号、错误码及代码符号。
-- [ ] 支持可配置 Multi-Query，合并去重后继续 RRF / Rerank。
-- [ ] 增加成本与延迟保护，失败时使用原始 Query。
+- [x] 多轮问题补全指代，例如“它的限制是什么”重写为独立检索 Query。（`QueryRewriteService`：仅多轮触发，取最近 6 条历史，输出 JSON queries）
+- [x] 区分无需改写的精确编号、错误码及代码符号。（UUID、URL/接口路径、错误码、snake_case/camelCase、长数字直接跳过改写）
+- [x] 支持可配置 Multi-Query，合并去重后继续 RRF / Rerank。（`rag.query-rewrite.max-queries` 默认 3；`RetrievalService#retrieve(..., extraQueries)` 多路 RRF 去重）
+- [x] 增加成本与延迟保护，失败时使用原始 Query。（独立超时、maxTokens=256、查询数上限；开关默认关闭；异常/超时/解析失败回退原问题）
+- [ ] 剩余：在固定多轮与歧义评测集上输出改写前后 Recall@K、答案质量与延迟对比（需真实模型环境）。
 
 **验收**：对固定多轮与歧义评测集输出改写前后 Recall@K、答案质量及延迟对比。
 

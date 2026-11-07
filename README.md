@@ -56,6 +56,7 @@ rag/
 | Rerank 二阶段精排 | 依赖配置（RERANK 模型） | `RerankClient`、`RetrievalService#rerankIfEnabled` | 启用前后对比 Top-K 顺序；`/actuator/metrics/rag.rerank.outcome` |
 | 检索通道降级 | 已实现 | `RetrievalService` 通道级 try/catch | 停用 ES 或 Embedding 后提问：仍返回引用且 `degraded=true`；双通道故障返回 UPSTREAM 错误 |
 | 检索可观测性 | 已实现 | Micrometer 指标 `rag.retrieval.*` | `GET /actuator/metrics/rag.retrieval.duration`（含 P95） |
+| Query 改写 / Multi-Query | 已实现（默认关闭） | `QueryRewriteService`、`RetrievalService#retrieve(..., extraQueries)` | 开启 `rag.query-rewrite.enabled` 后，RRF 日志出现 `queries=N` 且多路结果去重 |
 | 上传 → 解析 → 切片 → 双写 | 已实现 | `DocumentAppService`、`PipelineProcessor` | 上传后点击「开始处理」，文档状态到 READY 且进度 100 |
 | 双索引一致性校验 | 已实现 | `PipelineProcessor#indexAll` | `GET /api/v1/documents/{id}/index-status` 返回 `consistent=true` |
 | 任务可靠性（claim / 重试 / 僵尸恢复） | 已实现 | `IngestConsumer`、`StaleTaskRecovery` | 并发饱和不丢任务；重启后超时 PENDING/RUNNING 被重投 |
@@ -87,6 +88,12 @@ rag/
 - **mapping/analyzer 迁移**：已创建的索引不会自动更新 mapping。修改 analyzer 或 mapping 后需删除该知识库索引并重新解析文档（`DELETE /api/v1/knowledge-bases/{id}` 会删除索引，或由运维手动删除后重建）；否则新老索引分词规则不一致。
 - **检索参数**：`vectorTopN / keywordTopN / rrf-k / candidateTopK / topK / finalTopK / max-context-tokens` 可由 etcd `/rag/config/global/retrieval` 热更覆盖，真实数据调参前请先用固定评测集记录基线。
 - **可观测指标**：`rag.retrieval.duration`（P50/P95）、`rag.retrieval.total`、`rag.retrieval.empty`、`rag.retrieval.channel_unavailable`、`rag.retrieval.channel_overlap`、`rag.rerank.outcome`，通过 `/actuator/metrics` 查询。
+
+### Query 改写与 Multi-Query
+
+- `rag.query-rewrite.enabled` 默认 `false`；开启后仅多轮对话触发一次非流式模型调用（`max-queries` 默认 3、`timeout-seconds` 默认 8、输出上限 256 tokens）。
+- 含 UUID、URL/接口路径、错误码、snake_case/camelCase、长数字的问题跳过改写；模型失败、超时或解析异常一律回退原始 Query。
+- 改写结果与原问题一起进入多路 RRF（每个 Query × 每个通道各算一路），去重后继续 Rerank 与 Token Budget。
 
 ## 快速开始
 
@@ -183,8 +190,9 @@ npm run build
 问答检索：
 
 ```
-Milvus 向量 Top20 + ES BM25 Top20
-  → RRF 融合（k=60）取 Top8
+（可选）多轮 Query 改写 / Multi-Query
+  → 每个 Query：Milvus 向量 Top20 + ES BM25 Top20
+  → 多路 RRF 融合（k=60）取 Top8
   → 可选 Rerank 精排（失败静默降级）
   → CHILD 命中扩展到 PARENT 并去重
   → Token Budget（12000）截断

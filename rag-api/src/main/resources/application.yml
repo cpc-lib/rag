@@ -79,6 +79,11 @@ rag:
   es:
     # 文本分词器：cjk 为 ES 内置中文二元分词（无需插件）；修改后需删除旧索引并重建文档索引
     analyzer: ${RAG_ES_ANALYZER:cjk}
+  query-rewrite:
+    # 多轮指代改写 + Multi-Query；默认关闭，开启后每轮多一次低成本非流式模型调用
+    enabled: ${RAG_QUERY_REWRITE_ENABLED:false}
+    max-queries: ${RAG_QUERY_REWRITE_MAX_QUERIES:3}
+    timeout-seconds: ${RAG_QUERY_REWRITE_TIMEOUT:8}
   minio:
     endpoint: http://${MIDDLEWARE_HOST:192.168.1.200}:${MINIO_PORT:9000}
     access-key: ${MINIO_USER:minioadmin}

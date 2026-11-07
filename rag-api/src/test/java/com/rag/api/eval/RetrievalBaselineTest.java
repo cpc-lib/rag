@@ -111,6 +111,21 @@ class RetrievalBaselineTest {
         assertTrue(avgNdcg + 1e-9 >= baseline.ndcgAt5(), "nDCG@5 相对基线回退");
     }
 
+    @Test
+    void multiQueryRrfMergesChannelsAndDeduplicates() {
+        List<Long> vector1 = List.of(1L, 2L);
+        List<Long> keyword1 = List.of(2L, 3L);
+        List<Long> vector2 = List.of(1L, 4L);
+        List<Long> keyword2 = List.of(4L, 2L);
+        List<List<Long>> rankedLists = List.of(vector1, keyword1, vector2, keyword2);
+
+        List<Long> fused = RetrievalService.rrfFuse(rankedLists, 60, 10);
+
+        assertEquals(Set.of(1L, 2L, 3L, 4L), Set.copyOf(fused), "多 Query 多通道结果必须去重合并");
+        assertEquals(fused, RetrievalService.rrfFuse(rankedLists, 60, 10), "同输入排序必须可复现");
+        assertEquals(List.of(2L, 1L, 4L, 3L), fused, "多路 RRF 应按累计名次分数排序");
+    }
+
     private Dataset load() throws Exception {
         try (InputStream in = getClass().getResourceAsStream("/eval/retrieval-dataset.json")) {
             assertNotNull(in, "缺少固定评测集 /eval/retrieval-dataset.json");

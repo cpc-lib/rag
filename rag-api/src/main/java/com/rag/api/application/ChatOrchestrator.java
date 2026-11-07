@@ -47,6 +47,7 @@ public class ChatOrchestrator {
     private final PromptTemplateService promptTemplateService;
     private final ToolConfigService toolConfigService;
     private final RetrievalService retrievalService;
+    private final QueryRewriteService queryRewriteService;
     private final QuotaService quotaService;
     private final LlmClient llmClient;
     private final WeatherClient weatherClient;
@@ -125,9 +126,11 @@ public class ChatOrchestrator {
             }
 
             if (!toolHit) {
-                // 知识库路径：混合检索 → 模板渲染 → 流式生成
+                // 知识库路径：Query 改写（可配置）→ 混合检索 → 模板渲染 → 流式生成
                 send(emitter, "search_start", Map.of("stage", "kb"));
-                RetrievalService.RetrievalResult rr = retrievalService.retrieve(session, kbId, question);
+                List<String> rewritten = queryRewriteService.expand(cfg, history, question);
+                RetrievalService.RetrievalResult rr =
+                        retrievalService.retrieve(session, kbId, question, rewritten);
                 citations = rr.citations();
                 send(emitter, "search_result", Map.of("citations", citations,
                         "degraded", rr.degraded(),
