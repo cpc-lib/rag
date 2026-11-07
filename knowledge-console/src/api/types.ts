@@ -113,7 +113,7 @@ export interface ResetAdminResp {
 }
 
 // ---- 模型池 ----
-export type ModelType = 'CHAT' | 'VISION' | 'EMBEDDING' | 'IMAGE';
+export type ModelType = 'CHAT' | 'VISION' | 'EMBEDDING' | 'IMAGE' | 'RERANK';
 
 /** 列表/详情返回的脱敏视图（密钥仅回传是否已配置） */
 export interface ModelItem {

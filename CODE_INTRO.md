@@ -73,11 +73,12 @@ rag/
 
 - `persistence/entity`（19 个 @TableName 实体）+ `persistence/mapper`（BaseMapper）
 - `llm/LlmClient`：OpenAI 兼容 chat completions，WebClient + SSE；`newConnection()` 防连接 RST；SSE payload 直接处理（不检查 `data:` 前缀）
+- `llm/RerankClient`：Qwen3-Rerank 精排。DashScope 原生地址走 `/api/v1/services/rerank/text-rerank/text-rerank`，其他 base 走 OpenAI 兼容 `{base}/rerank`；解析 `relevance_score` 并按分数降序
 - `image/ZImageClient`：文生图同步 POST + 图片下载；Base URL 规整（剥离 `/compatible-mode/v1` 等后缀）；下载签名 URL 必须用 `URI.create`
 - `search/EsSearchClient`：索引 ensure/按文档删/BM25 检索
 - `search/MilvusClientWrapper`：collection ensure（schema 仅 chunk_id+document_id 两个字段）、insert、按文档删、向量检索
 - `storage/MinioStorage`：upload/download/presign/statSize/statPrefixSize/deleteObject/deletePrefix；md/txt 强制 `charset=utf-8`
-- `etcd/EtcdService`：业务动态配置中心。`RetrievalConfig`（vectorTopN/keywordTopN/topK/finalContextTopK/rerankTopN/maxContextTokens/rrfK/lowConfidenceThreshold）从 etcd `/rag/config/global/retrieval` 热更，yml 仅兜底
+- `etcd/EtcdService`：业务动态配置中心。`RetrievalConfig`（vectorTopN/keywordTopN/candidateTopK/topK/finalContextTopK/maxContextTokens/rrfK/lowConfidenceThreshold）从 etcd `/rag/config/global/retrieval` 热更，yml 仅兜底
 - `mq/IngestPublisher`：投递 parse/reindex 消息（direct exchange `rag.ingest`）
 - `tool/WeatherClient`、`tool/TavilyClient`：外部工具 HTTP 调用，出站受 SSRF + 出站确认双层管控
 
@@ -123,7 +124,8 @@ rag/
 `persistPlans`：重解析只删 `status=AUTO` 旧行（保留 MANUAL）；parentChild 计划先插 PARENT（parentContent/sectionTitle/sectionPath/contentHash），再插关联 CHILDREN（parent_chunk_id 回填）；独立计划直接插 CHILD。
 
 **`ParseService`**（扩展名分派）：
-- txt/md：直读
+- txt/md/json/sql/xml/yml/yaml/properties/常见代码文件（java/py/go/js/jsx/ts/tsx/sh）：直读
+- csv：RFC4180 解析（支持引号/转义/字段内换行），首行作表头转 Markdown 表格
 - docx/xlsx：Apache POI 5.2.5
 - pdf：PDFBox 2.0.31 文本层；扫描页/文本稀疏页渲染位图 → Tess4J OCR（`rag.ocr.tessdata` 留空则降级跳过）
 - html/htm：jsoup 去 script/style，DOM 转 markdown 结构文本
@@ -178,8 +180,9 @@ SPI 契约：`ChunkStrategy.mode()` 返回 `ChunkMode`；`plan(ChunkContext)` �
 
 1. 取租户启用的 CHAT/EMBEDDING/RERANK 模型与 `EtcdService` 检索参数
 2. Milvus 向量召回 vectorTopN（默认 20）+ ES BM25 keywordTopN（20），两路各得 chunkId 列表
-3. **RRF 融合**：score = Σ 1/(rrfK + rank)，rrfK=60；融合后取 topK=8
-4. **Rerank（可选）**：拉取候选 chunk 文本调 RERANK 模型 `/rerank`，按 relevance_score 重排截到 rerankTopN=5；未配置模型或调用异常 → 直接沿用 RRF 顺序（warn 日志，不失败）
+3. **RRF 融合**：score = Σ 1/(rrfK + rank)，rrfK=60；融合后取 candidateTopK=20 作为精排候选
+4. **Rerank（可选）**：拉取候选 child chunk 文本调 RERANK 模型精排，按 relevance_score 重排截到 topK=8；未配置模型、返回空或调用异常 → 直接沿用 RRF 顺序（warn 日志，不失败）
+   - 通道级降级：Query Embedding/Milvus 失败只关闭向量通道，ES 失败只关闭关键词通道；两路均失败才抛 `UPSTREAM`，不会伪装成"无匹配"
 5. **Parent 扩展**：CHILD 命中回溯 parent 内容，按 parent 单元去重
 6. **Token Budget**：按排序顺序累加近似 token，超过 maxContextTokens=12000 即截断
 7. citations 带回得分（含可空 rerankScore）供前端展示来源
@@ -196,6 +199,10 @@ direct exchange: rag.ingest（API/Worker 双侧声明，持久化）
   rk dlq     → rag.ingest.dlq      超限终态
 ```
 
+可靠性：消息立即 ack；执行前 `claimPending` 原子领取（PENDING→RUNNING）保证重复消息不并发执行；
+租户并发额度不足/执行器拒绝时延迟重投而非丢弃；`StaleTaskRecovery` 每 60s 扫描超过 60 分钟未更新的
+PENDING/RUNNING 任务并重投（阈值 `rag.worker.stale-task-minutes`）。
+
 ### 4.4 文生图
 
 `ImageController.generate` → `ImageGenerationService`：菜单校验 → 启用 IMAGE 模型（base/key/model 留空回退 DashScope 官方 / LLM key / z-image-turbo）→ 同步生成 → 下载 PNG → checkStorage → MinIO → generated_image 落库。下载走后端鉴权端点（跨域 a[download] 与 MinIO CORS 限制）。
@@ -204,7 +211,7 @@ direct exchange: rag.ingest（API/Worker 双侧声明，持久化）
 
 ## 5. 数据模型速查
 
-建表脚本：`rag-api/src/main/resources/db/migration/rag_demo.sql`（手动执行，无 ORM 自动建表）。
+建表脚本：`rag-api/src/main/resources/db/migration/V1__init_schema.sql`（Flyway 启动自动迁移，rag-worker 不执行迁移）。
 
 | 表 | 作用 | 关键字段/约束 |
 |---|---|---|

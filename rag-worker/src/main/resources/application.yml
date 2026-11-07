@@ -73,6 +73,12 @@ rag:
   worker:
     max-retry: 3
     retry-base-delay-ms: 10000
+    # 并发饱和/执行器拒绝后的重新调度延迟
+    saturation-retry-delay-ms: 5000
+    # 僵尸任务恢复：超过该时长未更新的 PENDING/RUNNING 任务会被重置并重投
+    stale-task-minutes: 60
+    recovery-interval-ms: 60000
+    recovery-initial-delay-ms: 120000
 
 logging:
   level:

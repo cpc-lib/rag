@@ -125,7 +125,10 @@ public class ChatOrchestrator {
                 send(emitter, "search_start", Map.of("stage", "kb"));
                 RetrievalService.RetrievalResult rr = retrievalService.retrieve(session, kbId, question);
                 citations = rr.citations();
-                send(emitter, "search_result", Map.of("citations", citations));
+                send(emitter, "search_result", Map.of("citations", citations,
+                        "degraded", rr.degraded(),
+                        "vectorAvailable", rr.vectorAvailable(),
+                        "keywordAvailable", rr.keywordAvailable()));
 
                 String systemPrompt = promptTemplateService.render(
                         template, buildMaterial(citations), "", question);

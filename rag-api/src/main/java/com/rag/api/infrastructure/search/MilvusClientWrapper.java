@@ -87,7 +87,8 @@ public class MilvusClientWrapper {
     }
 
     /**
-     * 幂等确保集合存在且向量维度匹配；维度不匹配且集合为空时重建，有数据则报错提示租户管理员。
+     * 幂等确保集合存在且向量维度匹配；维度不匹配且**确认**集合为空时重建，有数据或无法探测时报错。
+     * 安全约束：探测失败必须 fail closed，禁止把"查询异常"当成"空集合"而删除数据。
      */
     public void ensureCollection(String collection, int dim) {
         if (!hasCollection(collection)) {
@@ -95,9 +96,21 @@ public class MilvusClientWrapper {
             return;
         }
         Integer existing = describeDim(collection);
-        if (existing != null && existing != dim) {
-            if (countRows(collection) == 0) {
-                log.warn("Milvus 集合维度 {} != {}，重建: {}", existing, dim, collection);
+        if (existing == null) {
+            // 无法确认现有维度时不做任何破坏性操作
+            throw new BizException(ErrorCode.UPSTREAM,
+                    "无法读取 Milvus 集合向量维度，已中止建集合操作: " + collection);
+        }
+        if (existing != dim) {
+            long rows;
+            try {
+                rows = countRows(collection);
+            } catch (Exception e) {
+                throw new BizException(ErrorCode.UPSTREAM,
+                        "Milvus 集合探测失败，无法确认是否为空，拒绝重建: " + collection + "（" + e.getMessage() + "）");
+            }
+            if (rows == 0) {
+                log.warn("Milvus 集合维度 {} != {}，确认集合为空后重建: {}", existing, dim, collection);
                 dropCollection(collection);
                 createCollection(collection, dim);
             } else {
@@ -148,19 +161,21 @@ public class MilvusClientWrapper {
         return null;
     }
 
+    /**
+     * 探测集合是否有数据：limit(1) 有返回行即视为非空。
+     * 查询异常必须向上抛出——调用方据此 fail closed，绝不能把异常当成 0 行。
+     */
     private long countRows(String collection) {
-        try {
-            var resp = client().query(io.milvus.v2.service.vector.request.QueryReq.builder()
-                    .collectionName(collection)
-                    .filter("")
-                    .outputFields(new ArrayList<>())
-                    .limit(1)
-                    .build());
-            // limit(1) 探测：有返回行即视为集合非空
-            return resp == null || resp.getQueryResults() == null ? 0 : resp.getQueryResults().size();
-        } catch (Exception e) {
-            return 0;
+        var resp = client().query(io.milvus.v2.service.vector.request.QueryReq.builder()
+                .collectionName(collection)
+                .filter("")
+                .outputFields(new ArrayList<>())
+                .limit(1)
+                .build());
+        if (resp == null || resp.getQueryResults() == null) {
+            throw new IllegalStateException("Milvus 集合行数探测返回空响应: " + collection);
         }
+        return resp.getQueryResults().size();
     }
 
     public void insert(String collection, List<long[]> ids, List<float[]> vectors) {

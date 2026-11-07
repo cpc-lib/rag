@@ -14,7 +14,7 @@ import java.math.BigDecimal;
 import java.util.Set;
 
 /**
- * 模型池：每行一个模型（CHAT/VISION/EMBEDDING/IMAGE），每类最多一条 enabled。
+ * 模型池：每行一个模型（CHAT/VISION/EMBEDDING/IMAGE/RERANK），每类最多一条 enabled。
  * 管理接口返回脱敏视图；运行时 requireEnabled 返回含密钥的完整实体。
  */
 @Service
@@ -25,7 +25,8 @@ public class ModelService {
     public static final String VISION = "VISION";
     public static final String EMBEDDING = "EMBEDDING";
     public static final String IMAGE = "IMAGE";
-    private static final Set<String> TYPES = Set.of(CHAT, VISION, EMBEDDING, IMAGE);
+    public static final String RERANK = "RERANK";
+    private static final Set<String> TYPES = Set.of(CHAT, VISION, EMBEDDING, IMAGE, RERANK);
 
     private final ModelMapper mapper;
 
@@ -177,7 +178,7 @@ public class ModelService {
     private String normalizeType(String t) {
         String type = t == null ? "" : t.trim().toUpperCase();
         if (!TYPES.contains(type)) {
-            throw BizException.badRequest("type 必须是 CHAT / VISION / EMBEDDING / IMAGE");
+            throw BizException.badRequest("type 必须是 CHAT / VISION / EMBEDDING / IMAGE / RERANK");
         }
         return type;
     }
@@ -188,6 +189,7 @@ public class ModelService {
             case VISION -> "视觉";
             case EMBEDDING -> "向量";
             case IMAGE -> "文生图";
+            case RERANK -> "精排";
             default -> type;
         };
     }

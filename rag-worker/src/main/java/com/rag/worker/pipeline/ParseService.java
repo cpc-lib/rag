@@ -26,10 +26,11 @@ import java.io.ByteArrayInputStream;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Set;
 
 /**
- * 多格式解析（spec 4.1）：MD/TXT 直读；DOCX/XLSX 用 POI；PDF 文本层 + 扫描页 OCR；
- * 图片同时提取 OCR 文字与视觉描述（可用时）。
+ * 多格式解析（spec 4.1）：MD/TXT/CSV/JSON/常见代码文件直读；DOCX/XLSX 用 POI；
+ * PDF 文本层 + 扫描页 OCR；图片同时提取 OCR 文字与视觉描述（可用时）。
  */
 @Slf4j
 @Service
@@ -38,6 +39,11 @@ public class ParseService {
 
     public record RawPage(int page, String text) {
     }
+
+    /** 按纯文本直读、无需专用解析器的扩展名（与上传白名单 / ChunkStrategyRouter 保持一致）。 */
+    private static final Set<String> TEXT_EXTS = Set.of(
+            "txt", "md", "json", "sql", "xml", "yml", "yaml", "properties", "log", "ini", "conf",
+            "java", "py", "go", "js", "jsx", "ts", "tsx", "sh");
 
     public record ParseOutcome(List<RawPage> pages, List<String> warnings) {
     }
@@ -55,15 +61,105 @@ public class ParseService {
         }
         String ext = extOf(doc.getFileName());
         return switch (ext) {
-            case "txt", "md" -> new ParseOutcome(
-                    List.of(new RawPage(0, new String(bytes, StandardCharsets.UTF_8))), new ArrayList<>());
+            case "csv" -> parseCsv(bytes);
             case "docx" -> parseDocx(bytes);
             case "xlsx" -> parseXlsx(bytes);
             case "pdf" -> parsePdf(doc, bytes);
             case "html", "htm" -> parseHtml(bytes);
             case "png", "jpg", "jpeg" -> parseImage(doc, vision, bytes, ext);
-            default -> throw new IllegalStateException("不支持的文件类型: " + ext);
+            default -> {
+                if (TEXT_EXTS.contains(ext)) {
+                    yield plainText(bytes);
+                }
+                throw new IllegalStateException("不支持的文件类型: " + ext);
+            }
         };
+    }
+
+    private ParseOutcome plainText(byte[] bytes) {
+        return new ParseOutcome(
+                List.of(new RawPage(0, new String(bytes, StandardCharsets.UTF_8))), new ArrayList<>());
+    }
+
+    /** CSV 转为 Markdown 表格，首行作为表头；解析异常时回退为纯文本。 */
+    private ParseOutcome parseCsv(byte[] bytes) {
+        String raw = new String(bytes, StandardCharsets.UTF_8);
+        if (raw.startsWith("\uFEFF")) {
+            raw = raw.substring(1);
+        }
+        List<List<String>> rows = parseCsvRows(raw);
+        if (rows.isEmpty()) {
+            return plainText(bytes);
+        }
+        int cols = rows.stream().mapToInt(List::size).max().orElse(0);
+        StringBuilder sb = new StringBuilder();
+        sb.append("| ").append(rowToMd(rows.get(0), cols)).append(" |\n");
+        sb.append('|');
+        for (int i = 0; i < Math.max(1, cols); i++) {
+            sb.append(" --- |");
+        }
+        sb.append('\n');
+        for (int i = 1; i < rows.size(); i++) {
+            sb.append("| ").append(rowToMd(rows.get(i), cols)).append(" |\n");
+        }
+        return new ParseOutcome(List.of(new RawPage(0, sb.toString())), new ArrayList<>());
+    }
+
+    private String rowToMd(List<String> row, int cols) {
+        StringBuilder sb = new StringBuilder();
+        for (int i = 0; i < cols; i++) {
+            if (i > 0) {
+                sb.append(" | ");
+            }
+            String cell = i < row.size() ? row.get(i) : "";
+            sb.append(cell.replace("|", "\\|").replace('\n', ' '));
+        }
+        return sb.toString();
+    }
+
+    /** 最小 RFC4180 CSV 解析：支持双引号包裹、引号转义与字段内换行。 */
+    private List<List<String>> parseCsvRows(String raw) {
+        List<List<String>> rows = new ArrayList<>();
+        List<String> row = new ArrayList<>();
+        StringBuilder cell = new StringBuilder();
+        boolean quoted = false;
+        for (int i = 0; i < raw.length(); i++) {
+            char c = raw.charAt(i);
+            if (quoted) {
+                if (c == '"') {
+                    if (i + 1 < raw.length() && raw.charAt(i + 1) == '"') {
+                        cell.append('"');
+                        i++;
+                    } else {
+                        quoted = false;
+                    }
+                } else {
+                    cell.append(c);
+                }
+            } else if (c == '"') {
+                quoted = true;
+            } else if (c == ',') {
+                row.add(cell.toString());
+                cell.setLength(0);
+            } else if (c == '\n' || c == '\r') {
+                if (c == '\r' && i + 1 < raw.length() && raw.charAt(i + 1) == '\n') {
+                    i++;
+                }
+                row.add(cell.toString());
+                cell.setLength(0);
+                if (!(row.size() == 1 && row.get(0).isBlank())) {
+                    rows.add(row);
+                }
+                row = new ArrayList<>();
+            } else {
+                cell.append(c);
+            }
+        }
+        if (cell.length() > 0 || !row.isEmpty()) {
+            row.add(cell.toString());
+            rows.add(row);
+        }
+        return rows;
     }
 
     private ParseOutcome parseDocx(byte[] bytes) {

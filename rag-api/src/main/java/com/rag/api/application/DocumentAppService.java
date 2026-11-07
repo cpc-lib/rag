@@ -37,7 +37,13 @@ import java.util.UUID;
 @RequiredArgsConstructor
 public class DocumentAppService {
 
-    private static final Set<String> ALLOWED_EXT = Set.of("txt", "md", "pdf", "docx", "xlsx", "html", "htm", "png", "jpg", "jpeg");
+    private static final Set<String> ALLOWED_EXT = Set.of(
+            "txt", "md", "pdf", "docx", "xlsx", "html", "htm", "csv",
+            "json", "sql", "xml", "yml", "yaml", "properties", "log", "ini", "conf",
+            "java", "py", "go", "js", "jsx", "ts", "tsx", "sh",
+            "png", "jpg", "jpeg");
+
+    private static final String ALLOWED_EXT_HINT = String.join(" / ", ALLOWED_EXT.stream().sorted().toList());
 
     private final DocumentMapper documentMapper;
     private final ChunkMapper chunkMapper;
@@ -66,7 +72,7 @@ public class DocumentAppService {
         KnowledgeBaseEntity kb = knowledgeBaseService.getOwned(kbId);
         String ext = extOf(fileName);
         if (!ALLOWED_EXT.contains(ext)) {
-            throw BizException.badRequest("不支持的文件类型: " + ext + "（允许: txt/md/html/pdf/docx/xlsx/png/jpg/jpeg）");
+            throw BizException.badRequest("不支持的文件类型: " + ext + "（允许: " + ALLOWED_EXT_HINT + "）");
         }
         quotaService.checkStorage(s.tenantId(), fileSize);
         return kb;
@@ -118,7 +124,7 @@ public class DocumentAppService {
         String fileName = file.getOriginalFilename();
         String ext = extOf(fileName);
         if (!ALLOWED_EXT.contains(ext)) {
-            throw BizException.badRequest("不支持的文件类型: " + ext + "（允许: txt/md/html/pdf/docx/xlsx/png/jpg/jpeg）");
+            throw BizException.badRequest("不支持的文件类型: " + ext + "（允许: " + ALLOWED_EXT_HINT + "）");
         }
         quotaService.checkStorage(s.tenantId(), file.getSize());
 

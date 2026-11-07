@@ -82,7 +82,7 @@ cd knowledge-console && npm run build
 - `interfaces/` — Controller（路由前缀统一 `/api/v1`）、`dto/Dtos.java`（record 集中定义）、`GlobalExceptionHandler`、`security/{JwtAuthFilter,AuthGuard}`、`guard/SseConnectionGuard`
 - `application/` — 业务服务（无接口的单实现 @Service）：`AuthService`、`ChatOrchestrator`（SSE 编排）、`RetrievalService`（混合检索）、`DocumentAppService`、`ChunkAppService`、`KnowledgeBaseService`、`PromptTemplateService`、`ModelService`、`TenantService`、`UserManageService`、`MenuService`、`ToolConfigService`、`QuotaService`、`ChatSessionService`、`ImageGenerationService`
 - `infrastructure/`（**persistence 层已整体抽到 rag-common**，本模块不再有 entity/mapper）
-  - `llm/LlmClient`、`image/ZImageClient`（文生图）
+  - `llm/LlmClient`、`llm/RerankClient`（精排）、`image/ZImageClient`（文生图）
   - `search/{EsSearchClient,MilvusClientWrapper}`、`storage/MinioStorage`、`etcd/EtcdService`、`mq/IngestPublisher`
   - `tool/{WeatherClient,TavilyClient}`
 - `common/` — `ApiResult`、`BizException`、`ErrorCode`、`TenantContext`（ThreadLocal 会话）
@@ -100,7 +100,7 @@ cd knowledge-console && npm run build
 
 - `consumer/IngestConsumer` — 手动 ack、按租户信号量限流（`TenantMqSemaphore`）、失败延迟重试（TTL+DLQ，`RetryPublisher`），超 `rag.worker.max-retry` 置 FAILED
 - `pipeline/PipelineProcessor` — 状态机：`PARSE`（解析→切片→Embedding→双写）与 `REINDEX`（保留切片重嵌重建）
-- `pipeline/ParseService` — txt/md 直读；docx/xlsx 用 POI；pdf 用 PDFBox 2.x 文本层 + 扫描页 Tess4J OCR；html 用 jsoup；图片走 Vision
+- `pipeline/ParseService` — txt/md/json/常见代码文件直读；csv 转 Markdown 表格；docx/xlsx 用 POI；pdf 用 PDFBox 2.x 文本层 + 扫描页 Tess4J OCR；html 用 jsoup；图片走 Vision
 - `pipeline/chunk/` — 15 种切片策略（见 §5），SPI 风格：`ChunkStrategy.mode()/plan(ChunkContext)`；`ChunkStrategyRouter` 注入 `List<ChunkStrategy>` 并解析 AUTO；`ChunkSupport` 提供共享机制
 - `infrastructure/llm/{EmbeddingClient,VisionClient}`、`ocr/OcrService`、`search/{EsIndexer,MilvusIndexer}`、`storage/MinioStorage`、`etcd/WorkerRegistry`
 - **PDFBox 是 2.x**：用 `PDDocument.load(...)`，不存在 `org.apache.pdfbox.Loader`（那是 3.x API）
@@ -144,8 +144,9 @@ IngestConsumer（租户并发信号量 → RUNNING）
 
 ```
 Milvus 向量召回 vectorTopN(20) + ES BM25 keywordTopN(20)
-  → RRF 融合(rrf-k=60) 取 topK(8)
-  → 可选 RERANK 模型二阶段精排（未配置/调用失败静默降级，沿用 RRF 序）
+  → 通道级降级（单路失败保留另一路，两路均失败才报错）
+  → RRF 融合(rrf-k=60) 取 candidateTopK(20)
+  → 可选 RERANK 模型二阶段精排（未配置/调用失败静默降级，沿用 RRF 序）取 topK(8)
   → CHILD 命中扩展到 PARENT 内容并按 parent 去重
   → Token Budget（max-context-tokens=12000）截断
   → 组装 system prompt → LLM SSE

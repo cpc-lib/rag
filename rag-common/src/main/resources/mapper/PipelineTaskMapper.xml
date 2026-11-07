@@ -12,6 +12,22 @@
         WHERE deleted = 0 AND id = #{id}
     </select>
 
+    <update id="claimPending">
+        UPDATE pipeline_task
+        SET status = 'RUNNING'
+        WHERE deleted = 0 AND id = #{id} AND status = 'PENDING'
+    </update>
+
+    <select id="selectStaleTasks" resultType="com.rag.api.infrastructure.persistence.entity.PipelineTaskEntity">
+        SELECT <include refid="Base_Column_List"/>
+        FROM pipeline_task
+        WHERE deleted = 0
+          AND status IN ('PENDING', 'RUNNING')
+          AND updated_at &lt; DATE_SUB(NOW(), INTERVAL #{minutes} MINUTE)
+        ORDER BY id
+        LIMIT 200
+    </select>
+
     <insert id="insert" useGeneratedKeys="true" keyProperty="id">
         INSERT INTO pipeline_task
         <trim prefix="(" suffix=")" suffixOverrides=",">

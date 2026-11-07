@@ -5,6 +5,7 @@ import com.rag.api.common.ErrorCode;
 import com.rag.api.common.TenantContext;
 import com.rag.api.infrastructure.etcd.EtcdService;
 import com.rag.api.infrastructure.llm.LlmClient;
+import com.rag.api.infrastructure.llm.RerankClient;
 import com.rag.api.infrastructure.persistence.entity.ChunkEntity;
 import com.rag.api.infrastructure.persistence.entity.DocumentEntity;
 import com.rag.api.infrastructure.persistence.entity.KnowledgeBaseEntity;
@@ -51,7 +52,12 @@ public class RetrievalService {
         }
     }
 
-    public record RetrievalResult(List<Citation> citations, double bestVectorScore) {
+    /** vectorAvailable / keywordAvailable 表示各召回通道本次是否真正执行成功，用于降级观测。 */
+    public record RetrievalResult(List<Citation> citations, double bestVectorScore,
+                                  boolean vectorAvailable, boolean keywordAvailable) {
+        public boolean degraded() {
+            return !vectorAvailable || !keywordAvailable;
+        }
     }
 
     private final KnowledgeBaseMapper kbMapper;
@@ -59,6 +65,7 @@ public class RetrievalService {
     private final ChunkMapper chunkMapper;
     private final DocumentMapper documentMapper;
     private final LlmClient llmClient;
+    private final RerankClient rerankClient;
     private final MilvusClientWrapper milvus;
     private final EsSearchClient es;
     private final MinioStorage minio;
@@ -72,27 +79,33 @@ public class RetrievalService {
         if (!session.isPlatformAdmin() && !kb.getTenantId().equals(session.tenantId())) {
             throw BizException.forbidden("无权访问该知识库");
         }
-        ModelEntity emb = modelService.requireEnabled(kb.getTenantId(), ModelService.EMBEDDING);
-        if (emb.getModel() == null) {
-            throw BizException.badRequest("启用的向量模型缺少模型名称");
-        }
         EtcdService.RetrievalConfig rc = etcdService.retrievalConfig();
 
-        // 1. 向量召回
-        float[] vector = llmClient.embed(emb.getBaseUrl(), emb.getApiKey(),
-                emb.getModel(), List.of(question)).get(0);
+        // 1. 向量通道：Query Embedding + Milvus。任一环节失败只关闭向量通道，不影响关键词通道。
+        boolean vectorAvailable = true;
         List<MilvusClientWrapper.MilvusHit> vectorHits = List.of();
-        long vecStart = System.currentTimeMillis();
-        try {
-            vectorHits = milvus.search(kb.getMilvusCollection(), vector, rc.vectorTopN);
-            log.info("向量检索（Milvus）kb={} collection={} topN={} 命中={}条 耗时={}ms",
-                    kbId, kb.getMilvusCollection(), rc.vectorTopN, vectorHits.size(),
-                    System.currentTimeMillis() - vecStart);
-        } catch (Exception e) {
-            log.warn("向量检索失败（可能尚未建索引）kb={} collection={} 耗时={}ms: {}",
-                    kbId, kb.getMilvusCollection(), System.currentTimeMillis() - vecStart, e.getMessage());
+        ModelEntity emb = modelService.findEnabled(kb.getTenantId(), ModelService.EMBEDDING);
+        if (emb == null || emb.getModel() == null) {
+            vectorAvailable = false;
+            log.warn("向量通道不可用（租户未启用向量模型）kb={} tenant={}", kbId, kb.getTenantId());
+        } else {
+            long vecStart = System.currentTimeMillis();
+            try {
+                float[] vector = llmClient.embed(emb.getBaseUrl(), emb.getApiKey(),
+                        emb.getModel(), List.of(question)).get(0);
+                vectorHits = milvus.search(kb.getMilvusCollection(), vector, rc.vectorTopN);
+                log.info("向量检索（Milvus）kb={} collection={} topN={} 命中={}条 耗时={}ms",
+                        kbId, kb.getMilvusCollection(), rc.vectorTopN, vectorHits.size(),
+                        System.currentTimeMillis() - vecStart);
+            } catch (Exception e) {
+                vectorAvailable = false;
+                log.warn("向量检索失败，降级为仅关键词检索 kb={} collection={} 耗时={}ms: {}",
+                        kbId, kb.getMilvusCollection(), System.currentTimeMillis() - vecStart, e.getMessage());
+            }
         }
-        // 2. 关键词召回
+
+        // 2. 关键词通道：ES BM25。失败只关闭关键词通道，保留向量结果。
+        boolean keywordAvailable = true;
         List<Long> keywordIds = List.of();
         long kwStart = System.currentTimeMillis();
         try {
@@ -101,13 +114,19 @@ public class RetrievalService {
                     kbId, kb.getEsIndex(), rc.keywordTopN, keywordIds.size(),
                     System.currentTimeMillis() - kwStart);
         } catch (Exception e) {
-            log.warn("关键词检索失败（可能尚未建索引）kb={} index={} 耗时={}ms: {}",
+            keywordAvailable = false;
+            log.warn("关键词检索失败，保留向量结果 kb={} index={} 耗时={}ms: {}",
                     kbId, kb.getEsIndex(), System.currentTimeMillis() - kwStart, e.getMessage());
+        }
+        // 双通道均不可用属于基础设施故障，必须显式报错，不能伪装成"知识库无匹配"
+        if (!vectorAvailable && !keywordAvailable) {
+            throw new BizException(ErrorCode.UPSTREAM,
+                    "向量检索与关键词检索均不可用，请检查向量模型与 Elasticsearch 配置");
         }
         double bestScore = vectorHits.stream().mapToDouble(MilvusClientWrapper.MilvusHit::score)
                 .max().orElse(0.0);
 
-        // 3. RRF 融合
+        // 3. RRF 融合 → candidateTopK 候选 → 可选 Rerank → topK
         Map<Long, Double> rrf = new HashMap<>();
         for (int i = 0; i < vectorHits.size(); i++) {
             rrf.merge(vectorHits.get(i).chunkId(), 1.0 / (rc.rrfK + i + 1), Double::sum);
@@ -117,13 +136,17 @@ public class RetrievalService {
         }
         Set<Long> vectorIds = vectorHits.stream().map(MilvusClientWrapper.MilvusHit::chunkId).collect(Collectors.toSet());
         long overlap = keywordIds.stream().filter(vectorIds::contains).count();
-        List<Long> topIds = rrf.entrySet().stream()
+        int candidateLimit = Math.max(rc.topK, rc.candidateTopK);
+        List<Long> candidateIds = rrf.entrySet().stream()
                 .sorted(Map.Entry.<Long, Double>comparingByValue().reversed())
-                .limit(rc.topK)
+                .limit(candidateLimit)
                 .map(Map.Entry::getKey)
                 .toList();
-        log.info("RRF 融合 kb={} rrfK={} 向量={}条 关键词={}条 双路重叠={}条 融合去重={}条 入选topK={}条 ids={}",
-                kbId, rc.rrfK, vectorHits.size(), keywordIds.size(), overlap, rrf.size(), topIds.size(), topIds);
+        log.info("RRF 融合 kb={} rrfK={} 向量={}条 关键词={}条 双路重叠={}条 融合去重={}条 候选={}条 vectorAvailable={} keywordAvailable={}",
+                kbId, rc.rrfK, vectorHits.size(), keywordIds.size(), overlap, rrf.size(),
+                candidateIds.size(), vectorAvailable, keywordAvailable);
+        List<Long> topIds = rerankIfEnabled(kb, question, candidateIds, rc.topK);
+        log.info("检索最终排序 kb={} topK={} ids={}", kbId, topIds.size(), topIds);
 
         // 4. child → parent 扩展：同 parent 去重（保留最高排名），parent 内容作为引用上下文
         Map<Long, ChunkEntity> chunks = topIds.isEmpty() ? Map.of()
@@ -221,7 +244,69 @@ public class RetrievalService {
             usedTokens += citationTokens;
             seq++;
         }
-        return new RetrievalResult(citations, bestScore);
+        return new RetrievalResult(citations, bestScore, vectorAvailable, keywordAvailable);
+    }
+
+    /**
+     * 可选二阶段精排：租户启用 RERANK 模型时，对 RRF 候选做 query + child chunk 精排。
+     * 模型未配置、返回空、超时或任意异常均静默降级为 RRF 原排序，不阻断问答主链路。
+     */
+    private List<Long> rerankIfEnabled(KnowledgeBaseEntity kb, String question,
+                                       List<Long> candidateIds, int topK) {
+        List<Long> rrfOrdered = candidateIds.stream().limit(topK).toList();
+        if (candidateIds.size() <= 1) {
+            return rrfOrdered;
+        }
+        ModelEntity rerank = modelService.findEnabled(kb.getTenantId(), ModelService.RERANK);
+        if (rerank == null || rerank.getModel() == null) {
+            return rrfOrdered;
+        }
+        Map<Long, ChunkEntity> candidates = chunkMapper.selectByIds(candidateIds).stream()
+                .filter(c -> !"DELETED".equals(c.getStatus()))
+                .collect(Collectors.toMap(ChunkEntity::getId, Function.identity(), (a, b) -> a));
+        List<Long> validIds = candidateIds.stream().filter(candidates::containsKey).toList();
+        if (validIds.isEmpty()) {
+            return List.of();
+        }
+        List<String> documents = validIds.stream().map(id -> candidates.get(id).getContent()).toList();
+        try {
+            long start = System.currentTimeMillis();
+            List<RerankClient.RerankHit> hits = rerankClient.rerank(
+                    rerank.getBaseUrl(), rerank.getApiKey(), rerank.getModel(), question, documents, topK);
+            if (hits.isEmpty()) {
+                log.warn("Rerank 返回空结果，降级使用 RRF 排序 kb={}", kb.getId());
+                return rrfOrdered;
+            }
+            List<Long> ordered = new ArrayList<>();
+            for (RerankClient.RerankHit hit : hits) {
+                if (hit.index() >= 0 && hit.index() < validIds.size()) {
+                    Long id = validIds.get(hit.index());
+                    if (!ordered.contains(id)) {
+                        ordered.add(id);
+                    }
+                }
+            }
+            if (ordered.isEmpty()) {
+                log.warn("Rerank 结果索引全部越界，降级使用 RRF 排序 kb={}", kb.getId());
+                return rrfOrdered;
+            }
+            // 精排只返回部分候选时，按 RRF 顺序补齐，避免最终上下文数量不足
+            for (Long id : validIds) {
+                if (ordered.size() >= topK) {
+                    break;
+                }
+                if (!ordered.contains(id)) {
+                    ordered.add(id);
+                }
+            }
+            List<Long> result = ordered.stream().limit(topK).toList();
+            log.info("Rerank 精排完成 kb={} 候选={}条 返回={}条 耗时={}ms ids={}",
+                    kb.getId(), validIds.size(), hits.size(), System.currentTimeMillis() - start, result);
+            return result;
+        } catch (Exception e) {
+            log.warn("Rerank 调用失败，降级使用 RRF 排序 kb={}: {}", kb.getId(), e.getMessage());
+            return rrfOrdered;
+        }
     }
 
     /** 与 Worker 的切片计数保持同一近似口径。 */

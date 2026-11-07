@@ -19,10 +19,19 @@ import org.springframework.stereotype.Component;
 
 import java.io.IOException;
 import java.util.concurrent.Executor;
+import java.util.concurrent.RejectedExecutionException;
 
 /**
  * 流水线消费者：收到消息立即 ack，提交 ingestExecutor 异步执行；
  * 失败按 retry_count 延迟重试（TTL 死信），超限入 DLQ 并置 FAILED。
+ *
+ * <p>可靠性约束（至少一次语义）：
+ * <ul>
+ *   <li>消息解析后立即 ack，避免分钟级处理触发 RabbitMQ consumer_timeout 重复投递；</li>
+ *   <li>任务执行前用 {@link PipelineTaskMapper#claimPending} 条件领取，重复消息不会并发执行；</li>
+ *   <li>租户并发额度不足、执行器拒绝时一律延迟重投，绝不静默丢弃；</li>
+ *   <li>进程崩溃留下的 PENDING/RUNNING 由 {@code StaleTaskRecovery} 定期重投。</li>
+ * </ul>
  */
 @Slf4j
 @Component
@@ -43,6 +52,10 @@ public class IngestConsumer {
     @Value("${rag.worker.retry-base-delay-ms:10000}")
     private long retryBaseDelayMs;
 
+    /** 并发饱和/执行器拒绝时的重新调度延迟，避免立即回队造成空转。 */
+    @Value("${rag.worker.saturation-retry-delay-ms:5000}")
+    private long saturationRetryDelayMs;
+
     @RabbitListener(queues = "${rag.mq.queue}", containerFactory = "ingestFactory")
     public void onMessage(Message message, Channel channel) throws IOException {
         long tag = message.getMessageProperties().getDeliveryTag();
@@ -55,11 +68,17 @@ public class IngestConsumer {
             return;
         }
         // 立即 ack：解析/Embedding/索引是分钟级阻塞操作，若等处理完再 ack 会触发 RabbitMQ
-        // consumer_timeout（默认 30 分钟）关闭通道并重新投递，导致任务重复执行。
-        // 幂等性由 DB 状态保证（PENDING 状态下重复投递会被忽略）。
+        // consumer_timeout（默认 30 分钟）关闭通道并重新投递。
+        // 至少一次语义由 DB 条件领取 + 并发饱和重投 + 僵尸任务恢复共同保证。
         channel.basicAck(tag, false);
         log.info("收到任务 task={} type={} doc={}，已确认，异步执行", msg.taskId(), msg.type(), msg.documentId());
-        ingestExecutor.execute(() -> doProcess(msg));
+        try {
+            ingestExecutor.execute(() -> doProcess(msg));
+        } catch (RejectedExecutionException e) {
+            // 执行器饱和：消息已 ack，必须重新投递，否则任务永远停在 PENDING
+            log.warn("执行器拒绝任务，转入延迟重投 task={}", msg.taskId());
+            republishSafely(msg);
+        }
     }
 
     private void doProcess(RetryPublisher.IngestMessage msg) {
@@ -70,16 +89,21 @@ public class IngestConsumer {
             return;
         }
 
-        // 租户并发额度：超出则直接放弃（消息已 ack，不再 requeue；由用户重新触发或依赖重试机制）
+        // 租户并发额度不足：延迟重投而非放弃，任务保持 PENDING 可恢复
         if (!semaphore.tryAcquire(msg.tenantId())) {
-            log.warn("租户 {} MQ 并发已达上限，任务跳过 task={}", msg.tenantId(), msg.taskId());
+            log.warn("租户 {} MQ 并发已达上限，任务延迟重投 task={}", msg.tenantId(), msg.taskId());
+            republishSafely(msg);
             return;
         }
 
         try {
-            task.setStatus("RUNNING");
-            taskMapper.updateById(task);
+            // 条件领取：重复投递/多 Worker 竞争时只有一方能把 PENDING 改为 RUNNING
+            if (taskMapper.claimPending(msg.taskId()) != 1) {
+                log.info("任务已被其他消费者领取或状态已变化，跳过 task={}", msg.taskId());
+                return;
+            }
             processor.process(msg, task);
+            task.setStatus("SUCCESS");
             taskMapper.updateById(task);
             log.info("任务成功 task={}", msg.taskId());
         } catch (StoppedException e) {
@@ -91,6 +115,15 @@ public class IngestConsumer {
             handleFailure(msg, task, e);
         } finally {
             semaphore.release(msg.tenantId());
+        }
+    }
+
+    /** 重投失败只记录日志：任务仍是 PENDING/RUNNING，由恢复扫描兜底。 */
+    private void republishSafely(RetryPublisher.IngestMessage msg) {
+        try {
+            retryPublisher.publishRetry(msg, saturationRetryDelayMs);
+        } catch (Exception e) {
+            log.error("任务重投失败 task={}，等待恢复扫描兜底: {}", msg.taskId(), e.getMessage());
         }
     }
 

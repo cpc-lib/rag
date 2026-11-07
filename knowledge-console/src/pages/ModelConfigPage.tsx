@@ -24,6 +24,7 @@ const TYPE_LABEL: Record<ModelType, string> = {
   VISION: '视觉',
   EMBEDDING: '向量',
   IMAGE: '文生图',
+  RERANK: '精排',
 };
 
 const TYPE_COLOR: Record<ModelType, string> = {
@@ -31,6 +32,7 @@ const TYPE_COLOR: Record<ModelType, string> = {
   VISION: 'purple',
   EMBEDDING: 'cyan',
   IMAGE: 'geekblue',
+  RERANK: 'orange',
 };
 
 const formatTime = (raw: string | null) => {
@@ -369,11 +371,14 @@ export default function ModelConfigPage() {
               }))}
             />
           </Form.Item>
-          <Form.Item name="baseUrl" label="接口 Base URL（OpenAI 兼容）">
-            <Input placeholder="如 https://api.example.com/v1" />
+          <Form.Item
+            name="baseUrl"
+            label={type === 'RERANK' ? '接口 Base URL（DashScope 或 OpenAI 兼容 Rerank）' : '接口 Base URL（OpenAI 兼容）'}
+          >
+            <Input placeholder={type === 'RERANK' ? '如 https://dashscope.aliyuncs.com' : '如 https://api.example.com/v1'} />
           </Form.Item>
           <Form.Item name="model" label="模型名称">
-            <Input placeholder="如 qwen-plus" />
+            <Input placeholder={type === 'RERANK' ? '如 qwen3-rerank' : '如 qwen-plus'} />
           </Form.Item>
           <Form.Item name="apiKey" label="API Key">
             <Input.Password placeholder="请输入 API Key" />

@@ -211,6 +211,17 @@ public class PipelineProcessor {
                         doc.getFileName(), c.getPage() == null ? 0 : c.getPage(),
                         embeddingText(doc, c)))
                 .toList());
+        setStage(doc, "INDEXING", 95);
+
+        // 双写一致性校验：两侧数量必须等于预期 child 数，否则不允许进入 READY
+        long esCount = esIndexer.countByDocument(kb.getEsIndex(), doc.getId());
+        long milvusCount = milvusIndexer.countByDocument(kb.getMilvusCollection(), doc.getId(), chunks.size());
+        if (esCount != chunks.size() || milvusCount != chunks.size()) {
+            throw new IllegalStateException("双索引写入数量不一致 doc=" + doc.getId()
+                    + " expected=" + chunks.size() + " es=" + esCount + " milvus=" + milvusCount);
+        }
+        log.info("双索引一致性校验通过 doc={} chunks={} es={} milvus={}",
+                doc.getId(), chunks.size(), esCount, milvusCount);
     }
 
     /**

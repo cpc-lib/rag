@@ -31,7 +31,12 @@ import { kbApi } from '../api/knowledgeBases';
 import { useAuthStore } from '../store/auth';
 import type { Chunk, DocumentItem, KnowledgeBase } from '../api/types';
 
-const ALLOWED_EXT = ['.txt', '.md', '.pdf', '.docx', '.xlsx', '.png', '.jpg', '.jpeg'];
+const ALLOWED_EXT = [
+  '.txt', '.md', '.pdf', '.docx', '.xlsx', '.html', '.htm', '.csv',
+  '.json', '.sql', '.xml', '.yml', '.yaml', '.properties', '.log', '.ini', '.conf',
+  '.java', '.py', '.go', '.js', '.jsx', '.ts', '.tsx', '.sh',
+  '.png', '.jpg', '.jpeg',
+];
 
 const PIPELINE_STEPS = ['解析', '切片', '向量化', '索引'];
 
@@ -613,7 +618,7 @@ export default function KbDetailPage() {
           {kb?.description && <Typography.Text type="secondary">{kb.description}</Typography.Text>}
         </Space>
         <Space>
-          <Tooltip title="支持 txt / md / pdf / docx / xlsx / png / jpg / jpeg，单个文件 ≤ 100MB">
+          <Tooltip title="支持 txt / md / pdf / docx / xlsx / html / csv / json / 常见代码文件 / png / jpg / jpeg，单个文件 ≤ 100MB">
             <Upload
               accept={ALLOWED_EXT.join(',')}
               showUploadList={false}

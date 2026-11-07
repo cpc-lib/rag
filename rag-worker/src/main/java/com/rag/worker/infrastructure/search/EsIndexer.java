@@ -9,6 +9,7 @@ import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 
 import java.io.StringReader;
+import java.util.ArrayList;
 import java.util.List;
 
 /**
@@ -65,22 +66,48 @@ public class EsIndexer {
             }
             BulkResponse resp = client.bulk(bulk.build());
             if (resp.errors()) {
-                log.warn("ES bulk 存在部分错误 index={} size={}", index, docs.size());
-            } else {
-                log.info("ES bulk 写入完成 index={} 条数={}", index, docs.size());
+                // 部分 item 失败不能视为成功：必须抛出交给 MQ 重试，否则文档会被错误标记 READY
+                List<String> failures = new ArrayList<>();
+                for (var item : resp.items()) {
+                    if (item.error() != null) {
+                        failures.add("id=" + item.id() + " status=" + item.status()
+                                + " reason=" + item.error().reason());
+                    }
+                }
+                throw new IllegalStateException("ES bulk 部分写入失败 index=" + index
+                        + " 失败=" + failures.size() + "/" + docs.size()
+                        + " 首个原因: " + (failures.isEmpty() ? "unknown" : failures.get(0)));
             }
+            log.info("ES bulk 写入完成 index={} 条数={}", index, docs.size());
         } catch (Exception e) {
             throw new IllegalStateException("ES 写入失败: " + e.getMessage(), e);
         }
     }
 
+    /**
+     * 删除某文档旧索引。失败必须向上抛出：旧切片残留会导致重建后 ES 中出现重复/孤儿索引，
+     * 需由 MQ 重试重新执行删除与写入。
+     */
     public void deleteByDocument(String index, long documentId) {
         try {
             client.deleteByQuery(d -> d.index(index)
                     .query(q -> q.term(t -> t.field("documentId").value(String.valueOf(documentId)))));
             log.info("ES 删除文档旧索引完成 index={} doc={}", index, documentId);
         } catch (Exception e) {
-            log.warn("ES 删除旧索引失败 index={} doc={}: {}", index, documentId, e.getMessage());
+            throw new IllegalStateException("ES 删除文档旧索引失败 index=" + index
+                    + " doc=" + documentId + ": " + e.getMessage(), e);
+        }
+    }
+
+    /** 统计某文档在 ES 中的切片数（写入后一致性校验用）。 */
+    public long countByDocument(String index, long documentId) {
+        try {
+            var resp = client.count(c -> c.index(index)
+                    .query(q -> q.term(t -> t.field("documentId").value(String.valueOf(documentId)))));
+            return resp.count();
+        } catch (Exception e) {
+            throw new IllegalStateException("ES 统计文档切片数失败 index=" + index
+                    + " doc=" + documentId + ": " + e.getMessage(), e);
         }
     }
 
