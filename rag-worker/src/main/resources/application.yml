@@ -59,6 +59,8 @@ rag:
   milvus:
     host: ${MIDDLEWARE_HOST:192.168.1.200}
     port: ${MILVUS_PORT:19530}
+    # 维度不一致时是否允许自动删除"已确认空"的集合重建；默认关闭，需显式开启并留下审计日志
+    allow-auto-recreate: ${MILVUS_ALLOW_AUTO_RECREATE:false}
   etcd:
     endpoints: http://${MIDDLEWARE_HOST:192.168.1.200}:${ETCD_PORT:2379}
     enabled: true

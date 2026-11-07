@@ -39,12 +39,15 @@ public class MilvusClientWrapper {
 
     private final String host;
     private final int port;
+    private final boolean allowAutoRecreate;
     private volatile MilvusClientV2 client;
 
     public MilvusClientWrapper(@Value("${rag.milvus.host}") String host,
-                               @Value("${rag.milvus.port}") int port) {
+                               @Value("${rag.milvus.port}") int port,
+                               @Value("${rag.milvus.allow-auto-recreate:false}") boolean allowAutoRecreate) {
         this.host = host;
         this.port = port;
+        this.allowAutoRecreate = allowAutoRecreate;
     }
 
     private MilvusClientV2 client() {
@@ -110,7 +113,14 @@ public class MilvusClientWrapper {
                         "Milvus 集合探测失败，无法确认是否为空，拒绝重建: " + collection + "（" + e.getMessage() + "）");
             }
             if (rows == 0) {
-                log.warn("Milvus 集合维度 {} != {}，确认集合为空后重建: {}", existing, dim, collection);
+                if (!allowAutoRecreate) {
+                    throw new BizException(ErrorCode.UPSTREAM,
+                            "Milvus 集合维度不一致且为空，但自动重建已禁用（rag.milvus.allow-auto-recreate=false）："
+                                    + collection + "。请手动删除集合或显式开启该配置后重试");
+                }
+                // 审计：任何 drop 都必须留下集合、维度与确认条件
+                log.warn("[AUDIT] Milvus 重建空集合 collection={} oldDim={} newDim={} confirmedRows=0 reason=dimension-mismatch",
+                        collection, existing, dim);
                 dropCollection(collection);
                 createCollection(collection, dim);
             } else {

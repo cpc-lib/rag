@@ -266,8 +266,9 @@ public class UserManageService {
         if (kb == null) {
             throw BizException.notFound("知识库不存在");
         }
+        // 跨租户统一返回"不存在"，不泄露资源存在性（AGENTS §8.3 / RAG-010）
         if (!s.isPlatformAdmin() && !s.tenantId().equals(kb.getTenantId())) {
-            throw BizException.forbidden("无权访问该知识库");
+            throw BizException.notFound("知识库不存在");
         }
         if (s.userType() == 2
                 && userKbMapper.countByUserIdAndKbId(s.userId(), kbId) == 0) {

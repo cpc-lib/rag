@@ -61,10 +61,20 @@ rag/
 | 任务可靠性（claim / 重试 / 僵尸恢复） | 已实现 | `IngestConsumer`、`StaleTaskRecovery` | 并发饱和不丢任务；重启后超时 PENDING/RUNNING 被重投 |
 | 死信重放 | 已实现 | `PipelineOpsService` | `POST /api/v1/ops/pipeline/dlq/replay`（平台管理员） |
 | 队列积压观测 | 已实现 | `PipelineOpsService#queueDepths` | `GET /api/v1/ops/pipeline/queues`（平台管理员） |
+| PDF 内嵌图片理解 | 已实现（OCR 可直接用，Vision 需配置） | `ParseService#extractImagesText` | 图文混排 PDF 检索图片内文字；图片描述追加到对应页码文本 |
 | 索引版本化 / 双版本切换 | 规划中 | — | 当前为「先删后写」，重建期间旧索引不可读 |
 | PDF 结构化 Block（标题/表格/图片） | 规划中 | — | 当前为文本层 + OCR + 版面排序 |
 | 统一表格结构化模型 | 规划中 | — | 当前按各解析器分别输出文本 |
 | RAG Evaluation 基线 | 规划中 | — | 尚未建立固定评测集与指标流水线 |
+
+### 索引与重建语义
+
+- **删除文档**：DB 逻辑删除后删除 ES / Milvus 中该 `documentId` 的全部条目；任一路删除失败会抛错，由重试或人工补偿，避免残留孤儿索引。
+- **重新解析（PARSE）**：只删除 `status=AUTO` 的旧切片，人工切片保留；新切片落库后重建双索引。
+- **重建索引（REINDEX）**：保留既有切片（含人工），仅重新 Embedding 并重写双索引，切片 ID 不变。
+- **手动编辑切片**：编辑 AUTO child 会使其脱离 parent，后续重解析不再覆盖该切片。
+- **Milvus 维度变更**：仅当集合被确认（行数探测成功且为 0）为空时允许重建，且需显式开启 `rag.milvus.allow-auto-recreate=true`；drop 前输出 `[AUDIT]` 日志。
+- **回滚**：当前不支持双版本并行读取；重建前如需保留旧索引，需由运维对 Milvus / ES 做快照。
 
 ## 快速开始
 

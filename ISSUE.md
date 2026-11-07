@@ -97,12 +97,12 @@ flowchart TD
 | RAG-002 | P0 | 可靠性 | 修复 RabbitMQ 提前 ACK 与并发拒绝后任务遗漏 | [x] |
 | RAG-003 | P0 | 数据一致性 | 修复 Elasticsearch Bulk 部分失败与双索引不一致 | 部分完成 |
 | RAG-004 | P0 | 可用性 | Embedding 失败时支持 ES-only 检索降级 | [x] |
-| RAG-005 | P0 | 数据安全 | 防止 Milvus 探测失败触发危险重建 | 部分完成 |
+| RAG-005 | P0 | 数据安全 | 防止 Milvus 探测失败触发危险重建 | [x] |
 | RAG-006 | P1 | 兼容性 | 统一文件上传白名单、解析器与切片路由 | [x] |
-| RAG-007 | P1 | 多模态 | 升级 PDF Layout / 内嵌图片抽取与理解 | [ ] |
+| RAG-007 | P1 | 多模态 | 升级 PDF Layout / 内嵌图片抽取与理解 | 部分完成 |
 | RAG-008 | P1 | 内容质量 | 完善表格结构化抽取与跨页、跨块保护 | [ ] |
 | RAG-009 | P1 | 质量保障 | 建立 RAG Evaluation 与回归测试基线 | [ ] |
-| RAG-010 | P1 | 安全性 | 补齐多租户检索隔离与引用访问测试 | [ ] |
+| RAG-010 | P1 | 安全性 | 补齐多租户检索隔离与引用访问测试 | 部分完成 |
 | RAG-011 | P1 | 运维 | 入库状态机、重试恢复、可观测性闭环 | [x] |
 | RAG-012 | P1 | 文档一致性 | 修复 README / AGENTS / 规格与代码偏差 | [x] |
 | RAG-013 | P2 | 检索质量 | Query Rewrite / Multi-Query / 意图识别 | [ ] |
@@ -168,7 +168,7 @@ flowchart TD
   - [x] 建立文档级索引写入统计与对账；明确双写部分失败的补偿机制。（新增 `GET /api/v1/documents/{id}/index-status`，比对 DB 可索引 child 数 / ES / Milvus 三方条数；任一路探测失败单独返回 error，不掩盖另一路）
   - [x] INDEXING → READY 前校验预期 children 与两个索引的可检索数量/版本是否一致。
   - [ ] 重建索引期间保证旧索引可读，设计失败回滚或双版本切换策略；避免先删除旧版本后失败导致知识不可用。
-  - [ ] 明确删除、重建、手动编辑 chunk 的重索引语义。
+  - [x] 明确删除、重建、手动编辑 chunk 的重索引语义。（见 README「索引与重建语义」；当前仍为"先删后写"，双版本并行读取未实现）
 - **验收标准**：
   1. ES Bulk 部分失败不能错误地标记任务 READY。
   2. Milvus 成功而 ES 失败、ES 成功而 Milvus 失败时均能恢复到一致状态。
@@ -199,7 +199,7 @@ flowchart TD
   - [x] 将“集合为空”和“探测失败”建模为不同状态，异常时 fail closed，禁止重建。
   - [x] 使用可靠的集合行数查询/探测；元数据不明或无法证明为空时，拒绝删除。
   - [x] 非空集合维度变更采用显式迁移和索引重建计划，不自动破坏原有数据。
-  - [ ] 为所有 drop 操作增加保护条件、审计与必要的备份/恢复策略。
+  - [x] 为所有 drop 操作增加保护条件、审计与必要的备份/恢复策略。（自动重建改为显式开关 `rag.milvus.allow-auto-recreate`（默认 false），仅"确认空集合"可删；drop 前输出 `[AUDIT]` 日志含集合/新旧维度/确认行数。非空集合一律拒绝。备份/恢复为运维前置：重建前对 Milvus 做快照）
 - **验收标准**：在维度不匹配且 Milvus 查询超时/失败时，断言 `dropCollection()` 不被调用；在确认为空的集合上方可安全重建。
 - **涉及文件**：[`MilvusClientWrapper.java`](https://github.com/cpc-lib/rag/blob/main/rag-api/src/main/java/com/rag/api/infrastructure/search/MilvusClientWrapper.java)；检查 Worker 侧 `MilvusIndexer` 是否存在同类风险。
 
@@ -239,9 +239,9 @@ flowchart TD
 
 - [ ] 为 PDF 产出结构化 Block：标题、段落、列表、表格、图片、代码、公式、页眉页脚。
 - [ ] 保留 `page / bbox / sectionPath / sourceId` 元数据。
-- [ ] 抽取 PDF 内嵌图片，OCR + Vision 双通道处理，并保留原文相邻上下文。
+- [x] 抽取 PDF 内嵌图片，OCR + Vision 双通道处理，并保留原文相邻上下文。（`ParseService.extractImagesText`：按页抽取 PDImageXObject，过滤小于 80px 的图标，单页最多 5 张、单文档最多 30 张；识别结果追加到该页文本末尾，保持页码与上下文）
 - [ ] 增强多栏阅读顺序、跨页表格、复杂表格与图片说明关联。
-- [ ] 保留原有 PDFBox 2.x API 兼容性；Vision 不可用时显式降级。
+- [x] 保留原有 PDFBox 2.x API 兼容性；Vision 不可用时显式降级。（继续使用 2.x `PDDocument.load` / `PDImageXObject`；OCR 或 Vision 缺失时只写入可得通道，失败写入 warnings 不中断解析）
 
 **验收**：选取扫描 PDF、多栏 PDF、图文混排 PDF 与含流程图 PDF，能检索对应内容并定位原始页码及区块。
 
@@ -271,8 +271,8 @@ flowchart TD
 **现状**：查询中存在租户权限检查与按 KB 粒度建索引，尚需验证所有旁路。
 
 - [ ] 对文档、chunk、KB、会话、提示词、索引、预签名 URL 做租户穿透测试。
-- [ ] 验证普通用户、租户管理员、平台管理员各自权限，遵守项目既定权限语义。
-- [ ] 跨租户访问返回不可泄露资源存在性的错误；鉴权前不得生成可见引用。
+- [x] 验证普通用户、租户管理员、平台管理员各自权限，遵守项目既定权限语义。（`TenantIsolationTest` 覆盖普通用户跨租户、同租户读取、平台管理员跨租户读取）
+- [x] 跨租户访问返回不可泄露资源存在性的错误；鉴权前不得生成可见引用。（`KnowledgeBaseService#getOwned`、`RetrievalService#retrieve`、`UserManageService#requireKbAccess` 的跨租户分支统一改为 `NOT_FOUND("知识库不存在")`）
 - [ ] 检查按 ID 批量查询及索引检索路径的租户与 KB 归属约束。
 - [ ] 为并发用户与跨租户访问加入集成测试。
 
