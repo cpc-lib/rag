@@ -143,6 +143,20 @@ mvn -f rag-worker/pom.xml spring-boot:run   # 无 Web 端口，纯 MQ 消费者
 - 密码：`admin123`
 - 挂载在超级租户 `000000` 下
 
+### 本地账号一览
+
+| 系统 | 地址 | 账号 | 说明 |
+|---|---|---|---|
+| 管理控制台 | http://localhost:5173 | `admin / admin123` | 平台管理员种子账号（超级租户 `000000`） |
+| MySQL | `127.0.0.1:3306` | `root / rag123456` | 库名 `rag`，可用 `MYSQL_USER` / `MYSQL_PASSWORD` 覆盖 |
+| MinIO | API `9000` / 控制台 `9001` | `minioadmin / minioadmin123` | 桶 `rag-files`（业务）、`a-bucket`（Milvus） |
+| RabbitMQ | AMQP `5672` / 控制台 `15672` | `guest / guest` | 交换机 `rag.ingest`、`media.transcode` |
+| Redis | `6379` | 无密码 | 进度广播 / 缓存 |
+| Elasticsearch | `9200` | 无认证 | 本地单节点，`xpack.security.enabled=false` |
+| etcd | `2379` | 无认证 | 动态配置前缀 `/rag/` |
+
+> 以上均为本地开发默认值，生产部署必须全部修改（尤其 `RAG_JWT_SECRET` 与各中间件口令）。
+
 ### 5. 启动前端
 
 ```bash
