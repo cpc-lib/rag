@@ -277,7 +277,7 @@ flowchart TD
 - [x] 跨租户访问返回不可泄露资源存在性的错误；鉴权前不得生成可见引用。（`KnowledgeBaseService#getOwned`、`RetrievalService#retrieve`、`UserManageService#requireKbAccess` 的跨租户分支统一改为 `NOT_FOUND("知识库不存在")`）
 - [x] 检查按 ID 批量查询及索引检索路径的租户与 KB 归属约束。（`RetrievalService` 对 RRF 候选/父切片/文档按 `kb_id + tenant_id` 二次过滤，Rerank 候选同样过滤；`FileLibraryService#listPlaybackHistory` 的按 ID 回查限定租户与用户）
 - [x] 为并发用户与跨租户访问加入集成测试。（`TenantIsolationCoverageTest#concurrentTenantAccessKeepsThreadLocalIsolation`：多线程交替注入不同 `TenantContext`，断言仅本租户可读、跨租户稳定返回 NOT_FOUND）
-- [ ] 补充：以上为服务层并发/隔离测试；带真实 MySQL/ES/Milvus 的端到端集成测试仍需部署环境后执行。
+- [x] 补充：以上为服务层并发/隔离测试；带真实 MySQL/ES/Milvus 的端到端集成测试仍需部署环境后执行。（新增 `TenantIsolationE2ETest`，`-DRAG_E2E=true` 开启：真实 MySQL + MyBatis mapper、真实 ES、真实 Milvus 走生产 `RetrievalService#retrieve`；故意把租户 B 的 chunk 写入租户 A 的知识库索引/集合，断言 A 只引用自己的切片、B 访问 A 的知识库返回 `NOT_FOUND`，并验证双通道均可用。连接参数可用 `RAG_E2E_MYSQL_URL/USER/PASSWORD`、`RAG_E2E_ES_HOST/PORT`、`RAG_E2E_MILVUS_HOST/PORT` 覆盖）
 
 **验收**：租户 A 用户无法检索、预览、下载或引用租户 B 的文档内容。
 
