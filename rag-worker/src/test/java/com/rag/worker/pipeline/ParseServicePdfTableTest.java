@@ -14,6 +14,8 @@ import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.mock;
@@ -41,6 +43,15 @@ class ParseServicePdfTableTest {
         assertTrue(text.contains("| Name | Age | City |"), text);
         assertTrue(text.contains("| Alice | 30 | Paris |"), text);
         assertTrue(text.contains("Quarterly report summary"), text);
+
+        // RAG-007：解析页携带块区间，表格块可反查 bbox 与块标识
+        ParseService.RawPage page = outcome.pages().get(0);
+        ParseService.BlockSpan tableSpan = page.spans().stream()
+                .filter(s -> text.substring(s.start(), s.end()).contains("| Name |"))
+                .findFirst().orElseThrow(() -> new AssertionError("未找到表格块区间: " + page.spans()));
+        assertEquals("p1-b2", tableSpan.blockId());
+        assertNotNull(tableSpan.bbox(), "表格块区间应带 bbox");
+        assertTrue(tableSpan.bbox().width() > 300, "表格 bbox 宽度: " + tableSpan.bbox());
         // 表格保持在前言与结语之间
         int head = text.indexOf("Quarterly report summary");
         int table = text.indexOf("| Name |");

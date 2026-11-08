@@ -51,11 +51,15 @@ public class PdfLayoutStrategy implements ChunkStrategy {
 
         List<ParseService.RawPage> cleanedPages = new ArrayList<>();
         for (ParseService.RawPage page : pages) {
-            String text = stripRepeating(page.text(), firstFreq, lastFreq, total);
+            String original = page.text() == null ? "" : page.text();
+            String text = stripRepeating(original, firstFreq, lastFreq, total);
             if (text.isBlank()) {
                 continue;
             }
-            cleanedPages.add(new ParseService.RawPage(page.page(), text));
+            // 未删除任何行时文本与偏移保持一致，保留块区间用于 bbox 元数据；删行后偏移失效则只保留页码
+            List<ParseService.BlockSpan> spans = text.equals(original)
+                    ? page.spans() : List.of();
+            cleanedPages.add(new ParseService.RawPage(page.page(), text, spans));
         }
         return parentChildStrategy.plan(new ChunkContext(ctx.tenantId(), ctx.documentId(),
                 ctx.fileName(), ctx.objectKey(), cleanedPages, ctx.params()));
@@ -68,16 +72,19 @@ public class PdfLayoutStrategy implements ChunkStrategy {
         }
         List<String> kept = new ArrayList<>();
         String[] lines = text.split("\n");
+        boolean removed = false;
         for (int i = 0; i < lines.length; i++) {
             String s = lines[i].strip();
             boolean isRepeating = total > 1 && ((i == 0 && first.getOrDefault(s, 0) / total > REPEAT_RATIO)
                     || (i == lines.length - 1
                             && last.getOrDefault(s, 0) / total > REPEAT_RATIO));
-            if (!isRepeating) {
+            if (isRepeating) {
+                removed = true;
+            } else {
                 kept.add(lines[i]);
             }
         }
-        return String.join("\n", kept).strip();
+        return removed ? String.join("\n", kept).strip() : text;
     }
 
     private void bump(Map<String, Integer> freq, String key) {

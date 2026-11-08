@@ -238,7 +238,7 @@ flowchart TD
 **现状**：`PdfLayoutStrategy` 已使用 PDFBox 位置排序、重复首尾行清理和 OCR 回退，但无法视为完整的结构化多模态 Layout Pipeline；PDF 内嵌图像与复杂图表识别仍待扩展。
 
 - [ ] 为 PDF 产出结构化 Block：标题、段落、列表、表格、图片、代码、公式、页眉页脚。（已落地文本/表格/图片三类：解析阶段新增 `worker/pipeline/pdf/PdfLayoutExtractor`，基于 bbox 行内空隙切列 + 跨行列首对齐检测表格，转 `TableModel` 渲染 Markdown 嵌入页文本；标题/列表/公式等语义分类待后续）
-- [ ] 保留 `page / bbox / sectionPath / sourceId` 元数据。（page 保留至 chunk；bbox 用于解析期表格/图片定位，未持久化到 chunk）
+- [x] 保留 `page / bbox / sectionPath / sourceId` 元数据。（`page / sectionPath` 原有；新增 `chunk.bbox` / `chunk.source_id` 两列（Flyway V10）。解析阶段 `ParseService.RawPage` 携带块区间 `BlockSpan`（页文本偏移 + bbox + `p{页}-b{块}`），切片落库时 `ChunkMetadataResolver` 按内容归一化回查块区间，写入 child 的 bbox 与 sourceId，并通过 SSE citation 返回；非 PDF、页眉页脚清理导致偏移失效或表格切片重排时只保留页码，不阻断入库）
 - [x] 抽取 PDF 内嵌图片，OCR + Vision 双通道处理，并保留原文相邻上下文。（`PdfLayoutExtractor` 经 `PDFGraphicsStreamEngine.drawImage` 捕获图片绘制位置，`ParseService.parsePdf` 按版面位置把 OCR/Vision 结果插入页文本（不再追加页尾）；同一图片对象跨页复用识别结果，单文档上限 30 张，小图标跳过）
 - [ ] 增强多栏阅读顺序、跨页表格、复杂表格与图片说明关联。（解析阶段即按版面坐标自顶向下输出，多栏阅读顺序与图片说明相邻关联已改善；跨页表格续接与复杂合并单元格识别待后续，跨页行组仍由切片层 `ChunkSupport.splitTable` 兜底）
 - [x] 保留原有 PDFBox 2.x API 兼容性；Vision 不可用时显式降级。（继续使用 2.x `PDDocument.load` / `PDFGraphicsStreamEngine`；OCR 或 Vision 缺失时只写入可得通道，失败写入 warnings 不中断解析）

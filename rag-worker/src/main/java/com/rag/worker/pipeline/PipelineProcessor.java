@@ -25,7 +25,9 @@ import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 
 /**
  * 流水线状态机（设计文档 §7）：
@@ -116,7 +118,7 @@ public class PipelineProcessor {
             if (plans.stream().noneMatch(p -> !p.children().isEmpty())) {
                 throw new IllegalStateException("文档未提取到可检索内容，请检查文件或 OCR/Vision 配置");
             }
-            persistPlans(doc, plans);
+            persistPlans(doc, plans, pageIndex(outcome.pages()));
             setStage(doc, "CHUNKING", 40);
             int children = plans.stream().mapToInt(p -> p.children().size()).sum();
             int parents = (int) plans.stream().filter(ChunkPlan::parentChild).count();
@@ -244,11 +246,21 @@ public class PipelineProcessor {
                 doc.getId(), System.currentTimeMillis() - indexStart, chunks.size(), esCount, milvusCount);
     }
 
+    /** 页索引：同一页码优先保留带块区间（spans）的解析页，供切片元数据定位使用。 */
+    private Map<Integer, ParseService.RawPage> pageIndex(List<ParseService.RawPage> pages) {
+        Map<Integer, ParseService.RawPage> index = new HashMap<>();
+        for (ParseService.RawPage page : pages) {
+            index.merge(page.page(), page, (a, b) -> a.spans().isEmpty() ? b : a);
+        }
+        return index;
+    }
+
     /**
      * 持久化策略输出：删除旧 AUTO 行（含旧 parent），保留 MANUAL；
      * parentChild 计划先插 PARENT 再插关联 CHILDREN；独立计划直接插 CHILD。
      */
-    private void persistPlans(DocumentEntity doc, List<ChunkPlan> plans) {
+    private void persistPlans(DocumentEntity doc, List<ChunkPlan> plans,
+                              Map<Integer, ParseService.RawPage> pageIndex) {
         chunkMapper.logicDeleteAutoByDocumentId(doc.getId());
         ChunkEntity maxSeqChunk = chunkMapper.selectMaxSeqByDocumentId(doc.getId());
         Integer maxSeq = maxSeqChunk == null ? null : maxSeqChunk.getSeq();
@@ -278,6 +290,11 @@ public class PipelineProcessor {
                 c.setContentType(contentType(doc.getFileName(), child.content()));
                 c.setSectionTitle(plan.sectionTitle());
                 c.setSectionPath(plan.sectionPath());
+                // PDF 版面元数据：按 child 内容回查所在块，写入 bbox / sourceId（非 PDF 为空）
+                ChunkMetadataResolver.Metadata meta =
+                        ChunkMetadataResolver.resolve(pageIndex.get(child.page()), child.content());
+                c.setBbox(meta.bbox());
+                c.setSourceId(meta.sourceId());
                 chunkMapper.insert(c);
             }
         }

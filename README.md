@@ -69,6 +69,7 @@ rag/
 | 索引别名级双版本切换 | 规划中 | — | 尚未实现 ES alias / Milvus 双集合并行读取 |
 | ES 中文分词与检索调优 | 部分实现 | `EsSearchClient`、`EsIndexer` | 默认 `cjk` 分词 + `content.exact` 精确字段 + 检索指标；真实数据分层调优待评测 |
 | PDF bbox 表格识别 | 已实现（启发式） | `pipeline/pdf/PdfLayoutExtractor` | 行内空隙切列 + 跨行列首对齐检测表格，转 `TableModel` Markdown 嵌入页文本；误判受对齐率/单元格长度约束 |
+| PDF 版面元数据 | 已实现 | `ChunkMetadataResolver`、`chunk.bbox` / `chunk.source_id`（V10） | child 记录页面区域 `x,y,w,h` 与来源块 `p3-b2`，SSE citation 返回；非 PDF/定位失败仅保留页码 |
 | PDF 结构化 Block（标题/列表/公式） | 规划中 | — | 已有文本/表格/图片三类块 + 版面排序，语义分类待后续 |
 | RAG Evaluation 基线（召回侧） | 已实现 | `rag-api/.../eval/RetrievalMetrics`、`RetrievalBaselineTest` | `mvn -f rag-api/pom.xml test -Dtest=RetrievalBaselineTest`，报告输出 `rag-api/target/eval/retrieval-baseline.json` |
 | RAG Evaluation 答案指标 | 规划中 | — | Faithfulness / Answer Relevance 需在线模型评测 |

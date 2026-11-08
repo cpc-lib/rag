@@ -1,5 +1,6 @@
 package com.rag.worker.pipeline.pdf;
 
+import com.rag.worker.pipeline.BBox;
 import com.rag.worker.pipeline.table.TableModel;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.pdfbox.cos.COSName;
@@ -34,23 +35,38 @@ import java.util.List;
 @Slf4j
 public class PdfLayoutExtractor {
 
-    /** 版面块：top 为自页面向下的 y 坐标（pt），用于块间排序。 */
+    /** 版面块：top 为自页面向下的 y 坐标（pt），用于块间排序；bbox 为该块在页面上的区域。 */
     public sealed interface Block {
 
         double top();
+
+        BBox bbox();
     }
 
     /** 文本行。 */
-    public record TextBlock(double top, String text) implements Block {
+    public record TextBlock(double top, String text, BBox bbox) implements Block {
+
+        public TextBlock(double top, String text) {
+            this(top, text, null);
+        }
     }
 
     /** 表格块：渲染为 Markdown 嵌入页文本。 */
-    public record TableBlock(double top, TableModel table) implements Block {
+    public record TableBlock(double top, TableModel table, BBox bbox) implements Block {
+
+        public TableBlock(double top, TableModel table) {
+            this(top, table, null);
+        }
     }
 
     /** 图片块：记录绘制位置与显示尺寸（pt），供按位置插入识别结果。 */
     public record ImageBlock(double top, PDImageXObject image,
                              float x, float y, float width, float height) implements Block {
+
+        @Override
+        public BBox bbox() {
+            return BBox.of(x, (float) top, x + width, (float) top + height);
+        }
     }
 
     /** 行内切分列的最小水平空隙（与行高取大者）。 */
@@ -97,6 +113,17 @@ public class PdfLayoutExtractor {
                 sb.append(w.text());
             }
             return sb.toString();
+        }
+
+        /** 行区域：首词左边界 → 末词右边界，行顶 → 行底。 */
+        BBox bbox() {
+            float x1 = Float.MAX_VALUE;
+            float x2 = 0;
+            for (Word w : words) {
+                x1 = Math.min(x1, w.x1());
+                x2 = Math.max(x2, w.x2());
+            }
+            return BBox.of(x1, top, x2, top + height);
         }
     }
 
@@ -169,9 +196,10 @@ public class PdfLayoutExtractor {
                     j++;
                 }
                 if (j > i) {
-                    TableModel table = tryBuildTable(lines.subList(i, j + 1), pageIndex);
+                    List<Line> tableLines = lines.subList(i, j + 1);
+                    TableModel table = tryBuildTable(tableLines, pageIndex);
                     if (table != null) {
-                        blocks.add(new TableBlock(lines.get(i).top(), table));
+                        blocks.add(new TableBlock(lines.get(i).top(), table, unionBBox(tableLines)));
                         i = j + 1;
                         continue;
                     }
@@ -179,11 +207,20 @@ public class PdfLayoutExtractor {
             }
             String text = lines.get(i).text().strip();
             if (!text.isEmpty()) {
-                blocks.add(new TextBlock(lines.get(i).top(), text));
+                blocks.add(new TextBlock(lines.get(i).top(), text, lines.get(i).bbox()));
             }
             i++;
         }
         return blocks;
+    }
+
+    /** 表格区域：候选行的最小外接矩形。 */
+    private BBox unionBBox(List<Line> rows) {
+        BBox bbox = null;
+        for (Line row : rows) {
+            bbox = BBox.union(bbox, row.bbox());
+        }
+        return bbox;
     }
 
     private boolean rowGapOk(Line a, Line b) {

@@ -18,6 +18,7 @@ import java.util.List;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /** RAG-007：PDF bbox 表格检测与图片定位（合成 PDF 验证，不依赖外部中间件）。 */
@@ -60,12 +61,37 @@ class PdfLayoutExtractorTest {
             assertEquals("London", rows.get(2).get(2));
             assertTrue(model.toMarkdown().contains("| Name | Age | City |"), model.toMarkdown());
 
+            // RAG-007：表格块记录覆盖表格行的版面区域
+            assertNotNull(table.bbox(), "表格块应有 bbox");
+            assertTrue(table.bbox().width() > 300, "表格宽度应覆盖三列: " + table.bbox());
+            assertTrue(table.bbox().height() > 40, "表格高度应覆盖表头与数据行: " + table.bbox());
+
             // 表格块位于上方标题与下方正文之间
             int titleIdx = indexOfText(blocks, "Quarterly report summary");
             int tableIdx = blocks.indexOf(table);
             int tailIdx = indexOfText(blocks, "End of table section.");
             assertTrue(titleIdx >= 0 && titleIdx < tableIdx && tableIdx < tailIdx,
                     "块顺序应保持版面自顶向下: " + blocks);
+        }
+    }
+
+    @Test
+    void textBlockCarriesLineBBox() throws Exception {
+        try (PDDocument pdf = new PDDocument()) {
+            PDPage page = new PDPage();
+            pdf.addPage(page);
+            try (PDPageContentStream cs = new PDPageContentStream(pdf, page)) {
+                text(cs, 72, 700, "Layout line");
+            }
+
+            List<PdfLayoutExtractor.Block> blocks = extractor.extractPage(pdf, 0);
+
+            PdfLayoutExtractor.TextBlock block = assertInstanceOf(
+                    PdfLayoutExtractor.TextBlock.class, blocks.get(0));
+            assertNotNull(block.bbox(), "文本块应有 bbox");
+            assertTrue(block.bbox().x() >= 70 && block.bbox().x() <= 74, "左边界: " + block.bbox());
+            assertTrue(block.bbox().width() > 30, "宽度应覆盖行文本: " + block.bbox());
+            assertTrue(block.bbox().height() > 0, "高度应大于 0: " + block.bbox());
         }
     }
 

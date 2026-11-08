@@ -220,6 +220,10 @@ export interface Chunk {
   parentChunkId: number | null;
   sectionTitle: string | null;
   sectionPath: string | null;
+  /** PDF 版面坐标 x,y,width,height（pt），非 PDF 为空 */
+  bbox?: string | null;
+  /** 原文块标识，如 p3-b2 */
+  sourceId?: string | null;
 }
 
 // ---- 工具配置 ----
@@ -283,6 +287,10 @@ export interface Citation {
   contentType: string | null;
   previewUrl: string | null;
   content: string;
+  /** PDF 版面坐标 x,y,width,height（pt） */
+  bbox?: string | null;
+  /** 原文块标识，如 p3-b2 */
+  sourceId?: string | null;
 }
 
 export interface ChatStreamReq {

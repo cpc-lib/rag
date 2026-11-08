@@ -49,7 +49,22 @@ import java.util.Set;
 @RequiredArgsConstructor
 public class ParseService {
 
-    public record RawPage(int page, String text) {
+    /**
+     * 解析页：text 为页文本，spans 记录版面块在 text 中的字符区间与 bbox（ISSUE RAG-007）。
+     * 非 PDF 或纯文本解析没有版面信息时 spans 为空，切片元数据只保留页码。
+     */
+    public record RawPage(int page, String text, List<BlockSpan> spans) {
+
+        public RawPage(int page, String text) {
+            this(page, text, List.of());
+        }
+    }
+
+    /**
+     * 版面块在页文本中的区间 [start, end)：blockId 形如 p3-b2（页-块，1 起），
+     * 供切片阶段反查所属块并写入 chunk 的 bbox / source_id。
+     */
+    public record BlockSpan(int start, int end, String blockId, BBox bbox) {
     }
 
     /** 按纯文本直读、无需专用解析器的扩展名（与上传白名单 / ChunkStrategyRouter 保持一致）。 */
@@ -369,10 +384,10 @@ public class ParseService {
                     log.warn("PDF 第 {} 页版式抽取失败，回退纯文本: {}", i + 1, le.getMessage());
                     blocks = fallbackTextBlocks(pdf, i);
                 }
-                String merged = assemblePage(blocks, i, vision, warnings, imageBudget,
+                Assembled assembled = assemblePage(blocks, i, vision, warnings, imageBudget,
                         imageChannels, imageDescCache);
-                if (merged.strip().length() >= 10) {
-                    pages.add(new RawPage(i, merged));
+                if (assembled.text().strip().length() >= 10) {
+                    pages.add(new RawPage(i, assembled.text(), assembled.spans()));
                     continue;
                 }
                 // 无文本层 → 扫描页走 OCR
@@ -414,18 +429,22 @@ public class ParseService {
     /**
      * 组装单页文本（ISSUE RAG-007）：文本行 / 表格 Markdown / 图片识别结果
      * 按版面自顶向下顺序拼接，图片说明保留在原文相邻位置而不是页尾。
+     * 同时记录每个块在页文本中的区间与 bbox，供切片阶段写入 chunk 元数据。
      */
-    private String assemblePage(List<PdfLayoutExtractor.Block> blocks, int pageIndex,
-                                ModelEntity vision, List<String> warnings, int[] imageBudget,
-                                boolean imageChannels, Map<PDImageXObject, String> descCache) {
+    private Assembled assemblePage(List<PdfLayoutExtractor.Block> blocks, int pageIndex,
+                                   ModelEntity vision, List<String> warnings, int[] imageBudget,
+                                   boolean imageChannels, Map<PDImageXObject, String> descCache) {
         StringBuilder sb = new StringBuilder();
+        List<BlockSpan> spans = new ArrayList<>();
         int imgSeq = 0;
         boolean budgetWarned = false;
-        for (PdfLayoutExtractor.Block block : blocks) {
+        for (int bi = 0; bi < blocks.size(); bi++) {
+            PdfLayoutExtractor.Block block = blocks.get(bi);
+            String rendered = null;
             if (block instanceof PdfLayoutExtractor.TextBlock t) {
-                appendBlock(sb, t.text());
+                rendered = t.text();
             } else if (block instanceof PdfLayoutExtractor.TableBlock t) {
-                appendBlock(sb, t.table().toMarkdown());
+                rendered = t.table().toMarkdown();
             } else if (block instanceof PdfLayoutExtractor.ImageBlock img) {
                 if (!imageChannels) {
                     continue;
@@ -448,21 +467,34 @@ public class ParseService {
                 String described = descCache.computeIfAbsent(img.image(),
                         k -> describeImageSafely(vision, k, warnings, label));
                 if (!described.isBlank()) {
-                    appendBlock(sb, "[" + label + "]\n" + described);
+                    rendered = "[" + label + "]\n" + described;
                 }
             }
+            int start = appendBlock(sb, rendered);
+            if (start >= 0) {
+                // 块序号按版面块顺序（1 起），与是否输出无关，保证同一文档重复解析时 id 稳定
+                spans.add(new BlockSpan(start, sb.length(),
+                        "p" + (pageIndex + 1) + "-b" + (bi + 1), block.bbox()));
+            }
         }
-        return sb.toString();
+        return new Assembled(sb.toString(), spans);
     }
 
-    private void appendBlock(StringBuilder sb, String text) {
+    /** 单页组装结果：文本 + 块区间索引。 */
+    private record Assembled(String text, List<BlockSpan> spans) {
+    }
+
+    /** 追加块内容并返回写入起始偏移；空内容返回 -1（不写入分隔符）。 */
+    private int appendBlock(StringBuilder sb, String text) {
         if (text == null || text.isBlank()) {
-            return;
+            return -1;
         }
         if (sb.length() > 0) {
             sb.append("\n\n");
         }
+        int start = sb.length();
         sb.append(text.strip());
+        return start;
     }
 
     /** 图片识别（OCR + Vision 双通道），任何异常只告警返回空串，不阻断解析。 */
