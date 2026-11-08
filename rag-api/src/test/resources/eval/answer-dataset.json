@@ -1,0 +1,139 @@
+{
+  "version": "answer-v1",
+  "judgeModel": "qwen-plus",
+  "note": "RAG-009 答案指标评测集。answer/citations 为固定快照，用于可复现比较；在线判分由 RAG_EVAL_* 环境变量启用。",
+  "baseline": {
+    "faithfulness": 0.9,
+    "answerRelevance": 0.7,
+    "citationPrecision": 0.9,
+    "refusalAccuracy": 0.9
+  },
+  "cases": [
+    {
+      "id": "ans-01",
+      "category": "普通问答",
+      "query": "退款审核通过后调用哪个接口？",
+      "answer": "审核通过后调用支付渠道的退款接口，并按订单号传入退款金额。",
+      "contexts": [
+        "退款审核通过之后调用支付渠道退款接口，请求参数包含订单号与退款金额。",
+        "退款失败时需要记录失败原因并支持重试。"
+      ],
+      "citedChunkIds": [101],
+      "retrievedChunkIds": [101, 102],
+      "expectRefusal": false
+    },
+    {
+      "id": "ans-02",
+      "category": "相似段落",
+      "query": "支付超时的重试策略是什么？",
+      "answer": "支付超时按指数退避重试，最多 3 次，仍失败则进入人工处理队列。",
+      "contexts": [
+        "支付请求超时后采用指数退避重试，最多重试三次。",
+        "重试仍失败的订单转入人工处理队列。",
+        "退款超时与支付超时策略不同，退款只重试一次。"
+      ],
+      "citedChunkIds": [201, 202],
+      "retrievedChunkIds": [201, 202, 203],
+      "expectRefusal": false
+    },
+    {
+      "id": "ans-03",
+      "category": "精确编号",
+      "query": "错误码 PAY_10023 表示什么？",
+      "answer": "PAY_10023 表示渠道返回的签名校验失败。",
+      "contexts": [
+        "PAY_10023: 渠道签名校验失败，需要检查商户密钥配置。",
+        "PAY_10024: 渠道余额不足。"
+      ],
+      "citedChunkIds": [301],
+      "retrievedChunkIds": [301, 302],
+      "expectRefusal": false
+    },
+    {
+      "id": "ans-04",
+      "category": "跨文档",
+      "query": "订单服务和结算服务分别使用哪个消息队列？",
+      "answer": "订单服务使用 order-topic，结算服务使用 settlement-topic。",
+      "contexts": [
+        "订单服务发布事件到 order-topic。",
+        "结算服务消费 settlement-topic 中的结算事件。"
+      ],
+      "citedChunkIds": [401, 402],
+      "retrievedChunkIds": [401, 402],
+      "expectRefusal": false
+    },
+    {
+      "id": "ans-05",
+      "category": "多跳推理",
+      "query": "退款失败后多久会进入人工处理？",
+      "answer": "退款失败先重试一次，仍失败后立即进入人工处理队列。",
+      "contexts": [
+        "退款失败后重试一次。",
+        "重试仍失败时写入人工处理队列，由运营当日处理。"
+      ],
+      "citedChunkIds": [501, 502],
+      "retrievedChunkIds": [501, 502],
+      "expectRefusal": false
+    },
+    {
+      "id": "ans-06",
+      "category": "表格",
+      "query": "2026 年 1 月订单 202601010001 的退款金额是多少？",
+      "answer": "订单 202601010001 的退款金额为 1288.50 元。",
+      "contexts": [
+        "| 订单号 | 金额 | 状态 | 日期 |\n| --- | --- | --- | --- |\n| 202601010001 | 1288.50 | 已退款 | 2026-01-01 |"
+      ],
+      "citedChunkIds": [601],
+      "retrievedChunkIds": [601],
+      "expectRefusal": false
+    },
+    {
+      "id": "ans-07",
+      "category": "图片",
+      "query": "架构图中支付网关下游有哪些服务？",
+      "answer": "图中支付网关下游连接订单服务与对账服务。",
+      "contexts": [
+        "[第3页图片1] 架构图显示支付网关向下连接订单服务与对账服务，右侧连接风控。"
+      ],
+      "citedChunkIds": [701],
+      "retrievedChunkIds": [701],
+      "expectRefusal": false
+    },
+    {
+      "id": "ans-08",
+      "category": "无答案",
+      "query": "公司今年的年终奖发放规则是什么？",
+      "answer": "抱歉，资料中没有找到相关信息，无法回答。",
+      "contexts": [
+        "本文档只描述支付系统退款流程，不包含薪酬制度。"
+      ],
+      "citedChunkIds": [],
+      "retrievedChunkIds": [801],
+      "expectRefusal": true
+    },
+    {
+      "id": "ans-09",
+      "category": "表格",
+      "query": "订单 202601010002 的退款状态？",
+      "answer": "订单 202601010002 的状态是已退款，金额 99.00 元。",
+      "contexts": [
+        "| 订单号 | 金额 | 状态 | 日期 |\n| --- | --- | --- | --- |\n| 202601010002 | 99.00 | 已退款 | 2026-01-02 |"
+      ],
+      "citedChunkIds": [601, 999],
+      "retrievedChunkIds": [601],
+      "expectRefusal": false
+    },
+    {
+      "id": "ans-10",
+      "category": "无答案",
+      "query": "如何申请公司内部的停车位？",
+      "answer": "这个问题在提供的资料中没有相关信息。",
+      "contexts": [
+        "本知识库仅收录支付接口与退款流程文档。"
+      ],
+      "citedChunkIds": [],
+      "retrievedChunkIds": [901],
+      "expectRefusal": true
+    }
+  ]
+}

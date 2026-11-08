@@ -72,7 +72,7 @@ rag/
 | PDF 版面元数据 | 已实现 | `ChunkMetadataResolver`、`chunk.bbox` / `chunk.source_id`（V10） | child 记录页面区域 `x,y,w,h` 与来源块 `p3-b2`，SSE citation 返回；非 PDF/定位失败仅保留页码 |
 | PDF 结构化 Block（标题/列表/公式） | 规划中 | — | 已有文本/表格/图片三类块 + 版面排序，语义分类待后续 |
 | RAG Evaluation 基线（召回侧） | 已实现 | `rag-api/.../eval/RetrievalMetrics`、`RetrievalBaselineTest` | `mvn -f rag-api/pom.xml test -Dtest=RetrievalBaselineTest`，报告输出 `rag-api/target/eval/retrieval-baseline.json` |
-| RAG Evaluation 答案指标 | 规划中 | — | Faithfulness / Answer Relevance 需在线模型评测 |
+| RAG Evaluation 答案指标 | 已实现（按需在线） | `AnswerMetrics`、`OpenAiAnswerJudge`、`AnswerBaselineTest` | 离线跑引用精确率/拒答正确率；设 `RAG_EVAL_ANSWER=true` + `RAG_EVAL_BASE_URL/API_KEY/MODEL` 后用 CHAT 模型判分 Faithfulness / Answer Relevance，报告输出 `rag-api/target/eval/answer-baseline.json` |
 
 ### 索引与重建语义
 
