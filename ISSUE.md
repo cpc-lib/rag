@@ -5,7 +5,7 @@
 > **审查基准提交**：[`44525dce952ca37a22230400881f47a9b8ff9b06`](https://github.com/cpc-lib/rag/commit/44525dce952ca37a22230400881f47a9b8ff9b06)（提交时间：2026-10-11 UTC）  
 > **整理日期**：2026-11-07  
 > **性质**：静态源码审查 / 待办 ISSUE；**未执行生产压测**（2026-11-08 已完成本地端到端冒烟，见文末「冒烟验证记录」）  
-> **状态**：P0（RAG-001 ~ RAG-005）基本修复，RAG-003 采用「先写后删」（别名级双版本并行读取列为后续增强），RAG-005 少量增强项待办；P1 已完成 RAG-006、RAG-008、RAG-010、RAG-011、RAG-012，RAG-007/009 部分完成；P2 已完成 RAG-014（中文分词、分层召回评测、通道预算扫描与召回指标监控），RAG-013/015 部分完成（Query 改写、Multi-Query、工具/KB 统一编排已实现，真实模型评测与端到端验收待补）；复选框反映当前进度
+> **状态**：P0（RAG-001 ~ RAG-005）基本修复，RAG-003 采用「先写后删」（别名级双版本并行读取列为后续增强），RAG-005 少量增强项待办；P1 已完成 RAG-006、RAG-007、RAG-008、RAG-009、RAG-010、RAG-011、RAG-012；P2 已完成 RAG-013、RAG-014、RAG-015；复选框反映当前进度，完成项对应的提交、测试与回滚方案见文末「提交记录」（最新提交 `4d3df93`）
 
 ## 0. 审查结论
 
@@ -427,3 +427,17 @@ flowchart TD
 | 检索可观测性 | 通过：`rag.retrieval.duration` 等 Micrometer 指标经 `/actuator/metrics` 输出 |
 | Query 改写（RAG-013） | 通过（离线固定集）：`QueryRewriteEvalTest` 输出 Recall@5 0.50→1.00、MRR 0.50→1.00、nDCG@5 0.08→0.59、引用精确率 0→1、拒答 0→1，改写平均延迟约 6.3ms；`rag.query-rewrite.enabled` 默认 false，真机需重启 API 显式开启 |
 | PDF 语义块与合并单元格（RAG-007） | 通过（测试）：`PdfLayoutExtractorTest` 覆盖标题/列表/公式/代码/段落分类与矢量网格 `colspan=2`/`rowspan=2` 重建；`ParseServiceHeaderFooterTest` 覆盖 3 页重复页眉与页码剔除；`chunk.block_type` 经 Flyway V26 落库 |
+
+---
+
+## 提交记录（2026-11-08）
+
+| 项 | 内容 |
+|---|---|
+| Commit | [`4d3df93`](https://github.com/cpc-lib/rag/commit/4d3df93)（`feature` 分支，已推送 `origin/feature`） |
+| 主题 | `feat(pdf): 完成 RAG-007/009/013/015 能力与验收` |
+| 覆盖 ISSUE | RAG-007（PDF 语义块/页眉页脚/合并单元格）、RAG-009（Top-K/Rerank/切片策略前后对比）、RAG-013（Query 改写前后评测）、RAG-015（Agentic 真机验收） |
+| 变更文件 | 文档：`ISSUE.md`、`README.md`；前端：`knowledge-console/src/api/types.ts`；API：`RetrievalService.java`、`V26__chunk_block_type.sql`；公共层：`ChunkEntity.java`、`ChunkMapper.xml`；Worker：`PdfLayoutExtractor.java`、`ParseService.java`、`ChunkMetadataResolver.java`、`PipelineProcessor.java`；新增测试：`RetrievalTuningCompareTest.java`、`QueryRewriteEvalTest.java`、`ChunkStrategyCompareTest.java`、`ParseServiceHeaderFooterTest.java`、`rerank-dataset.json`、`rewrite-dataset.json`，并更新 `PdfLayoutExtractorTest.java` |
+| 测试命令 | `mvn clean install`（根目录聚合，含全部测试）；`cd knowledge-console && npm run typecheck` |
+| 测试结果 | `BUILD SUCCESS`：rag-api 41 项测试（1 跳过）、rag-worker 46 项测试全部通过；前端 `tsc` 无错误。评测报告：`rag-api/target/eval/tuning-compare.json`、`rewrite-compare.json`、`rag-worker/target/eval/chunk-strategy-compare.json` |
+| 回滚方案 | `git revert 4d3df93`。Flyway V26 仅新增可空列 `chunk.block_type`，旧代码不会读取该列，回滚代码后可直接保留；如需彻底清理，在确认无依赖后执行 `ALTER TABLE chunk DROP COLUMN block_type;`（属破坏性操作，需先备份） |
