@@ -67,7 +67,7 @@ rag/
 | 表格结构化（Word/Excel/HTML/CSV） | 已实现 | `pipeline/table/TableModel`、`ChunkSupport#mergeContinuedTables` | 多 Sheet Excel、合并单元格、跨页续接表格可按表头+数据行检索 |
 | 重建索引可用性（先写后删） | 已实现 | `PipelineProcessor#indexAll`、`EsIndexer#deleteStale`、`MilvusIndexer#deleteStale` | 新版本写入成功后才清理陈旧 chunk；重建期间旧索引保持可读，失败重试幂等收敛 |
 | 索引别名级双版本切换 | 已实现 | `PipelineProcessor#rebuildKbFlow`、`EsIndexer#switchAlias`、`MilvusIndexer#switchAlias`、`KnowledgeBaseService#rebuildIndex` | `POST /api/v1/knowledge-bases/{id}/rebuild-index` 后台重建新版本物理索引，完成后原子切换 `{base}_active` 读别名，重建期间旧版本持续可读 |
-| ES 中文分词与检索调优 | 部分实现 | `EsSearchClient`、`EsIndexer` | 默认 `cjk` 分词 + `content.exact` 精确字段 + 检索指标；真实数据分层调优待评测 |
+| ES 中文分词与检索调优 | 已实现 | `EsSearchClient`、`EsIndexer`、`RetrievalLayeredEvalTest` | 默认 `cjk` 分词 + `content.exact` 精确字段 + 检索指标 + 五层召回与通道预算扫描评测 |
 | PDF bbox 表格识别与合并单元格 | 已实现（矢量网格优先，启发式回退） | `pipeline/pdf/PdfLayoutExtractor` | 优先用 `PDFGraphicsStreamEngine` 捕获的矢量线段重建规则网格并生成 `colspan/rowspan`，无矢量线时回退行内空隙切列 + 跨行列首对齐；转 `TableModel` Markdown 嵌入页文本，误判受对齐率/单元格长度约束 |
 | PDF 跨页表格续接 | 已实现 | `pipeline/pdf/PdfTableContinuation` | 列数一致且续页重复表头或紧贴页顶时合并数据行并去重表头；整页只剩接续表格与页码时并入上一页，避免表格被页边界切断 |
 | PDF 版面元数据 | 已实现 | `ChunkMetadataResolver`、`chunk.bbox` / `chunk.source_id`（V10） | child 记录页面区域 `x,y,w,h` 与来源块 `p3-b2`，SSE citation 返回；非 PDF/定位失败仅保留页码 |

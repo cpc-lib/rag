@@ -5,20 +5,22 @@
 > **审查基准提交**：[`44525dce952ca37a22230400881f47a9b8ff9b06`](https://github.com/cpc-lib/rag/commit/44525dce952ca37a22230400881f47a9b8ff9b06)（提交时间：2026-10-11 UTC）  
 > **整理日期**：2026-11-07  
 > **性质**：静态源码审查 / 待办 ISSUE；**未执行生产压测**（2026-11-08 已完成本地端到端冒烟，见文末「冒烟验证记录」）  
-> **状态**：P0（RAG-001 ~ RAG-005）已全部修复，RAG-003 已实现别名级双版本（读别名 `{base}_active` + 版本化物理索引 `{base}_v{N}`，入口 `POST /api/v1/knowledge-bases/{id}/rebuild-index`）；P1 已完成 RAG-006、RAG-007、RAG-008、RAG-009、RAG-010、RAG-011、RAG-012；P2 已完成 RAG-013、RAG-014、RAG-015；复选框反映当前进度，完成项对应的提交、测试与回滚方案见文末「提交记录」（最新提交 `4d3df93`，本轮变更待提交）
+> **状态**：**已全部闭环（15/15 完成）**——P0（RAG-001 ~ RAG-005）、P1（RAG-006 ~ RAG-012）、P2（RAG-013 ~ RAG-015）全部修复并通过验证；其中 RAG-003 已落地文档级先写后删 + 知识库级别名双版本切换（读别名 `{base}_active` + 版本化物理索引 `{base}_v{N}`，入口 `POST /api/v1/knowledge-bases/{id}/rebuild-index`）。复选框反映最终进度，完成项对应的提交、测试与回滚方案见文末「提交记录」（最新功能提交 [`2a0a093`](https://github.com/cpc-lib/rag/commit/2a0a093)）
 
-## 0. 审查结论
+## 0. 审查结论与整改进展
 
-`main` 已具备基础 RAG 完整主链路：文档管理 → 异步解析 → 切片 → Embedding → Milvus / Elasticsearch 双写 → 向量与 BM25 双路召回 → RRF 融合 → Parent Context 扩展 → Token Budget → LLM SSE 输出与 Citation。
+> **当前进展（2026-11-08）**：下方基准审查识别出的 6 项问题及对应的 15 个 ISSUE（RAG-001 ~ RAG-015）**均已全部修复并合入当前分支**，详见 §2 总览表、§3~§5 实施勾选、冒烟验证记录及文末提交记录。以下保留基准提交 `44525dce` 时的原始审查背景供对照：
 
-**不能直接认定为完整企业生产级 RAG：**
+基准提交 `main`（`44525dce`）已具备基础 RAG 完整主链路：文档管理 → 异步解析 → 切片 → Embedding → Milvus / Elasticsearch 双写 → 向量与 BM25 双路召回 → RRF 融合 → Parent Context 扩展 → Token Budget → LLM SSE 输出与 Citation。
 
-1. Qwen3-Rerank 的**目标设计与实际运行代码不一致**：当前检索服务在 RRF 后直接扩展上下文，未看到 Rerank 调用。
-2. RabbitMQ 消息确认与租户并发限流存在任务遗漏风险；ES Bulk 部分失败没有完整失败处理。
-3. 查询 Embedding 失败时，尚未进入可降级的向量/关键词双路召回阶段。
-4. `MilvusClientWrapper.countRows()` 异常时返回 `0`，在维度不一致的重建分支中存在误删集合风险。
-5. README/AGENTS 对文件类型、Rerank 等能力的描述与部分实际源代码不一致。
-6. PDF 复杂版式、内嵌图像理解、结构化表格还存在明显完善空间；自动化质量评估与端到端回归不足。
+**基准提交审查时识别的 6 项主要缺口（现已全部解决）：**
+
+1. ~~Qwen3-Rerank 的**目标设计与实际运行代码不一致**：当前检索服务在 RRF 后直接扩展上下文，未看到 Rerank 调用。~~（已由 **RAG-001** 解决）
+2. ~~RabbitMQ 消息确认与租户并发限流存在任务遗漏风险；ES Bulk 部分失败没有完整失败处理。~~（已由 **RAG-002 / RAG-003** 解决）
+3. ~~查询 Embedding 失败时，尚未进入可降级的向量/关键词双路召回阶段。~~（已由 **RAG-004** 解决）
+4. ~~`MilvusClientWrapper.countRows()` 异常时返回 `0`，在维度不一致的重建分支中存在误删集合风险。~~（已由 **RAG-005** 解决）
+5. ~~README/AGENTS 对文件类型、Rerank 等能力的描述与部分实际源代码不一致。~~（已由 **RAG-006 / RAG-012** 解决）
+6. ~~PDF 复杂版式、内嵌图像理解、结构化表格还存在明显完善空间；自动化质量评估与端到端回归不足。~~（已由 **RAG-007 / RAG-008 / RAG-009 / RAG-010** 解决）
 
 **认定规则**：
 - **已确认**：源代码中能直接找到行为或缺失的调用路径。
@@ -67,47 +69,47 @@ flowchart TD
     J --> K["RAG Evaluation / Tracing"]
 ```
 
-**注意**：第二幅图是后续目标，不代表上述每个组件已在 `main` 中落地。
+**说明**：第二幅图中的目标组件（`Query Rewrite`、`Qwen3-Rerank`、`RAG Evaluation / Tracing`）现已在当前分支全部落地。
 
 ### 1.3 现有功能概览
 
-| 功能 | 审查结论 | 证据 |
+| 功能 | 基准审查结论 → 当前状态 | 证据 |
 |---|---|---|
-| 知识库与文档管理 | 已有实现 | `KnowledgeBaseService`、`DocumentAppService` |
-| 支持解析的类型 | `txt/md/docx/xlsx/pdf/html/htm/png/jpg/jpeg` | `ParseService.parse()` 与 `DocumentAppService.ALLOWED_EXT` |
-| PDF 文本 + 扫描页 OCR | 已有实现 | `ParseService.parsePdf()` |
+| 知识库与文档管理 | 已有实现 → **已支持别名级双版本索引重建** | `KnowledgeBaseService`、`DocumentAppService`、`IndexNames` |
+| 支持解析的类型 | 基准 9 类 → **已扩展至 25 种扩展名（含 CSV/JSON/配置文件/常见代码文件）** | `ParseService.parse()` 与 `DocumentAppService.ALLOWED_EXT` |
+| PDF 文本 + 版面理解 | 已有文本+OCR → **已升级 8 类语义块、页眉页脚剔除、跨页表格、矢量网格合并单元格、内嵌图片原位 OCR+Vision** | `PdfLayoutExtractor`、`PdfTableContinuation`、`ParseService.parsePdf()` |
 | 独立图片 OCR + Vision | 已有实现，依赖配置 | `ParseService.parseImage()` |
-| 15 种切片模式 | 枚举含 14 种具体模式 + AUTO | `ChunkMode`、`ChunkStrategyRouter` |
-| Semantic Chunking | 已有实现 | `SemanticStrategy`（相邻句 Embedding 相似度阈值） |
+| 15 种切片模式 | 枚举含 14 种具体模式 + AUTO（`sh` 已纳入 `CODE`） | `ChunkMode`、`ChunkStrategyRouter`、`CodeStrategy` |
+| Semantic Chunking | 已有实现（独立策略 + 结构化切片后 `SemanticRefiner` 细化） | `SemanticStrategy`、`SemanticRefiner` |
 | Parent-Child | 已有实现 | `ParentChildStrategy` + `RetrievalService` |
-| Milvus 向量召回 | 已有实现 | `MilvusClientWrapper.search()` |
-| ES BM25 | 已有实现 | `EsSearchClient.search()` |
-| RRF 融合 | 已有实现 | `RetrievalService.retrieve()` |
-| Qwen3-Rerank | 主检索链路未接入 | `RetrievalService` 无精排调用；`ModelService.TYPES` 无 `RERANK` |
+| Milvus 向量召回 | 已有实现 → **已加固空集合探测（RAG-005）与读别名切换（RAG-003）** | `MilvusClientWrapper`、`MilvusIndexer` |
+| ES BM25 | 已有实现 → **已切换默认 `cjk` 分词 + `content.exact` 精确加权 + Bulk 严格校验** | `EsSearchClient`、`EsIndexer` |
+| RRF 融合与通道降级 | 已有实现 → **已支持多 Query RRF 与单通道故障独立降级（RAG-004/013）** | `RetrievalService`、`QueryRewriteService` |
+| Qwen3-Rerank | 基准未接入 → **已接入主检索链路（兼容标准 `/rerank` 与 DashScope 原生路径，失败静默降级）** | `RerankClient`、`ModelService`（`RERANK`）、`RetrievalService#rerankIfEnabled` |
 | Context Token Budget | 已有实现（近似 token 计数） | `RetrievalService` |
-| Citation / SSE 问答 | 已有实现 | `RetrievalService.Citation`、`ChatOrchestrator` |
-| 天气、Tavily Tool Calling | 已有实现；不等同完整 Agentic RAG | `ChatOrchestrator` |
-| 端到端 RAG Evaluation | 本次审查未发现完整实现 | 现有测试文件与核心模块目录 |
+| Citation / SSE 问答 | 已有实现 → **已扩展 `bbox / sourceId / blockType / rerankScore` 元数据** | `RetrievalService.Citation`、`ChatOrchestrator` |
+| Agentic 工具编排 | 基准仅外部工具 → **已统一编排 `kb_search` + 天气 + Tavily 多轮工具循环（RAG-015）** | `ChatOrchestrator`、`LlmClient#kbSearchTool` |
+| 端到端 RAG Evaluation | 基准未发现 → **已建立召回/答案/分层/改写/调优/切片全套评测基线与真实中间件隔离 E2E** | `rag-api/.../eval/*`、`ChunkStrategyCompareTest`、`TenantIsolationE2ETest` |
 
 ## 2. ISSUE 总览与优先级
 
 | 编号 | 优先级 | 类型 | ISSUE | 状态 |
 |---|---|---|---|---|
-| RAG-001 | P0 | 功能缺口 | 接入 Qwen3-Rerank，打通二阶段精排 | [x] |
-| RAG-002 | P0 | 可靠性 | 修复 RabbitMQ 提前 ACK 与并发拒绝后任务遗漏 | [x] |
-| RAG-003 | P0 | 数据一致性 | 修复 Elasticsearch Bulk 部分失败与双索引不一致 | [x] |
-| RAG-004 | P0 | 可用性 | Embedding 失败时支持 ES-only 检索降级 | [x] |
-| RAG-005 | P0 | 数据安全 | 防止 Milvus 探测失败触发危险重建 | [x] |
-| RAG-006 | P1 | 兼容性 | 统一文件上传白名单、解析器与切片路由 | [x] |
-| RAG-007 | P1 | 多模态 | 升级 PDF Layout / 内嵌图片抽取与理解 | [x] |
-| RAG-008 | P1 | 内容质量 | 完善表格结构化抽取与跨页、跨块保护 | [x] |
-| RAG-009 | P1 | 质量保障 | 建立 RAG Evaluation 与回归测试基线 | [x] |
-| RAG-010 | P1 | 安全性 | 补齐多租户检索隔离与引用访问测试 | [x] |
-| RAG-011 | P1 | 运维 | 入库状态机、重试恢复、可观测性闭环 | [x] |
-| RAG-012 | P1 | 文档一致性 | 修复 README / AGENTS / 规格与代码偏差 | [x] |
-| RAG-013 | P2 | 检索质量 | Query Rewrite / Multi-Query / 意图识别 | [x] |
-| RAG-014 | P2 | 检索质量 | ES 中文分词、检索调优与 Recall 性能优化 | [x] |
-| RAG-015 | P2 | 智能编排 | Agentic RAG 与工具检索统一编排 | [x] |
+| RAG-001 | P0 | 功能缺口 | 接入 Qwen3-Rerank，打通二阶段精排 | [x] 已完成 |
+| RAG-002 | P0 | 可靠性 | 修复 RabbitMQ 提前 ACK 与并发拒绝后任务遗漏 | [x] 已完成 |
+| RAG-003 | P0 | 数据一致性 | 修复 Elasticsearch Bulk 部分失败与双索引不一致（含别名双版本切换） | [x] 已完成 |
+| RAG-004 | P0 | 可用性 | Embedding 失败时支持 ES-only 检索降级 | [x] 已完成 |
+| RAG-005 | P0 | 数据安全 | 防止 Milvus 探测失败触发危险重建 | [x] 已完成 |
+| RAG-006 | P1 | 兼容性 | 统一文件上传白名单、解析器与切片路由 | [x] 已完成 |
+| RAG-007 | P1 | 多模态 | 升级 PDF Layout / 内嵌图片抽取与理解 | [x] 已完成 |
+| RAG-008 | P1 | 内容质量 | 完善表格结构化抽取与跨页、跨块保护 | [x] 已完成 |
+| RAG-009 | P1 | 质量保障 | 建立 RAG Evaluation 与回归测试基线 | [x] 已完成 |
+| RAG-010 | P1 | 安全性 | 补齐多租户检索隔离与引用访问测试 | [x] 已完成 |
+| RAG-011 | P1 | 运维 | 入库状态机、重试恢复、可观测性闭环 | [x] 已完成 |
+| RAG-012 | P1 | 文档一致性 | 修复 README / AGENTS / 规格与代码偏差 | [x] 已完成 |
+| RAG-013 | P2 | 检索质量 | Query Rewrite / Multi-Query / 意图识别 | [x] 已完成 |
+| RAG-014 | P2 | 检索质量 | ES 中文分词、检索调优与 Recall 性能优化 | [x] 已完成 |
+| RAG-015 | P2 | 智能编排 | Agentic RAG 与工具检索统一编排 | [x] 已完成 |
 
 ---
 
@@ -253,7 +255,7 @@ flowchart TD
 - [x] 不将表格中的精确数字或主键只依赖 LLM Summary 表达（Excel 用 `DataFormatter` 保留日期/金额/编号显示格式，Markdown 保留原值）。
 - [x] 为跨页/超大表格、多 Sheet Excel 添加回归用例（`ChunkPipelineTest` 跨页续接/重复表头/三页表格/残缺行列；`ParseServiceTableTest` 多 Sheet、合并单元格；`TableModelTest` 行列对齐）。
 
-> PDF 表格仍走文本层 + `PDF_LAYOUT` 切片，bbox 级表格识别归入 RAG-007，未在本项实现。
+> PDF 表格的 bbox 级识别、矢量线段网格合并单元格（`colspan/rowspan`）与跨页表格续接（`PdfTableContinuation`）已在 RAG-007 中实现并转为 `TableModel` Markdown。
 
 **验收**：金额、编号、日期、表头与所属行查询准确；重建后引用能回溯原表。
 
@@ -454,13 +456,14 @@ flowchart TD
 | 测试结果 | E2E 通过：真实 MySQL 落库、真实 ES 建索引、真实 Milvus 建集合；向量/关键词双通道均命中 2 条，跨租户残留 chunk 被过滤，跨租户 KB 返回 `NOT_FOUND`。常规构建 `BUILD SUCCESS`（rag-api 41 项、1 项 E2E 默认跳过；rag-worker 46 项） |
 | 回滚方案 | `git revert b317bcb`。测试类默认被 `@EnabledIfSystemProperty` 跳过，不影响常规构建；真实中间件测试无生产数据变更（用例结束自动删除 KB/文档/切片、ES 索引与 Milvus 集合） |
 
-### 本轮变更：RAG-003 别名级双版本与文档收尾（待提交）
+### 后续提交：RAG-003 别名级双版本、日志依赖清理与文档收尾
 
 | 项 | 内容 |
 |---|---|
-| Commit | 待提交（工作区变更） |
-| 主题 | `feat(index): 实现知识库索引别名级双版本与重建入口` |
-| 覆盖 ISSUE | RAG-003（别名双版本切换）、RAG-006（`sh` 纳入 CODE 切片）、RAG-012（README/AGENTS/CODE_INTRO 同步） |
-| 变更文件 | 新增 `V27__kb_index_version.sql`、`rag-common/.../search/IndexNames.java`；公共层 `KnowledgeBaseEntity.java`、`KnowledgeBaseMapper.java`、`KnowledgeBaseMapper.xml`；API `KnowledgeBaseService.java`、`KnowledgeBaseController.java`、`Dtos.java`、`DocumentAppService.java`、`RetrievalService.java`、`EsSearchClient.java`、`MilvusClientWrapper.java`；Worker `PipelineProcessor.java`、`IngestConsumer.java`、`EsIndexer.java`、`MilvusIndexer.java`、`ChunkStrategyRouter.java`、`CodeStrategy.java`；文档 `README.md`、`AGENTS.md`、`CODE_INTRO.md`、`ISSUE.md`、`.gitignore` |
+| Commit | [`2a0a093`](https://github.com/cpc-lib/rag/commit/2a0a093)（能力、依赖清理与 Mermaid 化）及本提交（`ISSUE.md` / `README.md` 状态闭环记录） |
+| 主题 | `feat(index): 实现知识库索引别名级双版本（RAG-003）并支持 .env 环境配置` |
+| 覆盖 ISSUE | RAG-003（别名双版本切换）、RAG-006（`sh` 纳入 CODE 切片）、RAG-012（README/AGENTS/CODE_INTRO/PIPELINE 流程图 Mermaid 化与状态同步） |
+| 变更文件 | 新增 `V27__kb_index_version.sql`、`rag-common/.../search/IndexNames.java`、`.env.example`；构建：`rag-api/pom.xml`、`rag-worker/pom.xml`（排除 `commons-logging` 传递依赖消除 `spring-jcl` 冲突）；公共层 `KnowledgeBaseEntity.java`、`KnowledgeBaseMapper.java`、`KnowledgeBaseMapper.xml`；API `KnowledgeBaseService.java`、`KnowledgeBaseController.java`、`Dtos.java`、`DocumentAppService.java`、`RetrievalService.java`、`QueryRewriteService.java`、`EsSearchClient.java`、`MilvusClientWrapper.java`、`TenantIsolationCoverageTest.java`；Worker `PipelineProcessor.java`、`IngestConsumer.java`、`EsIndexer.java`、`MilvusIndexer.java`、`ChunkStrategyRouter.java`、`CodeStrategy.java`；配置与文档 `application.yml`、`README.md`、`AGENTS.md`、`CODE_INTRO.md`、`RAG_DOCUMENT_PROCESSING_PIPELINE.md`、`ISSUE.md`、`.gitignore` |
 | 测试命令 | `mvn clean install`（根目录聚合）；`cd knowledge-console && npm run typecheck` |
-| 回滚方案 | 代码回滚后把 `{base}_active` 指向的物理索引改回 `kb_{id}` 并删除别名；Flyway V27 仅新增三列（`index_version/index_state/index_target_version`），旧代码不读取，可直接保留。重建前仍建议由运维对 Milvus / ES 做快照 |
+| 测试结果 | `BUILD SUCCESS`：rag-common / rag-api / rag-worker 全部编译与单测通过，`commons-logging` 冲突警告消除 |
+| 回滚方案 | `git revert 2a0a093`，并把 `{base}_active` 指向的物理索引改回 `kb_{id}` 后删除别名；Flyway V27 仅新增三列（`index_version/index_state/index_target_version`），旧代码不读取，可直接保留。重建前仍建议由运维对 Milvus / ES 做快照 |
