@@ -20,12 +20,15 @@ class DocumentStageTest {
         assertTrue(DocumentStage.canTransit(DocumentStage.STOPPED, DocumentStage.EMBEDDING));
         // 进度上报允许同状态重复
         assertTrue(DocumentStage.canTransit(DocumentStage.EMBEDDING, DocumentStage.EMBEDDING));
+        // 僵尸任务恢复：中断在索引阶段的文档允许回退重跑
+        assertTrue(DocumentStage.canTransit(DocumentStage.INDEXING, DocumentStage.PARSING));
+        assertTrue(DocumentStage.canTransit(DocumentStage.INDEXING, DocumentStage.EMBEDDING));
     }
 
     @Test
     void illegalTransitionsAreRejected() {
         assertFalse(DocumentStage.canTransit(DocumentStage.READY, DocumentStage.CHUNKING));
-        assertFalse(DocumentStage.canTransit(DocumentStage.INDEXING, DocumentStage.PARSING));
+        assertFalse(DocumentStage.canTransit(DocumentStage.INDEXING, DocumentStage.CHUNKING));
         assertFalse(DocumentStage.canTransit(DocumentStage.UPLOADED, DocumentStage.READY));
     }
 

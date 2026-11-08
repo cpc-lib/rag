@@ -10,7 +10,8 @@ import java.util.Set;
  * <pre>
  * UPLOADED → PARSING → CHUNKING → EMBEDDING → INDEXING → READY
  * 任意处理中状态可被用户停止（STOPPED）；异常由消费者置 FAILED。
- * STOPPED / FAILED / READY 可重新开始（PARSING 或已有切片的 EMBEDDING 断点续跑）。
+ * STOPPED / FAILED / READY 可重新开始（PARSING 或已有切片的 EMBEDDING 断点续跑）；
+ * INDEXING 同样允许回退重跑，供僵尸任务恢复消费中断在索引阶段的文档。
  * </pre>
  */
 public enum DocumentStage {
@@ -21,7 +22,7 @@ public enum DocumentStage {
             PARSING, EnumSet.of(PARSING, CHUNKING, FAILED, STOPPED),
             CHUNKING, EnumSet.of(CHUNKING, EMBEDDING, FAILED, STOPPED),
             EMBEDDING, EnumSet.of(EMBEDDING, INDEXING, FAILED, STOPPED),
-            INDEXING, EnumSet.of(INDEXING, READY, FAILED, STOPPED),
+            INDEXING, EnumSet.of(INDEXING, READY, FAILED, STOPPED, PARSING, EMBEDDING),
             READY, EnumSet.of(PARSING, EMBEDDING, STOPPED),
             FAILED, EnumSet.of(PARSING, EMBEDDING),
             STOPPED, EnumSet.of(PARSING, EMBEDDING)

@@ -238,6 +238,17 @@ public class PipelineProcessor {
         // 双写一致性校验：两侧数量必须等于预期 child 数，否则不允许进入 READY
         long esCount = esIndexer.countByDocument(kb.getEsIndex(), doc.getId());
         long milvusCount = milvusIndexer.countByDocument(kb.getMilvusCollection(), doc.getId(), chunks.size());
+        // Milvus 删除异步生效，对账时陈旧行可能仍可见；有限次重清并重查，收敛不了才判失败
+        for (int recheck = 0; recheck < 5 && milvusCount != chunks.size(); recheck++) {
+            try {
+                Thread.sleep(2000);
+            } catch (InterruptedException ie) {
+                Thread.currentThread().interrupt();
+                break;
+            }
+            milvusIndexer.deleteStale(kb.getMilvusCollection(), doc.getId(), keepIds);
+            milvusCount = milvusIndexer.countByDocument(kb.getMilvusCollection(), doc.getId(), chunks.size());
+        }
         if (esCount != chunks.size() || milvusCount != chunks.size()) {
             throw new IllegalStateException("双索引写入数量不一致 doc=" + doc.getId()
                     + " expected=" + chunks.size() + " es=" + esCount + " milvus=" + milvusCount);
@@ -361,6 +372,10 @@ public class PipelineProcessor {
     }
 
     private void setStage(DocumentEntity doc, String status, int progress) {
+        if ("READY".equals(status)) {
+            // 成功后清掉历史失败信息（updateById 忽略 null，只能置空串覆盖）
+            doc.setErrorMsg("");
+        }
         DocumentStage from = DocumentStage.of(doc.getStatus());
         DocumentStage to = DocumentStage.of(status);
         if (!DocumentStage.canTransit(from, to)) {

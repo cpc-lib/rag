@@ -31,6 +31,12 @@ public class RetryPublisher {
     private String exchange;
 
     public void publishRetry(IngestMessage msg, long delayMs) {
+        if (delayMs <= 0) {
+            // 立即重投（僵尸任务恢复）直接回主队列：retry 队列无队列级 TTL，
+            // delay=0 的消息不设过期时间，永远不会死信转发回来，会永久堆积
+            send(exchange, "parse", msg, 0);
+            return;
+        }
         send(exchange, "retry", msg, delayMs);
     }
 
