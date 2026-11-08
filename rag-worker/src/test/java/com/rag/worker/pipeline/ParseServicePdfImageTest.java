@@ -7,6 +7,7 @@ import com.rag.worker.infrastructure.storage.MinioStorage;
 import org.apache.pdfbox.pdmodel.PDDocument;
 import org.apache.pdfbox.pdmodel.PDPage;
 import org.apache.pdfbox.pdmodel.PDPageContentStream;
+import org.apache.pdfbox.pdmodel.font.PDType1Font;
 import org.apache.pdfbox.pdmodel.graphics.image.LosslessFactory;
 import org.apache.pdfbox.pdmodel.graphics.image.PDImageXObject;
 import org.junit.jupiter.api.Test;
@@ -16,18 +17,20 @@ import java.awt.Graphics2D;
 import java.awt.image.BufferedImage;
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
+import java.io.IOException;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
-/** RAG-007：PDF 内嵌图片抽取 + OCR 通道，结果保留在对应页码文本中。 */
+/** RAG-007：PDF 内嵌图片抽取 + OCR 通道，识别结果按版面位置保留在对应页文本中。 */
 class ParseServicePdfImageTest {
 
     @Test
-    void embeddedImageTextIsAppendedToSamePage() throws Exception {
+    void embeddedImageTextIsInsertedAtImagePosition() throws Exception {
         byte[] pdfBytes = pdfWithImage();
         MinioStorage minio = mock(MinioStorage.class);
         when(minio.download(anyString())).thenReturn(new ByteArrayInputStream(pdfBytes));
@@ -44,9 +47,14 @@ class ParseServicePdfImageTest {
         ParseService.ParseOutcome outcome = service.parse(doc, null);
 
         String text = outcome.pages().get(0).text();
-        assertTrue(text.contains("[第1页图片]"), text);
+        assertTrue(text.contains("[第1页图片1]"), text);
         assertTrue(text.contains("图片里的文字"), text);
-        assertTrue(outcome.pages().get(0).page() == 0);
+        assertEquals(0, outcome.pages().get(0).page());
+        // 图片说明位于上方文字与下方文字之间，而不是页尾
+        int above = text.indexOf("Text above the image");
+        int image = text.indexOf("[第1页图片1]");
+        int below = text.indexOf("Text below the image");
+        assertTrue(above >= 0 && above < image && image < below, text);
     }
 
     private byte[] pdfWithImage() throws Exception {
@@ -60,11 +68,21 @@ class ParseServicePdfImageTest {
             g.dispose();
             PDImageXObject pdImage = LosslessFactory.createFromImage(pdf, image);
             try (PDPageContentStream cs = new PDPageContentStream(pdf, page)) {
-                cs.drawImage(pdImage, 50, 500, 200, 200);
+                text(cs, 50, 730, "Text above the image.");
+                cs.drawImage(pdImage, 50, 300, 200, 200);
+                text(cs, 50, 120, "Text below the image.");
             }
             ByteArrayOutputStream out = new ByteArrayOutputStream();
             pdf.save(out);
             return out.toByteArray();
         }
+    }
+
+    private void text(PDPageContentStream cs, float x, float y, String text) throws IOException {
+        cs.beginText();
+        cs.setFont(PDType1Font.HELVETICA, 10);
+        cs.newLineAtOffset(x, y);
+        cs.showText(text);
+        cs.endText();
     }
 }

@@ -5,14 +5,11 @@ import com.rag.api.infrastructure.persistence.entity.DocumentEntity;
 import com.rag.api.infrastructure.persistence.entity.ModelEntity;
 import com.rag.worker.infrastructure.storage.MinioStorage;
 import com.rag.worker.infrastructure.llm.VisionClient;
+import com.rag.worker.pipeline.pdf.PdfLayoutExtractor;
 import com.rag.worker.pipeline.table.TableModel;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
-import org.apache.pdfbox.cos.COSName;
 import org.apache.pdfbox.pdmodel.PDDocument;
-import org.apache.pdfbox.pdmodel.PDPage;
-import org.apache.pdfbox.pdmodel.PDResources;
-import org.apache.pdfbox.pdmodel.graphics.PDXObject;
 import org.apache.pdfbox.pdmodel.graphics.image.PDImageXObject;
 import org.apache.pdfbox.rendering.PDFRenderer;
 import org.apache.pdfbox.text.PDFTextStripper;
@@ -38,6 +35,7 @@ import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -345,12 +343,12 @@ public class ParseService {
         }
     }
 
-    /** 单页最多抽取的图片数，避免整页图标/水印放大 Vision 调用成本。 */
-    private static final int MAX_IMAGES_PER_PAGE = 5;
     /** 单文档最多抽取的图片数。 */
     private static final int MAX_IMAGES_PER_DOC = 30;
-    /** 小于该尺寸的图片多为图标/线条，不进入 OCR/Vision。 */
+    /** 小于该尺寸（显示尺寸 pt 或像素）的图片多为图标/线条，不进入 OCR/Vision。 */
     private static final int MIN_IMAGE_SIDE = 80;
+
+    private final PdfLayoutExtractor pdfLayoutExtractor = new PdfLayoutExtractor();
 
     private ParseOutcome parsePdf(DocumentEntity doc, ModelEntity vision, byte[] bytes) {
         List<RawPage> pages = new ArrayList<>();
@@ -358,18 +356,21 @@ public class ParseService {
         boolean imageChannels = ocrService.available()
                 || (vision != null && visionClient.isConfigured(vision.getBaseUrl(), vision.getModel()));
         int[] imageBudget = {MAX_IMAGES_PER_DOC};
+        // 同一图片对象跨页/重复绘制时复用识别结果，避免重复调用 OCR/Vision
+        Map<PDImageXObject, String> imageDescCache = new IdentityHashMap<>();
         try (PDDocument pdf = PDDocument.load(bytes)) {
-            PDFTextStripper stripper = new PDFTextStripper();
             PDFRenderer renderer = new PDFRenderer(pdf);
             int total = pdf.getNumberOfPages();
             for (int i = 0; i < total; i++) {
-                stripper.setStartPage(i + 1);
-                stripper.setEndPage(i + 1);
-                String text = stripper.getText(pdf);
-                // 图文混排：文本层与内嵌图片内容合并到同一页，保持页码与相邻上下文
-                String imageText = imageChannels
-                        ? extractImagesText(pdf, i, vision, warnings, imageBudget) : "";
-                String merged = (text == null ? "" : text) + imageText;
+                List<PdfLayoutExtractor.Block> blocks;
+                try {
+                    blocks = pdfLayoutExtractor.extractPage(pdf, i);
+                } catch (Exception le) {
+                    log.warn("PDF 第 {} 页版式抽取失败，回退纯文本: {}", i + 1, le.getMessage());
+                    blocks = fallbackTextBlocks(pdf, i);
+                }
+                String merged = assemblePage(blocks, i, vision, warnings, imageBudget,
+                        imageChannels, imageDescCache);
                 if (merged.strip().length() >= 10) {
                     pages.add(new RawPage(i, merged));
                     continue;
@@ -396,59 +397,84 @@ public class ParseService {
         return new ParseOutcome(pages, warnings);
     }
 
-    /**
-     * 抽取 PDF 内嵌图片并做 OCR + Vision 双通道识别（ISSUE RAG-007）。
-     * 返回追加到该页文本末尾的图片内容；单图失败只告警，不阻断解析。
-     */
-    private String extractImagesText(PDDocument pdf, int pageIndex, ModelEntity vision,
-                                     List<String> warnings, int[] imageBudget) {
-        List<PDImageXObject> images = new ArrayList<>();
+    /** 版式抽取失败时按纯文本提取整页（保持阅读顺序），保证页面不丢失。 */
+    private List<PdfLayoutExtractor.Block> fallbackTextBlocks(PDDocument pdf, int pageIndex) {
         try {
-            PDPage page = pdf.getPage(pageIndex);
-            PDResources resources = page.getResources();
-            if (resources == null) {
-                return "";
-            }
-            for (COSName name : resources.getXObjectNames()) {
-                if (images.size() >= MAX_IMAGES_PER_PAGE || imageBudget[0] <= 0) {
-                    break;
-                }
-                PDXObject xObject = resources.getXObject(name);
-                if (xObject instanceof PDImageXObject image) {
-                    images.add(image);
-                }
-            }
+            PDFTextStripper stripper = new PDFTextStripper();
+            stripper.setSortByPosition(true);
+            stripper.setStartPage(pageIndex + 1);
+            stripper.setEndPage(pageIndex + 1);
+            return List.of(new PdfLayoutExtractor.TextBlock(0, stripper.getText(pdf)));
         } catch (Exception e) {
-            log.warn("PDF 第 {} 页图片抽取失败: {}", pageIndex + 1, e.getMessage());
-            return "";
+            log.warn("PDF 第 {} 页纯文本回退提取失败: {}", pageIndex + 1, e.getMessage());
+            return List.of();
         }
-        if (images.isEmpty()) {
-            return "";
-        }
+    }
+
+    /**
+     * 组装单页文本（ISSUE RAG-007）：文本行 / 表格 Markdown / 图片识别结果
+     * 按版面自顶向下顺序拼接，图片说明保留在原文相邻位置而不是页尾。
+     */
+    private String assemblePage(List<PdfLayoutExtractor.Block> blocks, int pageIndex,
+                                ModelEntity vision, List<String> warnings, int[] imageBudget,
+                                boolean imageChannels, Map<PDImageXObject, String> descCache) {
         StringBuilder sb = new StringBuilder();
-        for (PDImageXObject image : images) {
-            if (imageBudget[0] <= 0) {
-                warnings.add("PDF 图片数量超过上限 " + MAX_IMAGES_PER_DOC + "，其余已跳过");
-                break;
-            }
-            if (image.getWidth() < MIN_IMAGE_SIDE || image.getHeight() < MIN_IMAGE_SIDE) {
-                continue;
-            }
-            imageBudget[0]--;
-            String label = "第" + (pageIndex + 1) + "页图片";
-            byte[] png;
-            try {
-                png = toPng(image);
-            } catch (Exception e) {
-                log.warn("PDF 第 {} 页图片转换失败: {}", pageIndex + 1, e.getMessage());
-                continue;
-            }
-            String described = describeImage(vision, png, warnings, label);
-            if (!described.isBlank()) {
-                sb.append("\n\n[").append(label).append("]\n").append(described);
+        int imgSeq = 0;
+        boolean budgetWarned = false;
+        for (PdfLayoutExtractor.Block block : blocks) {
+            if (block instanceof PdfLayoutExtractor.TextBlock t) {
+                appendBlock(sb, t.text());
+            } else if (block instanceof PdfLayoutExtractor.TableBlock t) {
+                appendBlock(sb, t.table().toMarkdown());
+            } else if (block instanceof PdfLayoutExtractor.ImageBlock img) {
+                if (!imageChannels) {
+                    continue;
+                }
+                if (imageBudget[0] <= 0) {
+                    if (!budgetWarned) {
+                        warnings.add("PDF 图片数量超过上限 " + MAX_IMAGES_PER_DOC + "，其余已跳过");
+                        budgetWarned = true;
+                    }
+                    continue;
+                }
+                if (img.width() < MIN_IMAGE_SIDE || img.height() < MIN_IMAGE_SIDE
+                        || img.image().getWidth() < MIN_IMAGE_SIDE
+                        || img.image().getHeight() < MIN_IMAGE_SIDE) {
+                    continue;
+                }
+                imageBudget[0]--;
+                imgSeq++;
+                String label = "第" + (pageIndex + 1) + "页图片" + imgSeq;
+                String described = descCache.computeIfAbsent(img.image(),
+                        k -> describeImageSafely(vision, k, warnings, label));
+                if (!described.isBlank()) {
+                    appendBlock(sb, "[" + label + "]\n" + described);
+                }
             }
         }
         return sb.toString();
+    }
+
+    private void appendBlock(StringBuilder sb, String text) {
+        if (text == null || text.isBlank()) {
+            return;
+        }
+        if (sb.length() > 0) {
+            sb.append("\n\n");
+        }
+        sb.append(text.strip());
+    }
+
+    /** 图片识别（OCR + Vision 双通道），任何异常只告警返回空串，不阻断解析。 */
+    private String describeImageSafely(ModelEntity vision, PDImageXObject image,
+                                       List<String> warnings, String label) {
+        try {
+            return describeImage(vision, toPng(image), warnings, label);
+        } catch (Exception e) {
+            log.warn("{} 处理失败: {}", label, e.getMessage());
+            warnings.add(label + "处理失败");
+            return "";
+        }
     }
 
     private byte[] toPng(PDImageXObject image) throws Exception {

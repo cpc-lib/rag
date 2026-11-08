@@ -63,12 +63,13 @@ rag/
 | 任务可靠性（claim / 重试 / 僵尸恢复） | 已实现 | `IngestConsumer`、`StaleTaskRecovery` | 并发饱和不丢任务；重启后超时 PENDING/RUNNING 被重投 |
 | 死信重放 | 已实现 | `PipelineOpsService` | `POST /api/v1/ops/pipeline/dlq/replay`（平台管理员） |
 | 队列积压观测 | 已实现 | `PipelineOpsService#queueDepths` | `GET /api/v1/ops/pipeline/queues`（平台管理员） |
-| PDF 内嵌图片理解 | 已实现（OCR 可直接用，Vision 需配置） | `ParseService#extractImagesText` | 图文混排 PDF 检索图片内文字；图片描述追加到对应页码文本 |
+| PDF 内嵌图片理解 | 已实现（OCR 可直接用，Vision 需配置） | `pipeline/pdf/PdfLayoutExtractor`、`ParseService#parsePdf` | 图文混排 PDF 检索图片内文字；图片描述按版面位置插入对应页文本 |
 | 表格结构化（Word/Excel/HTML/CSV） | 已实现 | `pipeline/table/TableModel`、`ChunkSupport#mergeContinuedTables` | 多 Sheet Excel、合并单元格、跨页续接表格可按表头+数据行检索 |
 | 重建索引可用性（先写后删） | 已实现 | `PipelineProcessor#indexAll`、`EsIndexer#deleteStale`、`MilvusIndexer#deleteStale` | 新版本写入成功后才清理陈旧 chunk；重建期间旧索引保持可读，失败重试幂等收敛 |
 | 索引别名级双版本切换 | 规划中 | — | 尚未实现 ES alias / Milvus 双集合并行读取 |
 | ES 中文分词与检索调优 | 部分实现 | `EsSearchClient`、`EsIndexer` | 默认 `cjk` 分词 + `content.exact` 精确字段 + 检索指标；真实数据分层调优待评测 |
-| PDF 结构化 Block（标题/表格/图片） | 规划中 | — | 当前为文本层 + OCR + 版面排序 |
+| PDF bbox 表格识别 | 已实现（启发式） | `pipeline/pdf/PdfLayoutExtractor` | 行内空隙切列 + 跨行列首对齐检测表格，转 `TableModel` Markdown 嵌入页文本；误判受对齐率/单元格长度约束 |
+| PDF 结构化 Block（标题/列表/公式） | 规划中 | — | 已有文本/表格/图片三类块 + 版面排序，语义分类待后续 |
 | RAG Evaluation 基线（召回侧） | 已实现 | `rag-api/.../eval/RetrievalMetrics`、`RetrievalBaselineTest` | `mvn -f rag-api/pom.xml test -Dtest=RetrievalBaselineTest`，报告输出 `rag-api/target/eval/retrieval-baseline.json` |
 | RAG Evaluation 答案指标 | 规划中 | — | Faithfulness / Answer Relevance 需在线模型评测 |
 
@@ -190,47 +191,52 @@ npm run build
 
 ### 文档处理
 
-```
-文档上传（multipart，存储配额校验）
-  → MinIO 保存原文件 + document/pipeline_task 落库
-  → RabbitMQ exchange: rag.ingest
-      → IngestConsumer（租户并发信号量 → RUNNING）
-          PARSING    解析（产物写 MinIO derived/{version}/）
-          CHUNKING   策略路由切片（Parent-Child 时仅 CHILD 入向量库）
-          EMBEDDING  每批 ≤10 条调 /embeddings
-          INDEXING   Milvus（先删后写）+ Elasticsearch（BM25）
-          READY      进度 100
+```mermaid
+flowchart TD
+    A["文档上传（multipart，存储配额校验）"] --> B["MinIO 保存原文件 + document/pipeline_task 落库"]
+    B --> C["RabbitMQ exchange: rag.ingest"]
+    C --> D["IngestConsumer（租户并发信号量 → RUNNING）"]
+    subgraph Worker["PipelineProcessor"]
+        D --> E["PARSING：解析（产物写 MinIO derived/{version}/）"]
+        E --> F["CHUNKING：策略路由切片（Parent-Child 时仅 CHILD 入向量库）"]
+        F --> G["EMBEDDING：每批 ≤10 条调 /embeddings"]
+        G --> H["INDEXING：Milvus（先删后写）+ Elasticsearch（BM25）"]
+        H --> I["READY：进度 100"]
+    end
 ```
 
 问答检索：
 
-```
-（可选）多轮 Query 改写 / Multi-Query
-  → 每个 Query：Milvus 向量 Top20 + ES BM25 Top20
-  → 多路 RRF 融合（k=60）取 Top8
-  → 可选 Rerank 精排（失败静默降级）
-  → CHILD 命中扩展到 PARENT 并去重
-  → Token Budget（12000）截断
-  → 组装 Prompt → LLM SSE 流式返回
+```mermaid
+flowchart TD
+    A["（可选）多轮 Query 改写 / Multi-Query"] --> B["Milvus 向量 Top20"]
+    A --> C["ES BM25 Top20"]
+    B --> D["多路 RRF 融合（k=60）取 Top8"]
+    C --> D
+    D --> E["可选 Rerank 精排（失败静默降级）"]
+    E --> F["CHILD 命中扩展到 PARENT 并去重"]
+    F --> G["Token Budget（12000）截断"]
+    G --> H["组装 Prompt → LLM SSE 流式返回"]
 ```
 
 SSE 事件：`session` / `search_start` / `search_result`（含引用）/ `message`（增量）/ `done`（用量）/ `error`。
 
 ### 视频转码
 
-```
-文件库上传视频（mp4/mkv/avi/ts）
-  → 用户点击「开始转码」（READY 后也可「重新转码」）
-  → RabbitMQ media.transcode
-      → MediaTranscodeConsumer（收到即 ack，提交自定义线程池异步执行，避免 consumer_timeout 重投）
-          ffprobe 探测分辨率/帧率/编码
-          H.264+AAC 源 → -c copy 直切（秒级）
-          其他 → NVENC 硬编（GPU 解码优先），失败回退 CPU 软编
-                 码率封顶 -maxrate 20M，6 秒分片对齐关键帧
-          HLS 产物上传 {objectKey}.hls/
-          Redis 广播进度 → WebSocket 推送给前端
-          READY 状态回写
-  → 前端 hls.js 播放，支持清晰度/倍速/进度拖动
+```mermaid
+flowchart TD
+    A["文件库上传视频（mp4/mkv/avi/ts）"] --> B["用户点击「开始转码」（READY 后也可「重新转码」）"]
+    B --> C["RabbitMQ media.transcode"]
+    C --> D["MediaTranscodeConsumer（收到即 ack，提交自定义线程池异步执行，避免 consumer_timeout 重投）"]
+    D --> E["ffprobe 探测分辨率/帧率/编码"]
+    E --> F{"是否为 H.264+AAC 源？"}
+    F -- "是" --> G["-c copy 直切（秒级）"]
+    F -- "否" --> H["NVENC 硬编（GPU 解码优先），失败回退 CPU 软编\n码率封顶 -maxrate 20M，6 秒分片对齐关键帧"]
+    G --> I["HLS 产物上传 {objectKey}.hls/"]
+    H --> I
+    I --> J["Redis 广播进度 → WebSocket 推送给前端"]
+    J --> K["READY 状态回写"]
+    K --> L["前端 hls.js 播放，支持清晰度/倍速/进度拖动"]
 ```
 
 转码实时进度通过 WebSocket（`/ws/media-progress`）推送，无需轮询。Worker 的三个消费者（文档解析 / 转码 / SHA-256）统一由 `ExecutorConfig` 自定义线程池承载。
