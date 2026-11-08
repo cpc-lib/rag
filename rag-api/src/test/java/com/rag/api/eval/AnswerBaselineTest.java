@@ -100,8 +100,12 @@ class AnswerBaselineTest {
         List<Boolean> expectedRefusal = new ArrayList<>();
         List<Map<String, Object>> caseReports = new ArrayList<>();
         for (Case evalCase : dataset.cases()) {
-            double faith = judge.faithfulness(evalCase.query(), evalCase.answer(), evalCase.contexts());
-            double rel = judge.answerRelevance(evalCase.query(), evalCase.answer());
+            // 拒答样例由 refusalAccuracy 单独衡量；语义指标只评有答案的样例，
+            // 避免正确拒答被判为“答非所问”而拉低相关性
+            double faith = evalCase.expectRefusal() ? Double.NaN
+                    : judge.faithfulness(evalCase.query(), evalCase.answer(), evalCase.contexts());
+            double rel = evalCase.expectRefusal() ? Double.NaN
+                    : judge.answerRelevance(evalCase.query(), evalCase.answer());
             faithfulness.add(faith);
             relevance.add(rel);
             boolean refusal = AnswerMetrics.isRefusal(evalCase.answer());

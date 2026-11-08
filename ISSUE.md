@@ -261,7 +261,7 @@ flowchart TD
 
 - [x] 建立固定评测集：普通问答、相似段落、精确编号、跨文档、多跳推理、表格、图片、无答案问题（`rag-api/src/test/resources/eval/retrieval-dataset.json`，测试校验八类齐全）。
 - [x] 检索指标：Recall@K、Precision@K、MRR@K、nDCG@K（`rag-api/src/test/java/com/rag/api/eval/RetrievalMetrics.java`）。
-- [x] 答案指标：Faithfulness、Answer Relevance、Citation Precision、拒答正确率（`AnswerMetrics` 提供引用精确率/拒答正确率纯函数；`OpenAiAnswerJudge` 用 CHAT 模型以 JSON 打分；`AnswerBaselineTest` 离线跑确定性指标并输出 `rag-api/target/eval/answer-baseline.json`，设置 `RAG_EVAL_ANSWER=true` + `RAG_EVAL_BASE_URL/API_KEY/MODEL` 后按需执行在线评测并与 `answer-dataset.json` 基线比较；实测 qwen-plus：faithfulness 1.0 / relevance 0.78 / citation 0.94 / 拒答 1.0）
+- [x] 答案指标：Faithfulness、Answer Relevance、Citation Precision、拒答正确率（`AnswerMetrics` 提供引用精确率/拒答正确率纯函数；`OpenAiAnswerJudge` 用 CHAT 模型以 JSON 打分；`AnswerBaselineTest` 离线跑确定性指标并输出 `rag-api/target/eval/answer-baseline.json`，设置 `RAG_EVAL_ANSWER=true` + `RAG_EVAL_BASE_URL/API_KEY/MODEL` 后按需执行在线评测并与 `answer-dataset.json` 基线比较；实测 qwen-plus：faithfulness 1.0 / relevance 0.975 / citation 0.94 / 拒答 1.0；拒答样例只计入拒答正确率，不参与语义指标均值）
 - [x] 记录基线版本、数据集、配置、模型、评测脚本与结果（数据集内记录 `version/rrfK/topK/embeddingModel/rerank` 与基线值；每次测试输出 `rag-api/target/eval/retrieval-baseline.json`）。
 - [x] 在 CI 引入轻量确定性测试；昂贵的模型评测采用可复现的手动/按需流程（`RetrievalBaselineTest` 离线复用生产 `RetrievalService.rrfFuse`，不依赖 ES/Milvus/LLM）。
 - [ ] 对 Rerank、Chunk Strategy、Top-K 变更输出前后对比（RRF 基线已可复用，端到端对比需在线环境）。
