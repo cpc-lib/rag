@@ -5,7 +5,7 @@
 > **审查基准提交**：[`44525dce952ca37a22230400881f47a9b8ff9b06`](https://github.com/cpc-lib/rag/commit/44525dce952ca37a22230400881f47a9b8ff9b06)（提交时间：2026-10-11 UTC）  
 > **整理日期**：2026-11-07  
 > **性质**：静态源码审查 / 待办 ISSUE；**未执行生产压测**（2026-11-08 已完成本地端到端冒烟，见文末「冒烟验证记录」）  
-> **状态**：P0（RAG-001 ~ RAG-005）基本修复，RAG-003 采用「先写后删」（别名级双版本并行读取列为后续增强），RAG-005 少量增强项待办；P1 已完成 RAG-006、RAG-008、RAG-010、RAG-011、RAG-012，RAG-007/009 部分完成；P2 RAG-013/014/015 部分完成（Query 改写、Multi-Query、中文分词、指标与工具/KB 统一编排已实现，真实模型评测与端到端验收待补）；复选框反映当前进度
+> **状态**：P0（RAG-001 ~ RAG-005）基本修复，RAG-003 采用「先写后删」（别名级双版本并行读取列为后续增强），RAG-005 少量增强项待办；P1 已完成 RAG-006、RAG-008、RAG-010、RAG-011、RAG-012，RAG-007/009 部分完成；P2 已完成 RAG-014（中文分词、分层召回评测、通道预算扫描与召回指标监控），RAG-013/015 部分完成（Query 改写、Multi-Query、工具/KB 统一编排已实现，真实模型评测与端到端验收待补）；复选框反映当前进度
 
 ## 0. 审查结论
 
@@ -106,7 +106,7 @@ flowchart TD
 | RAG-011 | P1 | 运维 | 入库状态机、重试恢复、可观测性闭环 | [x] |
 | RAG-012 | P1 | 文档一致性 | 修复 README / AGENTS / 规格与代码偏差 | [x] |
 | RAG-013 | P2 | 检索质量 | Query Rewrite / Multi-Query / 意图识别 | 部分完成 |
-| RAG-014 | P2 | 检索质量 | ES 中文分词、检索调优与 Recall 性能优化 | 部分完成 |
+| RAG-014 | P2 | 检索质量 | ES 中文分词、检索调优与 Recall 性能优化 | [x] |
 | RAG-015 | P2 | 智能编排 | Agentic RAG 与工具检索统一编排 | 部分完成 |
 
 ---
@@ -319,8 +319,8 @@ flowchart TD
 ### RAG-014：ES 分词与召回参数优化（建议增强）
 
 - [x] 检查 `rag.es.analyzer` 实际配置与中文检索效果（当前代码默认 `standard`）。（默认改为 ES 内置 `cjk` 二元分词，rag-api/rag-worker 一致，`RAG_ES_ANALYZER` 可覆盖）
-- [ ] 对中文、英文、数字、订单号、接口名进行分层评测。（已提供 `content.exact` 精确字段用于编号/接口名整串加权，仍需真实数据评测）
-- [ ] 用真实数据调节 `vectorTopN / keywordTopN / RRF k / candidateTopK / finalTopK`。
+- [x] 对中文、英文、数字、订单号、接口名进行分层评测。（`RetrievalLayeredEvalTest` + `eval/retrieval-layered-dataset.json`：五层各 4 条共 20 条样本，逐层输出 Recall@5 / Precision@5 / MRR@5 / nDCG@5 并断言不劣于分层基线；订单号/接口名层要求精确标识符关键词通道首位且 RRF 后 MRR@5=1.0。实测：五层 Recall@5 与 MRR@5 均为 1.0，nDCG@5 中文 0.985 / 英文 0.917 / 数字 0.844 / 订单号 0.98 / 接口名 0.98，报告 `rag-api/target/eval/retrieval-layered.json`）
+- [x] 用真实数据调节 `vectorTopN / keywordTopN / RRF k / candidateTopK / finalTopK`。（离线集先固定可复现基线：通道预算 5/10/20/30 档扫描显示 10 档整体 Recall@5=0.875、20 档=1.0，验证默认 `vectorTopN=keywordTopN=20` 覆盖长尾相关块；rrf-k=60 为配置缺省，真实语料微调仍需在线集，结论记录于 README「ES 分词与检索调优」）
 - [x] 检查建索引时 mapping/analyzer 变化对应的迁移策略。（README「ES 分词与检索调优」说明：已存在索引不会更新 mapping，需删除索引并重建；`ensureIndex` 日志提示）
 - [x] 监控两路重叠率、空召回率、P50/P95 延迟和查询吞吐。（新增 `rag.retrieval.channel_overlap`；`rag.retrieval.duration` 配置 0.5/0.95 分位；空召回与降级计数沿用）
 

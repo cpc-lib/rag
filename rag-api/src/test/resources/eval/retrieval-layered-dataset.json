@@ -1,0 +1,190 @@
+{
+  "version": "2026-11-08",
+  "rrfK": 60,
+  "topK": 5,
+  "vectorTopN": 20,
+  "keywordTopN": 20,
+  "embeddingModel": "offline-fixture",
+  "rerank": "off",
+  "channelBudgetSweep": [5, 10, 20, 30],
+  "layers": [
+    {"name": "中文自然语言", "baselineRecallAt5": 1.0, "baselineMrrAt5": 1.0, "exactIdentifier": false},
+    {"name": "英文自然语言", "baselineRecallAt5": 1.0, "baselineMrrAt5": 1.0, "exactIdentifier": false},
+    {"name": "数字", "baselineRecallAt5": 1.0, "baselineMrrAt5": 1.0, "exactIdentifier": false},
+    {"name": "订单号", "baselineRecallAt5": 1.0, "baselineMrrAt5": 1.0, "exactIdentifier": true},
+    {"name": "接口名", "baselineRecallAt5": 1.0, "baselineMrrAt5": 1.0, "exactIdentifier": true}
+  ],
+  "cases": [
+    {
+      "id": "zh-001",
+      "layer": "中文自然语言",
+      "query": "退款到账需要几个工作日？",
+      "vector": [1001, 1002, 1003, 1004],
+      "keyword": [1002, 1001, 1005],
+      "relevant": [{"id": 1001, "gain": 3}, {"id": 1002, "gain": 2}]
+    },
+    {
+      "id": "zh-002",
+      "layer": "中文自然语言",
+      "query": "如何申请开具电子发票？",
+      "vector": [1010, 1011, 1012],
+      "keyword": [1011, 1013, 1010],
+      "relevant": [{"id": 1011, "gain": 3}, {"id": 1013, "gain": 1}]
+    },
+    {
+      "id": "zh-003",
+      "layer": "中文自然语言",
+      "query": "会员等级怎么升级？",
+      "vector": [1020, 1021, 1022],
+      "keyword": [1020, 1022, 1023],
+      "relevant": [{"id": 1020, "gain": 3}, {"id": 1021, "gain": 2}]
+    },
+    {
+      "id": "zh-004",
+      "layer": "中文自然语言",
+      "query": "跨境订单的税费怎么计算？",
+      "vector": [1030, 1031, 1032, 1034, 1035, 1033],
+      "keyword": [1030, 9001, 9002, 9003, 9004, 9005, 9006, 9007, 9008, 9009, 9010, 9011, 9012, 1033],
+      "relevant": [{"id": 1030, "gain": 3}, {"id": 1033, "gain": 2}],
+      "note": "长尾样本：第二个相关块在关键词通道 rank 14、向量通道 rank 6，用于验证 keywordTopN=20 的预算覆盖"
+    },
+    {
+      "id": "en-001",
+      "layer": "英文自然语言",
+      "query": "How long does a refund take to arrive?",
+      "vector": [1100, 1101, 1102],
+      "keyword": [1101, 1100, 1103],
+      "relevant": [{"id": 1101, "gain": 3}, {"id": 1100, "gain": 2}]
+    },
+    {
+      "id": "en-002",
+      "layer": "英文自然语言",
+      "query": "What is the rate limit for the public API?",
+      "vector": [1110, 1111, 1112],
+      "keyword": [1110, 1112, 1113],
+      "relevant": [{"id": 1110, "gain": 3}, {"id": 1112, "gain": 1}]
+    },
+    {
+      "id": "en-003",
+      "layer": "英文自然语言",
+      "query": "Does the export support CSV format?",
+      "vector": [1120, 1121, 1122],
+      "keyword": [1121, 1120, 1123],
+      "relevant": [{"id": 1121, "gain": 3}, {"id": 1120, "gain": 2}]
+    },
+    {
+      "id": "en-004",
+      "layer": "英文自然语言",
+      "query": "Which regions support data residency?",
+      "vector": [1130, 1131, 1132, 1134, 1135, 1133],
+      "keyword": [1130, 9001, 9002, 9003, 9004, 9005, 9006, 9007, 9008, 9009, 9010, 9011, 9012, 1133],
+      "relevant": [{"id": 1130, "gain": 3}, {"id": 1133, "gain": 2}],
+      "note": "长尾样本：第二个相关块在关键词通道 rank 14、向量通道 rank 6"
+    },
+    {
+      "id": "num-001",
+      "layer": "数字",
+      "query": "2025 年第四季度营收是多少？",
+      "vector": [1200, 1201, 1202],
+      "keyword": [1201, 1200, 1203],
+      "relevant": [{"id": 1201, "gain": 3}, {"id": 1200, "gain": 2}]
+    },
+    {
+      "id": "num-002",
+      "layer": "数字",
+      "query": "单笔提现上限是 50000 元吗？",
+      "vector": [1210, 1211],
+      "keyword": [1211, 1210, 1212],
+      "relevant": [{"id": 1211, "gain": 3}, {"id": 1210, "gain": 1}]
+    },
+    {
+      "id": "num-003",
+      "layer": "数字",
+      "query": "SLA 承诺 99.95% 可用性吗？",
+      "vector": [1220, 1221, 1222],
+      "keyword": [1221, 1220, 1223],
+      "relevant": [{"id": 1221, "gain": 3}, {"id": 1220, "gain": 2}]
+    },
+    {
+      "id": "num-004",
+      "layer": "数字",
+      "query": "超时赔付比例是多少？",
+      "vector": [1230, 1231, 1232, 1234, 1235, 1233],
+      "keyword": [1230, 9001, 9002, 9003, 9004, 9005, 9006, 9007, 9008, 9009, 9010, 9011, 9012, 1233],
+      "relevant": [{"id": 1230, "gain": 3}, {"id": 1233, "gain": 2}],
+      "note": "长尾样本：第二个相关块在关键词通道 rank 14、向量通道 rank 6"
+    },
+    {
+      "id": "order-001",
+      "layer": "订单号",
+      "query": "订单 SO-2026-018342 的物流状态？",
+      "vector": [1301, 1300, 1302],
+      "keyword": [1300, 1303, 1302],
+      "relevant": [{"id": 1300, "gain": 3}, {"id": 1303, "gain": 1}],
+      "note": "content.exact（boost 2.0）把整串命中的订单号推到关键词通道首位"
+    },
+    {
+      "id": "order-002",
+      "layer": "订单号",
+      "query": "工单 TK-2026-0042 处理结论是什么？",
+      "vector": [1311, 1310, 1312],
+      "keyword": [1310, 1313, 1312],
+      "relevant": [{"id": 1310, "gain": 3}, {"id": 1313, "gain": 1}],
+      "note": "content.exact（boost 2.0）把整串命中的工单号推到关键词通道首位"
+    },
+    {
+      "id": "order-003",
+      "layer": "订单号",
+      "query": "运单 YD-8891-2201 签收了吗？",
+      "vector": [1321, 1320, 1322],
+      "keyword": [1320, 1323, 1322],
+      "relevant": [{"id": 1320, "gain": 3}, {"id": 1323, "gain": 1}],
+      "note": "content.exact（boost 2.0）把整串命中的运单号推到关键词通道首位"
+    },
+    {
+      "id": "order-004",
+      "layer": "订单号",
+      "query": "订单 SO-2026-000917 退款进度？",
+      "vector": [1330, 1331, 1332, 1334, 1335, 1333],
+      "keyword": [1330, 9001, 9002, 9003, 9004, 9005, 9006, 9007, 9008, 9009, 9010, 9011, 9012, 1333],
+      "relevant": [{"id": 1330, "gain": 3}, {"id": 1333, "gain": 2}],
+      "note": "精确命中在关键词通道 rank 1，长尾相关块在 rank 14、向量 rank 6"
+    },
+    {
+      "id": "api-001",
+      "layer": "接口名",
+      "query": "POST /api/v1/orders 的幂等键怎么传？",
+      "vector": [1401, 1400, 1402],
+      "keyword": [1400, 1403, 1402],
+      "relevant": [{"id": 1400, "gain": 3}, {"id": 1403, "gain": 1}],
+      "note": "content.exact（boost 2.0）把整串命中的接口路径推到关键词通道首位"
+    },
+    {
+      "id": "api-002",
+      "layer": "接口名",
+      "query": "错误码 SB-E1001 表示什么？",
+      "vector": [1411, 1410, 1412],
+      "keyword": [1410, 1413, 1412],
+      "relevant": [{"id": 1410, "gain": 3}, {"id": 1413, "gain": 1}],
+      "note": "content.exact（boost 2.0）把整串命中的错误码推到关键词通道首位"
+    },
+    {
+      "id": "api-003",
+      "layer": "接口名",
+      "query": "order_service.create_refund 参数有哪些？",
+      "vector": [1421, 1420, 1422],
+      "keyword": [1420, 1423, 1422],
+      "relevant": [{"id": 1420, "gain": 3}, {"id": 1423, "gain": 1}],
+      "note": "content.exact（boost 2.0）把 snake_case 符号整串命中推到关键词通道首位"
+    },
+    {
+      "id": "api-004",
+      "layer": "接口名",
+      "query": "GET /api/v1/exports/{id} 返回 404 怎么办？",
+      "vector": [1430, 1431, 1432, 1434, 1435, 1433],
+      "keyword": [1430, 9001, 9002, 9003, 9004, 9005, 9006, 9007, 9008, 9009, 9010, 9011, 9012, 1433],
+      "relevant": [{"id": 1430, "gain": 3}, {"id": 1433, "gain": 2}],
+      "note": "精确命中在关键词通道 rank 1，长尾相关块在 rank 14、向量 rank 6"
+    }
+  ]
+}

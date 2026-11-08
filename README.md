@@ -74,6 +74,7 @@ rag/
 | PDF 结构化 Block（标题/列表/公式） | 规划中 | — | 已有文本/表格/图片三类块 + 版面排序，语义分类待后续 |
 | RAG Evaluation 基线（召回侧） | 已实现 | `rag-api/.../eval/RetrievalMetrics`、`RetrievalBaselineTest` | `mvn -f rag-api/pom.xml test -Dtest=RetrievalBaselineTest`，报告输出 `rag-api/target/eval/retrieval-baseline.json` |
 | RAG Evaluation 答案指标 | 已实现（按需在线） | `AnswerMetrics`、`OpenAiAnswerJudge`、`AnswerBaselineTest` | 离线跑引用精确率/拒答正确率；设 `RAG_EVAL_ANSWER=true` + `RAG_EVAL_BASE_URL/API_KEY/MODEL` 后用 CHAT 模型判分 Faithfulness / Answer Relevance，报告输出 `rag-api/target/eval/answer-baseline.json` |
+| RAG Evaluation 分层召回（RAG-014） | 已实现（离线） | `RetrievalLayeredEvalTest` | 按中文/英文/数字/订单号/接口名五层分别统计 Recall@5 / MRR@5 / nDCG@5，并输出 vectorTopN·keywordTopN 预算敏感性；报告输出 `rag-api/target/eval/retrieval-layered.json` |
 
 ### 索引与重建语义
 
@@ -91,6 +92,7 @@ rag/
 - **精确匹配**：`content` 增加 `content.exact`（keyword，ignore_above=256）子字段，订单号、错误码、接口名整串命中时加权 2.0，避免分词后语义漂移。
 - **mapping/analyzer 迁移**：已创建的索引不会自动更新 mapping。修改 analyzer 或 mapping 后需删除该知识库索引并重新解析文档（`DELETE /api/v1/knowledge-bases/{id}` 会删除索引，或由运维手动删除后重建）；否则新老索引分词规则不一致。
 - **检索参数**：`vectorTopN / keywordTopN / rrf-k / candidateTopK / topK / finalTopK / max-context-tokens` 可由 etcd `/rag/config/global/retrieval` 热更覆盖，真实数据调参前请先用固定评测集记录基线。
+- **分层评测与预算敏感性**：`mvn -f rag-api/pom.xml test -Dtest=RetrievalLayeredEvalTest` 按中文/英文/数字/订单号/接口名分层输出 Recall@5、MRR@5、nDCG@5，并对 `vectorTopN`·`keywordTopN` 做 5/10/20/30 档扫描；当前默认 20 档可完整覆盖长尾相关块（10 档整体 Recall@5 掉到 0.875），报告见 `rag-api/target/eval/retrieval-layered.json`。
 - **可观测指标**：`rag.retrieval.duration`（P50/P95）、`rag.retrieval.total`、`rag.retrieval.empty`、`rag.retrieval.channel_unavailable`、`rag.retrieval.channel_overlap`、`rag.rerank.outcome`，通过 `/actuator/metrics` 查询。
 
 ### Query 改写与 Multi-Query
