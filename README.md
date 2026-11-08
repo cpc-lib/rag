@@ -53,7 +53,7 @@ rag/
 | 能力 | 状态 | 源码入口 | 验收方法 |
 |---|---|---|---|
 | 混合检索（向量 + BM25 + RRF） | 已实现 | `rag-api/.../RetrievalService` | 提问后查看 SSE `search_result` 的 citations 与 `degraded` 字段 |
-| Rerank 二阶段精排 | 依赖配置（RERANK 模型） | `RerankClient`、`RetrievalService#rerankIfEnabled` | 启用前后对比 Top-K 顺序；`/actuator/metrics/rag.rerank.outcome` |
+| Rerank 二阶段精排 | 依赖配置（RERANK 模型） | `RerankClient`、`RetrievalService#rerankIfEnabled` | 启用前后对比 Top-K 顺序；`/actuator/metrics/rag.rerank.outcome`；Base URL 为 `.../v1`、裸域名或 `/compatible-mode/v1` 时自动在标准 `/rerank` 与 DashScope 原生路径间回退（仅 404/405 切换） |
 | 检索通道降级 | 已实现 | `RetrievalService` 通道级 try/catch | 停用 ES 或 Embedding 后提问：仍返回引用且 `degraded=true`；双通道故障返回 UPSTREAM 错误 |
 | 检索可观测性 | 已实现 | Micrometer 指标 `rag.retrieval.*` | `GET /actuator/metrics/rag.retrieval.duration`（含 P95） |
 | Query 改写 / Multi-Query | 已实现（默认关闭） | `QueryRewriteService`、`RetrievalService#retrieve(..., extraQueries)` | 开启 `rag.query-rewrite.enabled` 后，RRF 日志出现 `queries=N` 且多路结果去重 |

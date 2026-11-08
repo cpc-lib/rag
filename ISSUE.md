@@ -124,7 +124,7 @@ flowchart TD
 - **风险**：融合 Top-K 没有经过 query-document 相关性二次排序，近义问题与长文档候选可能出现排序噪声。
 - **建议实施**：
   - [x] `ModelService`、模型 DTO 和存储配置增加 `RERANK` 类型；如存在历史数据库定义，新增 Flyway 迁移而非修改已发布 SQL。
-  - [x] 新建 `RerankClient`，对接 Qwen3-Rerank 兼容协议；区分请求超时、429、5xx、鉴权失败。
+  - [x] 新建 `RerankClient`，对接 Qwen3-Rerank 兼容协议；区分请求超时、429、5xx、鉴权失败。（Base URL 为 `.../v1`、裸域名、`/compatible-mode/v1` 时按候选协议依次尝试：标准 `{base}/rerank` ↔ DashScope 原生 `/api/v1/services/rerank/text-rerank/text-rerank`，仅在 404/405 路径不匹配时切换，超时/限流/鉴权失败不重试；全部路径不存在时错误信息列出已尝试地址）
   - [x] 检索链路改为 `Vector + BM25 → RRF candidateTopK → Rerank topK → Parent 扩展`。
   - [x] Rerank 输入使用 `query + candidate child chunk`，避免以 Parent 全文替代检索候选造成成本放大。
   - [x] 保持配置开关；未配置、超时或不可用时降级使用 RRF 原排序，日志与指标明确记录。

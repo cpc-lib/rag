@@ -38,6 +38,10 @@ import java.util.List;
  *       body {@code {model, query, documents, top_n, return_documents}}</li>
  * </ul>
  *
+ * <p>部分供应商（如阿里兼容网关）只在 DashScope 原生路径暴露 rerank，把 Base URL 配成
+ * {@code .../v1} 或裸域名时标准路径会返回 404。因此请求按候选协议依次尝试，
+ * 仅在 404/405（路径不匹配）时切换协议；超时、限流、鉴权失败直接失败，不重复请求。
+ *
  * <p>本客户端只负责发起请求与解析，调用失败由检索层静默降级为 RRF 原排序。
  */
 @Slf4j
@@ -66,34 +70,32 @@ public class RerankClient {
         if (documents == null || documents.isEmpty()) {
             return List.of();
         }
-        String url = resolveUrl(baseUrl);
-        boolean dashScope = url.contains("/services/rerank/text-rerank/text-rerank");
-        ObjectNode body = dashScope ? dashScopeBody(model, query, documents, topN)
-                : openAiBody(model, query, documents, topN);
-        Object payload = body;
-        if (dashScope) {
+        List<Endpoint> endpoints = resolveEndpoints(baseUrl);
+        JsonNode resp = null;
+        WebClientResponseException lastResponse = null;
+        for (int i = 0; i < endpoints.size(); i++) {
+            Endpoint endpoint = endpoints.get(i);
             try {
-                payload = ESCAPING_MAPPER.writeValueAsString(body);
+                resp = post(endpoint, apiKey, model, query, documents, topN);
+                break;
+            } catch (WebClientResponseException e) {
+                int status = e.getStatusCode().value();
+                if ((status == 404 || status == 405) && i + 1 < endpoints.size()) {
+                    lastResponse = e;
+                    log.warn("Rerank 路径不可用（HTTP {}）{}，改用备用协议 {}",
+                            status, endpoint.url(), endpoints.get(i + 1).url());
+                    continue;
+                }
+                throw describe(e);
             } catch (Exception e) {
-                throw new IllegalStateException("Rerank 请求序列化失败: " + e.getMessage(), e);
+                throw new IllegalStateException("Rerank 调用失败: " + e.getMessage(), e);
             }
         }
-        JsonNode resp;
-        try {
-            resp = client(apiKey).post()
-                    .uri(URI.create(url))
-                    .contentType(MediaType.APPLICATION_JSON)
-                    .bodyValue(payload)
-                    .retrieve()
-                    .bodyToMono(JsonNode.class)
-                    .block(Duration.ofSeconds(timeoutSeconds + 5L));
-        } catch (WebClientResponseException e) {
-            int status = e.getStatusCode().value();
-            String reason = status == 401 || status == 403 ? "鉴权失败"
-                    : status == 429 ? "触发限流" : "上游错误";
-            throw new IllegalStateException("Rerank 调用失败（" + reason + "，HTTP " + status + "）", e);
-        } catch (Exception e) {
-            throw new IllegalStateException("Rerank 调用失败: " + e.getMessage(), e);
+        if (resp == null) {
+            String attempted = endpoints.stream().map(Endpoint::url).toList().toString();
+            throw new IllegalStateException("Rerank 调用失败（接口路径不存在，已尝试 " + attempted
+                    + "，请检查 Base URL 是否为该供应商的 rerank 地址）",
+                    lastResponse);
         }
         List<RerankHit> hits = parse(resp);
         hits.sort(Comparator.comparingDouble(RerankHit::score).reversed());
@@ -169,18 +171,82 @@ public class RerankClient {
         return hits;
     }
 
-    /** base 为 DashScope 官方域名或任何 Alibaba 兼容地址（含 /compatible-mode）时走原生 rerank 路径。 */
-    private String resolveUrl(String baseUrl) {
+    /** 一次协议尝试的地址与请求体风格。 */
+    private record Endpoint(String url, boolean dashScope) {
+    }
+
+    /** 发起单次请求；HTTP 错误以 WebClientResponseException 抛出，供上层判断是否切换协议。 */
+    private JsonNode post(Endpoint endpoint, String apiKey, String model, String query,
+                          List<String> documents, int topN) {
+        ObjectNode body = endpoint.dashScope() ? dashScopeBody(model, query, documents, topN)
+                : openAiBody(model, query, documents, topN);
+        Object payload = body;
+        if (endpoint.dashScope()) {
+            try {
+                payload = ESCAPING_MAPPER.writeValueAsString(body);
+            } catch (Exception e) {
+                throw new IllegalStateException("Rerank 请求序列化失败: " + e.getMessage(), e);
+            }
+        }
+        return client(apiKey).post()
+                .uri(URI.create(endpoint.url()))
+                .contentType(MediaType.APPLICATION_JSON)
+                .bodyValue(payload)
+                .retrieve()
+                .bodyToMono(JsonNode.class)
+                .block(Duration.ofSeconds(timeoutSeconds + 5L));
+    }
+
+    private IllegalStateException describe(WebClientResponseException e) {
+        int status = e.getStatusCode().value();
+        String reason = status == 401 || status == 403 ? "鉴权失败"
+                : status == 429 ? "触发限流"
+                : status == 404 || status == 405 ? "接口路径不存在（请检查 Base URL 是否支持 rerank）"
+                : "上游错误";
+        String url = e.getRequest() == null ? "" : e.getRequest().getURI().toString();
+        return new IllegalStateException("Rerank 调用失败（" + reason + "，HTTP " + status
+                + "）: " + url, e);
+    }
+
+    /**
+     * 候选协议地址（按优先级）：DashScope 原生地址优先，标准 /rerank 兜底；
+     * 其他 Base URL 则标准协议优先，再用其源站（scheme://host）尝试原生地址。
+     */
+    private List<Endpoint> resolveEndpoints(String baseUrl) {
         String base = stripSlash(baseUrl);
+        List<Endpoint> endpoints = new ArrayList<>(2);
         int compatible = base.indexOf("/compatible-mode");
         if (base.contains("dashscope.aliyuncs.com") || compatible > 0) {
             String host = compatible > 0 ? base.substring(0, compatible) : base;
-            if (host.contains("/api/v1")) {
-                return host + "/services/rerank/text-rerank/text-rerank";
+            endpoints.add(new Endpoint(nativeUrl(host), true));
+            endpoints.add(new Endpoint(base + "/rerank", false));
+        } else {
+            endpoints.add(new Endpoint(base + "/rerank", false));
+            String origin = origin(base);
+            if (origin != null) {
+                endpoints.add(new Endpoint(nativeUrl(origin), true));
             }
-            return host + "/api/v1/services/rerank/text-rerank/text-rerank";
         }
-        return base + "/rerank";
+        return endpoints;
+    }
+
+    /** 取 scheme://host[:port]，用于从任意 Base URL 还原供应商源站。 */
+    private String origin(String url) {
+        try {
+            URI uri = URI.create(url);
+            if (uri.getScheme() == null || uri.getAuthority() == null) {
+                return null;
+            }
+            return uri.getScheme() + "://" + uri.getAuthority();
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    private String nativeUrl(String host) {
+        return host.contains("/api/v1")
+                ? host + "/services/rerank/text-rerank/text-rerank"
+                : host + "/api/v1/services/rerank/text-rerank/text-rerank";
     }
 
     private String stripSlash(String url) {
