@@ -28,7 +28,8 @@ services:
       - redis-data:/data
 
   minio:
-    image: minio/minio:latest
+    # 社区版镜像（AIStor 需商业 License，会报 Access denied. No license is installed）
+    image: registry.cn-hangzhou.aliyuncs.com/snow-io/minio:RELEASE.2025-06-13T11-33-47Z
     container_name: rag-minio
     restart: unless-stopped
     command: server /data --console-address ":9001"
@@ -39,25 +40,15 @@ services:
     ports:
       - "9000:9000"
       - "9001:9001"
+    # AIStor 写入的 xl v3 数据旧版社区版读不了，换新卷；旧卷 rag_minio-data 保留不删
     volumes:
       - minio-data:/data
+    # 该镜像无 curl，用 bash /dev/tcp 探测 S3 端口
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      test: ["CMD-SHELL", "bash -c 'exec 3<>/dev/tcp/localhost/9000'"]
       interval: 10s
       timeout: 5s
       retries: 12
-
-  # 初始化 MinIO 桶：rag-files 存业务文件，a-bucket 为 Milvus 默认桶
-  mc-init:
-    image: minio/mc:latest
-    depends_on:
-      minio:
-        condition: service_healthy
-    entrypoint: >
-      /bin/sh -c "
-      mc alias set local http://minio:9000 minioadmin minioadmin123 &&
-      mc mb -p local/rag-files &&
-      mc mb -p local/a-bucket || true"
 
   # etcd：同时作为 Milvus 元数据后端与业务服务注册/动态配置中心（业务前缀 /rag/）
   etcd:
