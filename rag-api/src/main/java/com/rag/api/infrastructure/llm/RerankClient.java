@@ -1,5 +1,7 @@
 package com.rag.api.infrastructure.llm;
 
+import com.fasterxml.jackson.core.JsonFactory;
+import com.fasterxml.jackson.core.json.JsonWriteFeature;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
@@ -28,9 +30,10 @@ import java.util.List;
  *
  * <p>兼容两种协议：
  * <ul>
- *   <li>DashScope 原生（base 含 dashscope.aliyuncs.com）：
- *       POST /api/v1/services/rerank/text-rerank/text-rerank，
- *       body {@code {model, input:{query, documents}, parameters:{top_n, return_documents}}}</li>
+ *   <li>DashScope 原生（base 为 dashscope 域名或含 /compatible-mode 的阿里兼容地址）：
+ *       POST {host}/api/v1/services/rerank/text-rerank/text-rerank，
+ *       body {@code {model, input:{query, documents}, parameters:{top_n, return_documents}}}，
+ *       序列化时转义非 ASCII（部分兼容网关按字符数读 body，多字节原文会被截断）</li>
  *   <li>OpenAI 兼容 / Jina / Cohere 风格（其他 base）：POST {base}/rerank，
  *       body {@code {model, query, documents, top_n, return_documents}}</li>
  * </ul>
@@ -48,6 +51,10 @@ public class RerankClient {
 
     private final ObjectMapper objectMapper;
 
+    /** 部分兼容网关按字符数读取 body，原始多字节 UTF-8 会被截断报 "truncated JSON document"；原生路径序列化时转义非 ASCII。 */
+    private static final ObjectMapper ESCAPING_MAPPER = new ObjectMapper(
+            JsonFactory.builder().configure(JsonWriteFeature.ESCAPE_NON_ASCII, true).build());
+
     @Value("${rag.rerank.timeout-seconds:30}")
     private int timeoutSeconds;
 
@@ -63,12 +70,20 @@ public class RerankClient {
         boolean dashScope = url.contains("/services/rerank/text-rerank/text-rerank");
         ObjectNode body = dashScope ? dashScopeBody(model, query, documents, topN)
                 : openAiBody(model, query, documents, topN);
+        Object payload = body;
+        if (dashScope) {
+            try {
+                payload = ESCAPING_MAPPER.writeValueAsString(body);
+            } catch (Exception e) {
+                throw new IllegalStateException("Rerank 请求序列化失败: " + e.getMessage(), e);
+            }
+        }
         JsonNode resp;
         try {
             resp = client(apiKey).post()
                     .uri(URI.create(url))
                     .contentType(MediaType.APPLICATION_JSON)
-                    .bodyValue(body)
+                    .bodyValue(payload)
                     .retrieve()
                     .bodyToMono(JsonNode.class)
                     .block(Duration.ofSeconds(timeoutSeconds + 5L));
@@ -154,11 +169,11 @@ public class RerankClient {
         return hits;
     }
 
-    /** base 含 DashScope 域名时走原生 rerank 路径（兼容误填 compatible-mode 地址）。 */
+    /** base 为 DashScope 官方域名或任何 Alibaba 兼容地址（含 /compatible-mode）时走原生 rerank 路径。 */
     private String resolveUrl(String baseUrl) {
         String base = stripSlash(baseUrl);
-        if (base.contains("dashscope.aliyuncs.com")) {
-            int compatible = base.indexOf("/compatible-mode");
+        int compatible = base.indexOf("/compatible-mode");
+        if (base.contains("dashscope.aliyuncs.com") || compatible > 0) {
             String host = compatible > 0 ? base.substring(0, compatible) : base;
             if (host.contains("/api/v1")) {
                 return host + "/services/rerank/text-rerank/text-rerank";

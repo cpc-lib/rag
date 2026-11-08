@@ -418,7 +418,7 @@ flowchart TD
 | **冒烟发现的新缺陷** | ES bulk 写入后**未 refresh**，紧随的一致性校验读到 `es=0` 误抛"双索引数量不一致"进入重试。已修复：`EsIndexer` bulk 改 `refresh=wait_for`、`deleteByQuery` 加 `refresh(true)`，修复后一次通过 |
 | 重建期可用性（先写后删） | 通过：reparse 进行中 ES 旧 chunk 保持可查（count=5）；完成后新 chunk ID 全量替换、无陈旧残留 |
 | SSE 问答 + Citation | 通过：`search_result` 带 4 条引用（章节路径/表格类型/预签名 URL），答案带 `[1]` 标注，`degraded=false`，done 含 token 用量 |
-| Rerank 二阶段精排（RAG-001） | 通过：`/actuator/metrics/rag.rerank.outcome` 计数生效，qwen3-rerank 参与排序 |
+| Rerank 二阶段精排（RAG-001） | 通过：第三方阿里兼容站点的 rerank 只暴露 DashScope 原生路径（`/compatible-mode/v1/rerank` 返回 404），且其网关按字符数读 body 导致多字节 JSON 被截断；`RerankClient` 已改为识别 `/compatible-mode` 走原生路径并按需转义非 ASCII，`rag.rerank.outcome{outcome=applied}` 计数生效，精排真实影响 Top-K |
 | ES 精确匹配（RAG-014） | 通过：错误码 `SB-E1001` 问题 top-1 命中「故障处理」章节（`content.exact` 加权生效） |
 | Agentic 工具编排（RAG-015） | 通过：天气工具 + `kb_search` 同一轮回答组合问题，引用累积推送 |
 | 检索可观测性 | 通过：`rag.retrieval.duration` 等 Micrometer 指标经 `/actuator/metrics` 输出 |
