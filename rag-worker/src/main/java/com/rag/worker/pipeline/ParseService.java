@@ -63,9 +63,14 @@ public class ParseService {
 
     /**
      * 版面块在页文本中的区间 [start, end)：blockId 形如 p3-b2（页-块，1 起），
-     * 供切片阶段反查所属块并写入 chunk 的 bbox / source_id。
+     * kind 为该块的语义类别，供切片阶段写入 chunk 的 bbox / source_id / block_type。
      */
-    public record BlockSpan(int start, int end, String blockId, BBox bbox) {
+    public record BlockSpan(int start, int end, String blockId, BBox bbox,
+                            PdfLayoutExtractor.BlockKind kind) {
+
+        public BlockSpan(int start, int end, String blockId, BBox bbox) {
+            this(start, end, blockId, bbox, PdfLayoutExtractor.BlockKind.PARAGRAPH);
+        }
     }
 
     /** 按纯文本直读、无需专用解析器的扩展名（与上传白名单 / ChunkStrategyRouter 保持一致）。 */
@@ -366,6 +371,15 @@ public class ParseService {
 
     private final PdfLayoutExtractor pdfLayoutExtractor = new PdfLayoutExtractor();
 
+    /** 单页抽取结果：页号、页高与版面块（第二遍续接/组装使用）。 */
+    private record PageBlocks(int index, float height, List<PdfLayoutExtractor.Block> blocks) {
+    }
+
+    /** 页眉页脚判定：距页面顶部/底部的边距带。 */
+    private static final float MARGIN_BAND_PT = 55f;
+    /** 页眉页脚至少重复出现的页数。 */
+    private static final int HEADER_FOOTER_MIN_PAGES = 2;
+
     private ParseOutcome parsePdf(DocumentEntity doc, ModelEntity vision, byte[] bytes) {
         List<RawPage> pages = new ArrayList<>();
         List<String> warnings = new ArrayList<>();
@@ -375,12 +389,9 @@ public class ParseService {
         // 同一图片对象跨页/重复绘制时复用识别结果，避免重复调用 OCR/Vision
         Map<PDImageXObject, String> imageDescCache = new IdentityHashMap<>();
         try (PDDocument pdf = PDDocument.load(bytes)) {
-            PDFRenderer renderer = new PDFRenderer(pdf);
             int total = pdf.getNumberOfPages();
-            // 延迟一页输出：下一页抽取后才能判断上一页表格是否接续
-            List<PdfLayoutExtractor.Block> pending = null;
-            int pendingIndex = -1;
-            float pendingHeight = 0;
+            // 第一遍：抽取全部页块。页眉页脚需要跨页统计，因此不能在逐页循环里立即组装。
+            List<PageBlocks> extracted = new ArrayList<>(total);
             for (int i = 0; i < total; i++) {
                 List<PdfLayoutExtractor.Block> blocks;
                 try {
@@ -389,10 +400,20 @@ public class ParseService {
                     log.warn("PDF 第 {} 页版式抽取失败，回退纯文本: {}", i + 1, le.getMessage());
                     blocks = new ArrayList<>(fallbackTextBlocks(pdf, i));
                 }
+                extracted.add(new PageBlocks(i, pageHeight(pdf, i), blocks));
+            }
+            removeHeadersFooters(extracted);
+            // 第二遍：延迟一页输出，下一页抽取后才能判断上一页表格是否接续
+            PDFRenderer renderer = new PDFRenderer(pdf);
+            List<PdfLayoutExtractor.Block> pending = null;
+            int pendingIndex = -1;
+            float pendingHeight = 0;
+            for (PageBlocks page : extracted) {
+                List<PdfLayoutExtractor.Block> blocks = new ArrayList<>(page.blocks());
                 boolean absorbed = false;
                 if (pending != null) {
                     var connected = PdfTableContinuation.connect(pending, pendingHeight,
-                            blocks, pageHeight(pdf, i));
+                            blocks, page.height());
                     blocks = new ArrayList<>(connected.current());
                     absorbed = connected.absorbed();
                     emitPdfPage(pdf, renderer, pendingIndex, pending, pages, warnings, vision,
@@ -405,8 +426,8 @@ public class ParseService {
                     continue;
                 }
                 pending = blocks;
-                pendingIndex = i;
-                pendingHeight = pageHeight(pdf, i);
+                pendingIndex = page.index();
+                pendingHeight = page.height();
             }
             if (pending != null) {
                 emitPdfPage(pdf, renderer, pendingIndex, pending, pages, warnings, vision,
@@ -416,6 +437,64 @@ public class ParseService {
             throw new IllegalStateException("PDF 解析失败: " + e.getMessage(), e);
         }
         return new ParseOutcome(pages, warnings);
+    }
+
+    /**
+     * 页眉页脚识别与剔除（ISSUE RAG-007）：位于页面上下边距带内、规范化后
+     * 在足够多页重复出现的文本（以及页码样式）视为页眉页脚并从页块中移除，
+     * 避免其被切片进正文、污染召回。
+     */
+    private void removeHeadersFooters(List<PageBlocks> pages) {
+        if (pages.size() < HEADER_FOOTER_MIN_PAGES) {
+            return;
+        }
+        Map<String, Set<Integer>> occurrences = new HashMap<>();
+        for (PageBlocks page : pages) {
+            for (PdfLayoutExtractor.Block block : page.blocks()) {
+                if (block instanceof PdfLayoutExtractor.TextBlock text && inMargin(text, page.height())) {
+                    String key = normalizeMarginText(text.text());
+                    if (!key.isEmpty()) {
+                        occurrences.computeIfAbsent(key, k -> new HashSet<>()).add(page.index());
+                    }
+                }
+            }
+        }
+        int threshold = Math.max(HEADER_FOOTER_MIN_PAGES, (int) Math.ceil(pages.size() * 0.4));
+        for (PageBlocks page : pages) {
+            List<PdfLayoutExtractor.Block> kept = new ArrayList<>(page.blocks().size());
+            for (PdfLayoutExtractor.Block block : page.blocks()) {
+                if (block instanceof PdfLayoutExtractor.TextBlock text && inMargin(text, page.height())) {
+                    String key = normalizeMarginText(text.text());
+                    boolean repeated = !key.isEmpty()
+                            && occurrences.getOrDefault(key, Set.of()).size() >= threshold;
+                    if (repeated || isPageNumber(text.text())) {
+                        continue;
+                    }
+                }
+                kept.add(block);
+            }
+            page.blocks().clear();
+            page.blocks().addAll(kept);
+        }
+    }
+
+    private boolean inMargin(PdfLayoutExtractor.TextBlock text, float pageHeight) {
+        return text.top() < MARGIN_BAND_PT
+                || (pageHeight > 0 && text.top() > pageHeight - MARGIN_BAND_PT);
+    }
+
+    /** 去数字与空白后的文本用于跨页重复判定（页码变化不影响识别）。 */
+    private String normalizeMarginText(String text) {
+        return text == null ? "" : text.replaceAll("\\d+", "").replaceAll("\\s+", "").strip();
+    }
+
+    /** 页码样式：1 / 第1页 / 1/10 / Page 1 of 10 / - 1 -。 */
+    private boolean isPageNumber(String text) {
+        String value = text == null ? "" : text.strip();
+        return value.matches("(?i)(第\\s*\\d{1,4}\\s*页?(\\s*/\\s*\\d{1,4})?"
+                + "|page\\s*\\d{1,4}(\\s*of\\s*\\d{1,4})?"
+                + "|[-—]\\s*\\d{1,4}\\s*[-—]"
+                + "|\\d{1,4}(\\s*/\\s*\\d{1,4})?)");
     }
 
     /** 输出单页：有文本层走版面组装，无文本层按扫描页 OCR。 */
@@ -483,6 +562,9 @@ public class ParseService {
         boolean budgetWarned = false;
         for (int bi = 0; bi < blocks.size(); bi++) {
             PdfLayoutExtractor.Block block = blocks.get(bi);
+            if (block.kind() == PdfLayoutExtractor.BlockKind.HEADER_FOOTER) {
+                continue;
+            }
             String rendered = null;
             if (block instanceof PdfLayoutExtractor.TextBlock t) {
                 rendered = t.text();
@@ -517,7 +599,7 @@ public class ParseService {
             if (start >= 0) {
                 // 块序号按版面块顺序（1 起），与是否输出无关，保证同一文档重复解析时 id 稳定
                 spans.add(new BlockSpan(start, sb.length(),
-                        "p" + (pageIndex + 1) + "-b" + (bi + 1), block.bbox()));
+                        "p" + (pageIndex + 1) + "-b" + (bi + 1), block.bbox(), block.kind()));
             }
         }
         return new Assembled(sb.toString(), spans);

@@ -146,6 +146,102 @@ class PdfLayoutExtractorTest {
         }
     }
 
+    @Test
+    void semanticKindsAreClassified() throws Exception {
+        try (PDDocument pdf = new PDDocument()) {
+            PDPage page = new PDPage();
+            pdf.addPage(page);
+            try (PDPageContentStream cs = new PDPageContentStream(pdf, page)) {
+                text(cs, 50, 740, "Chapter One", PDType1Font.HELVETICA_BOLD, 18);
+                text(cs, 50, 700, "- first list item", PDType1Font.HELVETICA, 10);
+                text(cs, 50, 680, "f(x)=a+b-c*d/e", PDType1Font.HELVETICA, 10);
+                text(cs, 50, 660, "public void main()", PDType1Font.COURIER, 10);
+                text(cs, 50, 640, "This is a plain paragraph.", PDType1Font.HELVETICA, 10);
+            }
+
+            List<PdfLayoutExtractor.Block> blocks = extractor.extractPage(pdf, 0);
+
+            assertEquals(PdfLayoutExtractor.BlockKind.TITLE, kindOf(blocks, "Chapter One"));
+            assertEquals(PdfLayoutExtractor.BlockKind.LIST, kindOf(blocks, "first list item"));
+            assertEquals(PdfLayoutExtractor.BlockKind.FORMULA, kindOf(blocks, "f(x)"));
+            assertEquals(PdfLayoutExtractor.BlockKind.CODE, kindOf(blocks, "public void main"));
+            assertEquals(PdfLayoutExtractor.BlockKind.PARAGRAPH, kindOf(blocks, "plain paragraph"));
+        }
+    }
+
+    @Test
+    void mergedCellsAreRebuiltFromVectorGrid() throws Exception {
+        try (PDDocument pdf = new PDDocument()) {
+            PDPage page = new PDPage();
+            pdf.addPage(page);
+            try (PDPageContentStream cs = new PDPageContentStream(pdf, page)) {
+                float[] xs = {100, 200, 300, 400};
+                float[] ys = {500, 550, 600, 650};
+                cs.setLineWidth(1f);
+                // 横线：中间行（y=550）在 x=300~400 缺一段 → 末列后两行纵向合并
+                for (float y : ys) {
+                    if (y == 550) {
+                        line(cs, xs[0], y, 300, y);
+                    } else {
+                        line(cs, xs[0], y, xs[3], y);
+                    }
+                }
+                // 竖线：x=200 在 y=600~650 缺一段 → 首行前两列横向合并
+                for (float x : xs) {
+                    if (x == 200) {
+                        line(cs, x, 500, x, 600);
+                    } else {
+                        line(cs, x, ys[0], x, ys[3]);
+                    }
+                }
+                text(cs, 110, 620, "Merged Header", PDType1Font.HELVETICA, 10);
+                text(cs, 310, 620, "R1C3", PDType1Font.HELVETICA, 10);
+                text(cs, 110, 575, "R2C1", PDType1Font.HELVETICA, 10);
+                text(cs, 210, 575, "R2C2", PDType1Font.HELVETICA, 10);
+                text(cs, 310, 565, "Vertical", PDType1Font.HELVETICA, 10);
+                text(cs, 110, 525, "R3C1", PDType1Font.HELVETICA, 10);
+                text(cs, 210, 525, "R3C2", PDType1Font.HELVETICA, 10);
+            }
+
+            List<PdfLayoutExtractor.Block> blocks = extractor.extractPage(pdf, 0);
+
+            PdfLayoutExtractor.TableBlock table = blocks.stream()
+                    .filter(b -> b instanceof PdfLayoutExtractor.TableBlock)
+                    .map(b -> (PdfLayoutExtractor.TableBlock) b)
+                    .findFirst().orElseThrow(() -> new AssertionError("未识别矢量网格表格: " + blocks));
+            List<List<TableModel.Cell>> grid = table.table().grid();
+            assertEquals(3, grid.size(), "应有 3 行锚点");
+
+            TableModel.Cell header = grid.get(0).get(0);
+            assertEquals(2, header.colspan(), "首行前两列应合并");
+            assertTrue(header.text().contains("Merged Header"), header.text());
+            assertEquals("R1C3", grid.get(0).get(1).text());
+
+            TableModel.Cell vertical = grid.get(1).get(2);
+            assertEquals(2, vertical.rowspan(), "末列后两行应纵向合并");
+            assertTrue(vertical.text().contains("Vertical"), vertical.text());
+            assertEquals(2, grid.get(2).size(), "被纵向合并覆盖的末列不应重复输出");
+            assertEquals("R3C1", grid.get(2).get(0).text());
+            assertEquals("R3C2", grid.get(2).get(1).text());
+        }
+    }
+
+    private PdfLayoutExtractor.BlockKind kindOf(List<PdfLayoutExtractor.Block> blocks, String keyword) {
+        for (PdfLayoutExtractor.Block block : blocks) {
+            if (block instanceof PdfLayoutExtractor.TextBlock t && t.text().contains(keyword)) {
+                return t.kind();
+            }
+        }
+        throw new AssertionError("未找到文本块: " + keyword + " in " + blocks);
+    }
+
+    private void line(PDPageContentStream cs, float x1, float y1, float x2, float y2)
+            throws IOException {
+        cs.moveTo(x1, y1);
+        cs.lineTo(x2, y2);
+        cs.stroke();
+    }
+
     private int indexOfText(List<PdfLayoutExtractor.Block> blocks, String keyword) {
         for (int i = 0; i < blocks.size(); i++) {
             if (blocks.get(i) instanceof PdfLayoutExtractor.TextBlock t
@@ -157,8 +253,13 @@ class PdfLayoutExtractorTest {
     }
 
     private void text(PDPageContentStream cs, float x, float y, String text) throws IOException {
+        text(cs, x, y, text, PDType1Font.HELVETICA, 10);
+    }
+
+    private void text(PDPageContentStream cs, float x, float y, String text,
+                      PDType1Font font, float size) throws IOException {
         cs.beginText();
-        cs.setFont(PDType1Font.HELVETICA, 10);
+        cs.setFont(font, size);
         cs.newLineAtOffset(x, y);
         cs.showText(text);
         cs.endText();

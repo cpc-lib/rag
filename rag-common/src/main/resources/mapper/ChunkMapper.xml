@@ -3,7 +3,7 @@
 <mapper namespace="com.rag.api.infrastructure.persistence.mapper.ChunkMapper">
 
     <sql id="Base_Column_List">
-        id, kb_id, document_id, tenant_id, seq, content, page, status, chunk_type, content_type, parent_chunk_id, section_title, section_path, bbox, source_id, content_hash, deleted
+        id, kb_id, document_id, tenant_id, seq, content, page, status, chunk_type, content_type, parent_chunk_id, section_title, section_path, bbox, source_id, block_type, content_hash, deleted
     </sql>
 
     <select id="selectById" resultType="com.rag.api.infrastructure.persistence.entity.ChunkEntity">
@@ -29,6 +29,7 @@
             <if test="sectionPath != null">section_path,</if>
             <if test="bbox != null">bbox,</if>
             <if test="sourceId != null">source_id,</if>
+            <if test="blockType != null">block_type,</if>
             <if test="contentHash != null">content_hash,</if>
             <if test="deleted != null">deleted,</if>
         </trim>
@@ -47,6 +48,7 @@
             <if test="sectionPath != null">#{sectionPath},</if>
             <if test="bbox != null">#{bbox},</if>
             <if test="sourceId != null">#{sourceId},</if>
+            <if test="blockType != null">#{blockType},</if>
             <if test="contentHash != null">#{contentHash},</if>
             <if test="deleted != null">#{deleted},</if>
         </trim>
@@ -69,6 +71,7 @@
             <if test="sectionPath != null">section_path = #{sectionPath},</if>
             <if test="bbox != null">bbox = #{bbox},</if>
             <if test="sourceId != null">source_id = #{sourceId},</if>
+            <if test="blockType != null">block_type = #{blockType},</if>
             <if test="contentHash != null">content_hash = #{contentHash},</if>
             <if test="deleted != null">deleted = #{deleted},</if>
         </set>

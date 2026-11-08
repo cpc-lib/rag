@@ -19,10 +19,10 @@ public final class ChunkMetadataResolver {
     private ChunkMetadataResolver() {
     }
 
-    /** 定位结果：bbox 为 x,y,w,h 字符串（可为 null），sourceId 形如 p1-b2 或 p1-b2~p1-b5。 */
-    public record Metadata(String bbox, String sourceId) {
+    /** 定位结果：bbox 为 x,y,w,h 字符串（可为 null），sourceId 形如 p1-b2 或 p1-b2~p1-b5，blockType 为主要语义类别。 */
+    public record Metadata(String bbox, String sourceId, String blockType) {
 
-        public static final Metadata EMPTY = new Metadata(null, null);
+        public static final Metadata EMPTY = new Metadata(null, null, null);
     }
 
     public static Metadata resolve(ParseService.RawPage page, String content) {
@@ -44,6 +44,9 @@ public final class ChunkMetadataResolver {
 
         List<String> ids = new ArrayList<>(2);
         BBox bbox = null;
+        // 按块区间与 child 内容的重叠长度累计各类别权重，取占比最高的语义类别
+        java.util.Map<com.rag.worker.pipeline.pdf.PdfLayoutExtractor.BlockKind, Integer> kindWeights =
+                new java.util.EnumMap<>(com.rag.worker.pipeline.pdf.PdfLayoutExtractor.BlockKind.class);
         for (ParseService.BlockSpan span : page.spans()) {
             if (span.end() <= start || span.start() >= end) {
                 continue;
@@ -52,12 +55,20 @@ public final class ChunkMetadataResolver {
             if (ids.isEmpty() || !ids.get(ids.size() - 1).equals(span.blockId())) {
                 ids.add(span.blockId());
             }
+            int overlap = Math.min(span.end(), end) - Math.max(span.start(), start);
+            if (overlap > 0 && span.kind() != null) {
+                kindWeights.merge(span.kind(), overlap, Integer::sum);
+            }
         }
         if (ids.isEmpty()) {
             return Metadata.EMPTY;
         }
         String sourceId = ids.size() == 1 ? ids.get(0) : ids.get(0) + "~" + ids.get(ids.size() - 1);
-        return new Metadata(bbox == null ? null : bbox.toDb(), sourceId);
+        String blockType = kindWeights.entrySet().stream()
+                .max(java.util.Map.Entry.comparingByValue())
+                .map(e -> e.getKey().name())
+                .orElse(null);
+        return new Metadata(bbox == null ? null : bbox.toDb(), sourceId, blockType);
     }
 
     /** 以内容前缀在页文本中定位起点，长前缀优先，降低短文本误匹配概率。 */

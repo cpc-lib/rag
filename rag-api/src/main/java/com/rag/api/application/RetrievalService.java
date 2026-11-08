@@ -42,7 +42,8 @@ public class RetrievalService {
 
     public record Citation(int seq, long chunkId, Long parentChunkId, long documentId,
                            String documentName, int page, String sectionPath, String contentType,
-                           String previewUrl, String content, String bbox, String sourceId) {
+                           String previewUrl, String content, String bbox, String sourceId,
+                           String blockType) {
         public String material() {
             StringBuilder sb = new StringBuilder("[").append(seq).append("] （")
                     .append(documentName).append(" 第").append(page + 1).append("页");
@@ -269,12 +270,12 @@ public class RetrievalService {
                     doc == null ? "" : doc.getFileName(),
                     child.getPage() == null ? 0 : child.getPage(), sectionPath, child.getContentType(),
                     doc == null ? null : minio.presignUrl(doc.getObjectKey()),
-                    unit.getContent(), child.getBbox(), child.getSourceId());
+                    unit.getContent(), child.getBbox(), child.getSourceId(), child.getBlockType());
             int remaining = rc.maxContextTokens - usedTokens;
             if (countTokens(citation.material()) > remaining && unit != child) {
                 citation = new Citation(seq, id, null, child.getDocumentId(), citation.documentName(),
                         citation.page(), sectionPath, child.getContentType(), citation.previewUrl(),
-                        child.getContent(), citation.bbox(), citation.sourceId());
+                        child.getContent(), citation.bbox(), citation.sourceId(), child.getBlockType());
                 unitKey = child.getId();
             }
             if (countTokens(citation.material()) > remaining) {
@@ -287,7 +288,7 @@ public class RetrievalService {
                 citation = new Citation(seq, id, citation.parentChunkId(), citation.documentId(),
                         citation.documentName(), citation.page(), citation.sectionPath(),
                         citation.contentType(), citation.previewUrl(), bounded,
-                        citation.bbox(), citation.sourceId());
+                        citation.bbox(), citation.sourceId(), citation.blockType());
             }
             int citationTokens = countTokens(citation.material());
             if (citation.content().isBlank() || citationTokens > remaining) {

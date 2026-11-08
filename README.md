@@ -57,7 +57,7 @@ rag/
 | 检索通道降级 | 已实现 | `RetrievalService` 通道级 try/catch | 停用 ES 或 Embedding 后提问：仍返回引用且 `degraded=true`；双通道故障返回 UPSTREAM 错误 |
 | 检索可观测性 | 已实现 | Micrometer 指标 `rag.retrieval.*` | `GET /actuator/metrics/rag.retrieval.duration`（含 P95） |
 | Query 改写 / Multi-Query | 已实现（默认关闭） | `QueryRewriteService`、`RetrievalService#retrieve(..., extraQueries)` | 开启 `rag.query-rewrite.enabled` 后，RRF 日志出现 `queries=N` 且多路结果去重 |
-| Agentic 工具编排 | 已实现（启用外部工具时） | `ChatOrchestrator`、`LlmClient#kbSearchTool` | 天气/Tavily/`kb_search` 多轮统一编排，引用逐次累积并推送 `search_result` |
+| Agentic 工具编排 | 已实现（启用外部工具时） | `ChatOrchestrator`、`LlmClient#kbSearchTool` | 天气/Tavily/`kb_search` 多轮统一编排，引用逐次累积并推送 `search_result`；真机验证工具+知识库组合、权限拒绝、工具失败/超时与无答案拒答四条路径 |
 | 上传 → 解析 → 切片 → 双写 | 已实现 | `DocumentAppService`、`PipelineProcessor` | 上传后点击「开始处理」，文档状态到 READY 且进度 100 |
 | 双索引一致性校验 | 已实现 | `PipelineProcessor#indexAll` | `GET /api/v1/documents/{id}/index-status` 返回 `consistent=true` |
 | 任务可靠性（claim / 重试 / 僵尸恢复） | 已实现 | `IngestConsumer`、`StaleTaskRecovery` | 并发饱和不丢任务；重启后超时 PENDING/RUNNING 被重投 |
@@ -68,13 +68,16 @@ rag/
 | 重建索引可用性（先写后删） | 已实现 | `PipelineProcessor#indexAll`、`EsIndexer#deleteStale`、`MilvusIndexer#deleteStale` | 新版本写入成功后才清理陈旧 chunk；重建期间旧索引保持可读，失败重试幂等收敛 |
 | 索引别名级双版本切换 | 规划中 | — | 尚未实现 ES alias / Milvus 双集合并行读取 |
 | ES 中文分词与检索调优 | 部分实现 | `EsSearchClient`、`EsIndexer` | 默认 `cjk` 分词 + `content.exact` 精确字段 + 检索指标；真实数据分层调优待评测 |
-| PDF bbox 表格识别 | 已实现（启发式） | `pipeline/pdf/PdfLayoutExtractor` | 行内空隙切列 + 跨行列首对齐检测表格，转 `TableModel` Markdown 嵌入页文本；误判受对齐率/单元格长度约束 |
+| PDF bbox 表格识别与合并单元格 | 已实现（矢量网格优先，启发式回退） | `pipeline/pdf/PdfLayoutExtractor` | 优先用 `PDFGraphicsStreamEngine` 捕获的矢量线段重建规则网格并生成 `colspan/rowspan`，无矢量线时回退行内空隙切列 + 跨行列首对齐；转 `TableModel` Markdown 嵌入页文本，误判受对齐率/单元格长度约束 |
 | PDF 跨页表格续接 | 已实现 | `pipeline/pdf/PdfTableContinuation` | 列数一致且续页重复表头或紧贴页顶时合并数据行并去重表头；整页只剩接续表格与页码时并入上一页，避免表格被页边界切断 |
 | PDF 版面元数据 | 已实现 | `ChunkMetadataResolver`、`chunk.bbox` / `chunk.source_id`（V10） | child 记录页面区域 `x,y,w,h` 与来源块 `p3-b2`，SSE citation 返回；非 PDF/定位失败仅保留页码 |
-| PDF 结构化 Block（标题/列表/公式） | 规划中 | — | 已有文本/表格/图片三类块 + 版面排序，语义分类待后续 |
+| PDF 结构化 Block 语义分类 | 已实现 | `pipeline/pdf/PdfLayoutExtractor`（`BlockKind`）、`ParseService#removeHeadersFooters` | 八类 `TITLE/PARAGRAPH/LIST/TABLE/IMAGE/CODE/FORMULA/HEADER_FOOTER`；标题按字号、列表按标记、代码按等宽字体/代码行、公式按符号密度分类，页眉页脚按页边距带跨页重复与页码样式剔除 |
+| 块语义元数据 | 已实现 | `ChunkMetadataResolver`、`chunk.block_type`（V26）、`RetrievalService.Citation#blockType` | child 落库块类别，SSE `search_result` 的 citation 返回 `blockType` |
 | RAG Evaluation 基线（召回侧） | 已实现 | `rag-api/.../eval/RetrievalMetrics`、`RetrievalBaselineTest` | `mvn -f rag-api/pom.xml test -Dtest=RetrievalBaselineTest`，报告输出 `rag-api/target/eval/retrieval-baseline.json` |
 | RAG Evaluation 答案指标 | 已实现（按需在线） | `AnswerMetrics`、`OpenAiAnswerJudge`、`AnswerBaselineTest` | 离线跑引用精确率/拒答正确率；设 `RAG_EVAL_ANSWER=true` + `RAG_EVAL_BASE_URL/API_KEY/MODEL` 后用 CHAT 模型判分 Faithfulness / Answer Relevance，报告输出 `rag-api/target/eval/answer-baseline.json` |
 | RAG Evaluation 分层召回（RAG-014） | 已实现（离线） | `RetrievalLayeredEvalTest` | 按中文/英文/数字/订单号/接口名五层分别统计 Recall@5 / MRR@5 / nDCG@5，并输出 vectorTopN·keywordTopN 预算敏感性；报告输出 `rag-api/target/eval/retrieval-layered.json` |
+| 检索参数前后对比（RAG-009） | 已实现（离线，可选真实 Rerank） | `RetrievalTuningCompareTest`、`ChunkStrategyCompareTest` | Top-K 3/5/8/10 + Rerank 前后指标对比，报告 `rag-api/target/eval/tuning-compare.json`；七种切片策略父子数量/长度/token 对比，报告 `rag-worker/target/eval/chunk-strategy-compare.json` |
+| Query 改写前后评测（RAG-013） | 已实现（离线固定集） | `QueryRewriteEvalTest` | 多轮/歧义 6 条样本输出改写前后 Recall/MRR/nDCG、引用精确率、拒答与延迟，报告 `rag-api/target/eval/rewrite-compare.json` |
 
 ### 索引与重建语义
 

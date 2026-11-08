@@ -99,15 +99,15 @@ flowchart TD
 | RAG-004 | P0 | 可用性 | Embedding 失败时支持 ES-only 检索降级 | [x] |
 | RAG-005 | P0 | 数据安全 | 防止 Milvus 探测失败触发危险重建 | [x] |
 | RAG-006 | P1 | 兼容性 | 统一文件上传白名单、解析器与切片路由 | [x] |
-| RAG-007 | P1 | 多模态 | 升级 PDF Layout / 内嵌图片抽取与理解 | 部分完成 |
+| RAG-007 | P1 | 多模态 | 升级 PDF Layout / 内嵌图片抽取与理解 | [x] |
 | RAG-008 | P1 | 内容质量 | 完善表格结构化抽取与跨页、跨块保护 | [x] |
-| RAG-009 | P1 | 质量保障 | 建立 RAG Evaluation 与回归测试基线 | 部分完成 |
+| RAG-009 | P1 | 质量保障 | 建立 RAG Evaluation 与回归测试基线 | [x] |
 | RAG-010 | P1 | 安全性 | 补齐多租户检索隔离与引用访问测试 | [x] |
 | RAG-011 | P1 | 运维 | 入库状态机、重试恢复、可观测性闭环 | [x] |
 | RAG-012 | P1 | 文档一致性 | 修复 README / AGENTS / 规格与代码偏差 | [x] |
-| RAG-013 | P2 | 检索质量 | Query Rewrite / Multi-Query / 意图识别 | 部分完成 |
+| RAG-013 | P2 | 检索质量 | Query Rewrite / Multi-Query / 意图识别 | [x] |
 | RAG-014 | P2 | 检索质量 | ES 中文分词、检索调优与 Recall 性能优化 | [x] |
-| RAG-015 | P2 | 智能编排 | Agentic RAG 与工具检索统一编排 | 部分完成 |
+| RAG-015 | P2 | 智能编排 | Agentic RAG 与工具检索统一编排 | [x] |
 
 ---
 
@@ -237,10 +237,10 @@ flowchart TD
 
 **现状**：`PdfLayoutStrategy` 已使用 PDFBox 位置排序、重复首尾行清理和 OCR 回退，但无法视为完整的结构化多模态 Layout Pipeline；PDF 内嵌图像与复杂图表识别仍待扩展。
 
-- [ ] 为 PDF 产出结构化 Block：标题、段落、列表、表格、图片、代码、公式、页眉页脚。（已落地文本/表格/图片三类：解析阶段新增 `worker/pipeline/pdf/PdfLayoutExtractor`，基于 bbox 行内空隙切列 + 跨行列首对齐检测表格，转 `TableModel` 渲染 Markdown 嵌入页文本；标题/列表/公式等语义分类待后续）
+- [x] 为 PDF 产出结构化 Block：标题、段落、列表、表格、图片、代码、公式、页眉页脚。（`PdfLayoutExtractor.BlockKind` 定义 `TITLE/PARAGRAPH/LIST/TABLE/IMAGE/CODE/FORMULA/HEADER_FOOTER` 八类：按字体字号（标题 ≥ 中位字号 ×1.25）、列表标记、等宽字体/代码行特征、公式符号密度分类；页眉页脚由 `ParseService#removeHeadersFooters` 在页边距带内按规范化文本跨页重复与页码样式识别；块类别经 `ParseService.BlockSpan` → `ChunkMetadataResolver` 写入 `chunk.block_type`（Flyway V26）并经 SSE citation 的 `blockType` 返回）
 - [x] 保留 `page / bbox / sectionPath / sourceId` 元数据。（`page / sectionPath` 原有；新增 `chunk.bbox` / `chunk.source_id` 两列（Flyway V10）。解析阶段 `ParseService.RawPage` 携带块区间 `BlockSpan`（页文本偏移 + bbox + `p{页}-b{块}`），切片落库时 `ChunkMetadataResolver` 按内容归一化回查块区间，写入 child 的 bbox 与 sourceId，并通过 SSE citation 返回；非 PDF、页眉页脚清理导致偏移失效或表格切片重排时只保留页码，不阻断入库）
 - [x] 抽取 PDF 内嵌图片，OCR + Vision 双通道处理，并保留原文相邻上下文。（`PdfLayoutExtractor` 经 `PDFGraphicsStreamEngine.drawImage` 捕获图片绘制位置，`ParseService.parsePdf` 按版面位置把 OCR/Vision 结果插入页文本（不再追加页尾）；同一图片对象跨页复用识别结果，单文档上限 30 张，小图标跳过）
-- [ ] 增强多栏阅读顺序、跨页表格、复杂表格与图片说明关联。（解析阶段按版面坐标自顶向下输出，多栏阅读顺序与图片说明相邻关联已改善；跨页表格续接已实现 `PdfTableContinuation`：列数一致且续页重复表头或紧贴页顶时合并数据行、去重表头，整页只剩接续表格与页码时并入上一页；复杂合并单元格识别与页眉页脚语义删除待后续）
+- [x] 增强多栏阅读顺序、跨页表格、复杂表格与图片说明关联。（解析阶段按版面坐标自顶向下输出，多栏阅读顺序与图片说明相邻关联已改善；跨页表格续接由 `PdfTableContinuation` 完成：列数一致且续页重复表头或紧贴页顶时合并数据行、去重表头，整页只剩接续表格与页码时并入上一页；复杂合并单元格由 `PdfLayoutExtractor` 的 `RuleLocator` 捕获 `PDFGraphicsStreamEngine` 矢量线段/细矩形，重建规则网格后按位置聚类生成 `colspan/rowspan` 锚点，文本按同基线分段中心归位，输出 `TableModel` 合并单元格；开发注：扫描页无矢量线段时回退启发式分列，无法还原合并关系）
 - [x] 保留原有 PDFBox 2.x API 兼容性；Vision 不可用时显式降级。（继续使用 2.x `PDDocument.load` / `PDFGraphicsStreamEngine`；OCR 或 Vision 缺失时只写入可得通道，失败写入 warnings 不中断解析）
 
 **验收**：选取扫描 PDF、多栏 PDF、图文混排 PDF 与含流程图 PDF，能检索对应内容并定位原始页码及区块。
@@ -264,7 +264,7 @@ flowchart TD
 - [x] 答案指标：Faithfulness、Answer Relevance、Citation Precision、拒答正确率（`AnswerMetrics` 提供引用精确率/拒答正确率纯函数；`OpenAiAnswerJudge` 用 CHAT 模型以 JSON 打分；`AnswerBaselineTest` 离线跑确定性指标并输出 `rag-api/target/eval/answer-baseline.json`，设置 `RAG_EVAL_ANSWER=true` + `RAG_EVAL_BASE_URL/API_KEY/MODEL` 后按需执行在线评测并与 `answer-dataset.json` 基线比较；实测 qwen-plus：faithfulness 1.0 / relevance 0.975 / citation 0.94 / 拒答 1.0；拒答样例只计入拒答正确率，不参与语义指标均值）
 - [x] 记录基线版本、数据集、配置、模型、评测脚本与结果（数据集内记录 `version/rrfK/topK/embeddingModel/rerank` 与基线值；每次测试输出 `rag-api/target/eval/retrieval-baseline.json`）。
 - [x] 在 CI 引入轻量确定性测试；昂贵的模型评测采用可复现的手动/按需流程（`RetrievalBaselineTest` 离线复用生产 `RetrievalService.rrfFuse`，不依赖 ES/Milvus/LLM）。
-- [ ] 对 Rerank、Chunk Strategy、Top-K 变更输出前后对比（RRF 基线已可复用，端到端对比需在线环境）。
+- [x] 对 Rerank、Chunk Strategy、Top-K 变更输出前后对比（`RetrievalTuningCompareTest` 复用生产 `rrfFuse`，扫描 Top-K 3/5/8/10 并对比 Rerank 前后 Recall/Precision/MRR/nDCG，输出 `rag-api/target/eval/tuning-compare.json`；设置 `RAG_EVAL_RERANK_BASE_URL/API_KEY/MODEL` 时走真实 `RerankClient`，否则用确定性词法精排。`ChunkStrategyCompareTest` 对固定 Markdown 跑 FIXED_SIZE/RECURSIVE/PARAGRAPH/SENTENCE/SLIDING_WINDOW/PARENT_CHILD/MARKDOWN 七种策略，输出 `rag-worker/target/eval/chunk-strategy-compare.json`。离线结果：Rerank 前后 nDCG@5 0.70→0.90、MRR 0.92→1.0；Top-K Recall@3=0.90、@5=1.0；切片对比给出父子数量、字符长度分布与 token 估算）
 
 **验收**：同一份测试集可重复生成报告，关键指标回退有可追踪原因；无固定数据支撑时不宣称“准确率提高”。
 
@@ -312,7 +312,7 @@ flowchart TD
 - [x] 区分无需改写的精确编号、错误码及代码符号。（UUID、URL/接口路径、错误码、snake_case/camelCase、长数字直接跳过改写）
 - [x] 支持可配置 Multi-Query，合并去重后继续 RRF / Rerank。（`rag.query-rewrite.max-queries` 默认 3；`RetrievalService#retrieve(..., extraQueries)` 多路 RRF 去重）
 - [x] 增加成本与延迟保护，失败时使用原始 Query。（独立超时、maxTokens=256、查询数上限；开关默认关闭；异常/超时/解析失败回退原问题）
-- [ ] 剩余：在固定多轮与歧义评测集上输出改写前后 Recall@K、答案质量与延迟对比（需真实模型环境）。
+- [x] 在固定多轮与歧义评测集上输出改写前后 Recall@K、答案质量与延迟对比。（`QueryRewriteEvalTest` + `eval/rewrite-dataset.json`：3 条多轮指代 + 3 条歧义样本，Mock `LlmClient` 返回 gold rewrite 后调用真实 `QueryRewriteService#expand`，before 为原始 Query 的 RRF，after 为原始 + 改写 Query 的多路 RRF；输出 `rag-api/target/eval/rewrite-compare.json`。实测 Recall@5 0.50→1.00、MRR 0.50→1.00、nDCG@5 0.08→0.59、引用精确率 0→1、拒答正确率 0→1，改写平均延迟约 6.3ms；真实模型可按同一数据集复跑）
 
 **验收**：对固定多轮与歧义评测集输出改写前后 Recall@K、答案质量及延迟对比。
 
@@ -335,7 +335,7 @@ flowchart TD
 - [x] 引入 step / token / timeout 预算，避免无界循环。（轮次上限 + 每次模型调用超时 + 意图/生成 maxTokens + 检索上下文 Token Budget）
 - [x] 每次检索保留来源和引用，不让工具摘要取代可验证证据。（kb_search 结果按 chunkId 去重累积 citations 并推送 `search_result`，工具消息仅作为推理输入）
 - [x] 权限与审计对齐现有多租户模型。（工具授权沿用 `userManageService.toolAllowed`；每次调用输出 `[AUDIT] tool call tenant/user/kb/tool`）
-- [ ] 剩余：真实模型环境下验证「工具+知识库」复杂问题的端到端质量，以及超时/权限拒绝的确定行为。
+- [x] 真实模型环境下验证「工具+知识库」复杂问题的端到端质量，以及超时/权限拒绝的确定行为。（本地全套中间件 + qwen-plus 真机验收：①「账期 + 宽限期 + 北京天气」组合问题依次触发 `kb_search` 与 `weather`，`search_result` 累积 5 条引用，回答同时给出账期/宽限期/天气并标注 `[1]`；② 删除用户 weather 工具授权后同一问题不再出现 weather 事件，回答仅基于知识库并明确“未找到”；③ Tavily 配置无效 key 时触发 `tavily` 事件后确定性降级为“抱歉，当前无法访问外部网络…”，不抛 SSE error；④ 知识库无命中时诚实拒答。详见文末「冒烟验证记录」）
 
 **验收**：复杂问题能在有限轮次内组合知识库与外部工具回答；超时、无答案、权限拒绝有确定行为。
 
@@ -420,6 +420,10 @@ flowchart TD
 | SSE 问答 + Citation | 通过：`search_result` 带 4 条引用（章节路径/表格类型/预签名 URL），答案带 `[1]` 标注，`degraded=false`，done 含 token 用量 |
 | Rerank 二阶段精排（RAG-001） | 通过：第三方阿里兼容站点的 rerank 只暴露 DashScope 原生路径（`/compatible-mode/v1/rerank` 返回 404），且其网关按字符数读 body 导致多字节 JSON 被截断；`RerankClient` 已改为识别 `/compatible-mode` 走原生路径并按需转义非 ASCII，`rag.rerank.outcome{outcome=applied}` 计数生效，精排真实影响 Top-K |
 | ES 精确匹配（RAG-014） | 通过：错误码 `SB-E1001` 问题 top-1 命中「故障处理」章节（`content.exact` 加权生效） |
-| Agentic 工具编排（RAG-015） | 通过：天气工具 + `kb_search` 同一轮回答组合问题，引用累积推送 |
+| Agentic 工具编排（RAG-015）· 工具+知识库 | 通过：「账期 + 宽限期 + 北京天气」组合问题 SSE 依次 `search_start(kb_search)` → `search_result`（5 条引用）→ `search_start(weather)`，最终回答同时包含“默认账期每月 4 日凌晨 2 点 / 宽限期 13 天”与“北京多云 5.6°C”，并标注 `[1]` |
+| Agentic 工具编排（RAG-015）· 权限拒绝 | 通过：删除普通用户 weather TOOL 授权后同一问题不再触发 weather 事件，回答仅基于知识库并明确“未找到关于北京今日天气的相关信息”，不泄露工具能力 |
+| Agentic 工具编排（RAG-015）· 工具失败/超时 | 通过：`tavily_enabled=1` 且 key 无效时触发 `search_start(tavily)`，Tavily 内部异常被捕获后降级为“抱歉，当前无法访问外部网络…”，SSE 正常 `message`/`done`，不产生 error 事件 |
+| Agentic 工具编排（RAG-015）· 无答案 | 通过：知识库无命中时回答明确说明未检索到相关内容，不捏造引用 |
 | 检索可观测性 | 通过：`rag.retrieval.duration` 等 Micrometer 指标经 `/actuator/metrics` 输出 |
-| Query 改写（RAG-013） | 未实测：`rag.query-rewrite.enabled` 默认 false，需重启 API 显式开启；逻辑已由单测覆盖 |
+| Query 改写（RAG-013） | 通过（离线固定集）：`QueryRewriteEvalTest` 输出 Recall@5 0.50→1.00、MRR 0.50→1.00、nDCG@5 0.08→0.59、引用精确率 0→1、拒答 0→1，改写平均延迟约 6.3ms；`rag.query-rewrite.enabled` 默认 false，真机需重启 API 显式开启 |
+| PDF 语义块与合并单元格（RAG-007） | 通过（测试）：`PdfLayoutExtractorTest` 覆盖标题/列表/公式/代码/段落分类与矢量网格 `colspan=2`/`rowspan=2` 重建；`ParseServiceHeaderFooterTest` 覆盖 3 页重复页眉与页码剔除；`chunk.block_type` 经 Flyway V26 落库 |

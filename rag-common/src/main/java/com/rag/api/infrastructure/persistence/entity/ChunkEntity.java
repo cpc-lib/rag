@@ -30,6 +30,8 @@ public class ChunkEntity {
     private String bbox;
     /** 原文块标识，如 p3-b2 或 p3-b2~p3-b5（页-块，1 起）。 */
     private String sourceId;
+    /** PDF 版面块语义类别：TITLE/PARAGRAPH/LIST/TABLE/IMAGE/CODE/FORMULA，非 PDF 为空。 */
+    private String blockType;
     private String contentHash;
     /** 逻辑删除：0=正常 1=已删除。 */
     private Integer deleted;

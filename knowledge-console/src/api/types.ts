@@ -224,6 +224,8 @@ export interface Chunk {
   bbox?: string | null;
   /** 原文块标识，如 p3-b2 */
   sourceId?: string | null;
+  /** PDF 版面块语义类别：TITLE/PARAGRAPH/LIST/TABLE/IMAGE/CODE/FORMULA */
+  blockType?: string | null;
 }
 
 // ---- 工具配置 ----
@@ -291,6 +293,8 @@ export interface Citation {
   bbox?: string | null;
   /** 原文块标识，如 p3-b2 */
   sourceId?: string | null;
+  /** PDF 版面块语义类别 */
+  blockType?: string | null;
 }
 
 export interface ChatStreamReq {

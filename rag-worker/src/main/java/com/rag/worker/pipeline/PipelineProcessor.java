@@ -301,11 +301,12 @@ public class PipelineProcessor {
                 c.setContentType(contentType(doc.getFileName(), child.content()));
                 c.setSectionTitle(plan.sectionTitle());
                 c.setSectionPath(plan.sectionPath());
-                // PDF 版面元数据：按 child 内容回查所在块，写入 bbox / sourceId（非 PDF 为空）
+                // PDF 版面元数据：按 child 内容回查所在块，写入 bbox / sourceId / blockType（非 PDF 为空）
                 ChunkMetadataResolver.Metadata meta =
                         ChunkMetadataResolver.resolve(pageIndex.get(child.page()), child.content());
                 c.setBbox(meta.bbox());
                 c.setSourceId(meta.sourceId());
+                c.setBlockType(meta.blockType());
                 chunkMapper.insert(c);
             }
         }
