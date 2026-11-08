@@ -6,6 +6,7 @@ import com.rag.api.infrastructure.persistence.entity.ModelEntity;
 import com.rag.worker.infrastructure.storage.MinioStorage;
 import com.rag.worker.infrastructure.llm.VisionClient;
 import com.rag.worker.pipeline.pdf.PdfLayoutExtractor;
+import com.rag.worker.pipeline.pdf.PdfTableContinuation;
 import com.rag.worker.pipeline.table.TableModel;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -376,40 +377,82 @@ public class ParseService {
         try (PDDocument pdf = PDDocument.load(bytes)) {
             PDFRenderer renderer = new PDFRenderer(pdf);
             int total = pdf.getNumberOfPages();
+            // 延迟一页输出：下一页抽取后才能判断上一页表格是否接续
+            List<PdfLayoutExtractor.Block> pending = null;
+            int pendingIndex = -1;
+            float pendingHeight = 0;
             for (int i = 0; i < total; i++) {
                 List<PdfLayoutExtractor.Block> blocks;
                 try {
-                    blocks = pdfLayoutExtractor.extractPage(pdf, i);
+                    blocks = new ArrayList<>(pdfLayoutExtractor.extractPage(pdf, i));
                 } catch (Exception le) {
                     log.warn("PDF 第 {} 页版式抽取失败，回退纯文本: {}", i + 1, le.getMessage());
-                    blocks = fallbackTextBlocks(pdf, i);
+                    blocks = new ArrayList<>(fallbackTextBlocks(pdf, i));
                 }
-                Assembled assembled = assemblePage(blocks, i, vision, warnings, imageBudget,
-                        imageChannels, imageDescCache);
-                if (assembled.text().strip().length() >= 10) {
-                    pages.add(new RawPage(i, assembled.text(), assembled.spans()));
+                boolean absorbed = false;
+                if (pending != null) {
+                    var connected = PdfTableContinuation.connect(pending, pendingHeight,
+                            blocks, pageHeight(pdf, i));
+                    blocks = new ArrayList<>(connected.current());
+                    absorbed = connected.absorbed();
+                    emitPdfPage(pdf, renderer, pendingIndex, pending, pages, warnings, vision,
+                            imageBudget, imageChannels, imageDescCache);
+                }
+                if (absorbed) {
+                    // 整页仅剩被接续表格与页码，内容已并入上一页
+                    pending = null;
+                    pendingIndex = -1;
                     continue;
                 }
-                // 无文本层 → 扫描页走 OCR
-                if (ocrService.available()) {
-                    try {
-                        BufferedImage image = renderer.renderImageWithDPI(i, 150);
-                        String ocrText = ocrService.ocr(image);
-                        pages.add(new RawPage(i, ocrText == null ? "" : ocrText));
-                    } catch (Exception oe) {
-                        log.warn("PDF 第 {} 页 OCR 失败: {}", i + 1, oe.getMessage());
-                        warnings.add("第" + (i + 1) + "页OCR失败已跳过");
-                        pages.add(new RawPage(i, ""));
-                    }
-                } else {
-                    warnings.add("第" + (i + 1) + "页为扫描件且OCR未配置已跳过");
-                    pages.add(new RawPage(i, ""));
-                }
+                pending = blocks;
+                pendingIndex = i;
+                pendingHeight = pageHeight(pdf, i);
+            }
+            if (pending != null) {
+                emitPdfPage(pdf, renderer, pendingIndex, pending, pages, warnings, vision,
+                        imageBudget, imageChannels, imageDescCache);
             }
         } catch (Exception e) {
             throw new IllegalStateException("PDF 解析失败: " + e.getMessage(), e);
         }
         return new ParseOutcome(pages, warnings);
+    }
+
+    /** 输出单页：有文本层走版面组装，无文本层按扫描页 OCR。 */
+    private void emitPdfPage(PDDocument pdf, PDFRenderer renderer, int index,
+                             List<PdfLayoutExtractor.Block> blocks, List<RawPage> pages,
+                             List<String> warnings, ModelEntity vision, int[] imageBudget,
+                             boolean imageChannels, Map<PDImageXObject, String> imageDescCache) {
+        Assembled assembled = assemblePage(blocks, index, vision, warnings, imageBudget,
+                imageChannels, imageDescCache);
+        if (assembled.text().strip().length() >= 10) {
+            pages.add(new RawPage(index, assembled.text(), assembled.spans()));
+            return;
+        }
+        // 无文本层 → 扫描页走 OCR
+        if (ocrService.available()) {
+            try {
+                BufferedImage image = renderer.renderImageWithDPI(index, 150);
+                String ocrText = ocrService.ocr(image);
+                pages.add(new RawPage(index, ocrText == null ? "" : ocrText));
+            } catch (Exception oe) {
+                log.warn("PDF 第 {} 页 OCR 失败: {}", index + 1, oe.getMessage());
+                warnings.add("第" + (index + 1) + "页OCR失败已跳过");
+                pages.add(new RawPage(index, ""));
+            }
+        } else {
+            warnings.add("第" + (index + 1) + "页为扫描件且OCR未配置已跳过");
+            pages.add(new RawPage(index, ""));
+        }
+    }
+
+    /** 页高（与 PdfLayoutExtractor 的 top 坐标系一致，基于 MediaBox）。 */
+    private float pageHeight(PDDocument pdf, int index) {
+        try {
+            return pdf.getPage(index).getMediaBox().getHeight();
+        } catch (Exception e) {
+            return 0;
+        }
     }
 
     /** 版式抽取失败时按纯文本提取整页（保持阅读顺序），保证页面不丢失。 */
