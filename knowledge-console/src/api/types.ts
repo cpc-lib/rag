@@ -162,6 +162,18 @@ export interface KnowledgeBase {
   chunkStrategy: string;
   /** 分隔符 JSON 数组字符串，如 "[\"\\n\\n\",\"。\"]" */
   separators: string | null;
+  /** 当前生效的物理索引版本（0=旧版无版本后缀） */
+  indexVersion: number;
+  /** 索引状态：IDLE 正常 / BUILDING 重建中 */
+  indexState: 'IDLE' | 'BUILDING';
+  /** 重建中的目标版本（仅 BUILDING 时有值） */
+  indexTargetVersion: number | null;
+}
+
+/** 重建索引响应（POST /knowledge-bases/{id}/rebuild-index） */
+export interface KbRebuildView {
+  taskId: number;
+  targetVersion: number;
 }
 
 export interface KbCreateReq {

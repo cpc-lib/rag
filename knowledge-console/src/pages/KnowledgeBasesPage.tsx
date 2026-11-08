@@ -136,6 +136,16 @@ export default function KnowledgeBasesPage() {
     }
   };
 
+  const handleRebuild = async (kb: KnowledgeBase) => {
+    try {
+      const res = await kbApi.rebuildIndex(kb.id);
+      message.success(`已投递重建任务（#${res.taskId}，目标版本 v${res.targetVersion}），完成后自动切换`);
+    } finally {
+      // 无论成功失败都刷新：失败时（如已在重建中）由拦截器提示，刷新以同步最新状态
+      load();
+    }
+  };
+
   const handleDelete = async (kb: KnowledgeBase) => {
     await kbApi.remove(kb.id);
     message.success('知识库已删除，索引与对象已级联清理');
@@ -168,8 +178,18 @@ export default function KnowledgeBasesPage() {
       ),
     },
     {
+      title: '索引状态',
+      width: 150,
+      render: (_: unknown, r: KnowledgeBase) =>
+        r.indexState === 'BUILDING' ? (
+          <Tag color="processing">重建中 → v{r.indexTargetVersion}</Tag>
+        ) : (
+          <Tag color="success">v{r.indexVersion ?? 0} 正常</Tag>
+        ),
+    },
+    {
       title: '操作',
-      width: 220,
+      width: 280,
       render: (_: unknown, r: KnowledgeBase) => (
         <Space>
           <Button type="link" size="small" onClick={() => navigate(`/knowledge-bases/${r.id}`)}>
@@ -178,6 +198,15 @@ export default function KnowledgeBasesPage() {
           <Button size="small" onClick={() => openEdit(r)}>
             编辑
           </Button>
+          <Popconfirm
+            title={`确认重建知识库「${r.name}」的索引？`}
+            description="将全量重嵌并构建新版本索引，完成后自动切换；重建期间旧索引仍可检索"
+            onConfirm={() => handleRebuild(r)}
+          >
+            <Button size="small" disabled={r.indexState === 'BUILDING'}>
+              重建索引
+            </Button>
+          </Popconfirm>
           <Popconfirm
             title={`确认删除知识库「${r.name}」？`}
             description="将级联删除全部文档、切片、向量/全文索引及对象存储文件"
