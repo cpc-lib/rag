@@ -446,7 +446,7 @@ flowchart TD
 
 | 项 | 内容 |
 |---|---|
-| Commit | [`b317bcb`](https://github.com/cpc-lib/rag/commit/b317bcb)（`feature` 分支，已推送 `origin/feature`） |
+| Commit | [`b317bcb`](https://github.com/cpc-lib/rag/commit/b317bcb)（能力与测试）、[`7e65d35`](https://github.com/cpc-lib/rag/commit/7e65d35)（本记录文档），均已在 `feature` 分支并推送 `origin/feature` |
 | 主题 | `test(e2e): 补充真实 MySQL/ES/Milvus 租户隔离端到端测试` |
 | 覆盖 ISSUE | RAG-010 最后一项「带真实 MySQL/ES/Milvus 的端到端集成测试」 |
 | 变更文件 | 新增 `rag-api/src/test/java/com/rag/api/e2e/TenantIsolationE2ETest.java`；`ISSUE.md` 勾选并补充说明 |
