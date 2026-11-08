@@ -441,3 +441,15 @@ flowchart TD
 | 测试命令 | `mvn clean install`（根目录聚合，含全部测试）；`cd knowledge-console && npm run typecheck` |
 | 测试结果 | `BUILD SUCCESS`：rag-api 41 项测试（1 跳过）、rag-worker 46 项测试全部通过；前端 `tsc` 无错误。评测报告：`rag-api/target/eval/tuning-compare.json`、`rewrite-compare.json`、`rag-worker/target/eval/chunk-strategy-compare.json` |
 | 回滚方案 | `git revert 4d3df93`。Flyway V26 仅新增可空列 `chunk.block_type`，旧代码不会读取该列，回滚代码后可直接保留；如需彻底清理，在确认无依赖后执行 `ALTER TABLE chunk DROP COLUMN block_type;`（属破坏性操作，需先备份） |
+
+### 后续提交：RAG-010 真实中间件 E2E
+
+| 项 | 内容 |
+|---|---|
+| Commit | [`b317bcb`](https://github.com/cpc-lib/rag/commit/b317bcb)（`feature` 分支，已推送 `origin/feature`） |
+| 主题 | `test(e2e): 补充真实 MySQL/ES/Milvus 租户隔离端到端测试` |
+| 覆盖 ISSUE | RAG-010 最后一项「带真实 MySQL/ES/Milvus 的端到端集成测试」 |
+| 变更文件 | 新增 `rag-api/src/test/java/com/rag/api/e2e/TenantIsolationE2ETest.java`；`ISSUE.md` 勾选并补充说明 |
+| 测试命令 | `mvn -f rag-api/pom.xml test -Dtest=TenantIsolationE2ETest -DRAG_E2E=true`；回归：`mvn clean install` |
+| 测试结果 | E2E 通过：真实 MySQL 落库、真实 ES 建索引、真实 Milvus 建集合；向量/关键词双通道均命中 2 条，跨租户残留 chunk 被过滤，跨租户 KB 返回 `NOT_FOUND`。常规构建 `BUILD SUCCESS`（rag-api 41 项、1 项 E2E 默认跳过；rag-worker 46 项） |
+| 回滚方案 | `git revert b317bcb`。测试类默认被 `@EnabledIfSystemProperty` 跳过，不影响常规构建；真实中间件测试无生产数据变更（用例结束自动删除 KB/文档/切片、ES 索引与 Milvus 集合） |
