@@ -84,14 +84,15 @@ rag/
 
 ### 2.4 鉴权链路
 
-```
-请求（除 /api/v1/auth/login、/actuator、/error 白名单）
-  → JwtAuthFilter（OncePerRequestFilter）
-      Authorization: Bearer <jwt>
-      claims: sub=userId, tid=tenantId, ut=userType, name；jti 支持 Redis 黑名单（rag:jwt:bl:{jti}）
-      X-Tenant-Id 头必须与 tid 一致（平台管理员除外）
-      → TenantContext.set(Session)（ThreadLocal，finally 必 clear）
-  → Controller 内 AuthGuard.requirePlatform()/requireTenantAdmin() 或自定义归属校验
+```mermaid
+flowchart TD
+    A["请求（除 /api/v1/auth/login、/actuator、/error 白名单）"] --> B["JwtAuthFilter（OncePerRequestFilter）"]
+    subgraph Filter["JWT 校验与会话绑定"]
+        B --> C["解析 Authorization: Bearer {jwt}\nclaims: sub=userId, tid=tenantId, ut=userType, name\njti 校验 Redis 黑名单（rag:jwt:bl:{jti}）"]
+        C --> D["校验 X-Tenant-Id 头必须与 tid 一致（平台管理员除外）"]
+        D --> E["TenantContext.set(Session)（ThreadLocal，finally 必 clear）"]
+    end
+    E --> F["Controller 内 AuthGuard.requirePlatform() / requireTenantAdmin() 或自定义归属校验"]
 ```
 
 角色：`0` 平台管理员（超级租户 `000000`）、`1` 租户管理员、`2` 普通用户。普通用户菜单由前端 `RequireMenu` + 后端 `UserManageService.requireMenu` 双重校验。
@@ -115,11 +116,12 @@ rag/
 
 ### 3.2 pipeline —— 文档处理核心
 
-**`PipelineProcessor`** 两种流程：
+**`PipelineProcessor`** 三种流程：
 - `PARSE`：PARSING(5→20) → `ParseService.parse` → CHUNKING(25→40) 路由策略 plan + `persistPlans` → `indexAll`（EMBEDDING 45→78，INDEXING 85）→ READY 100
 - `REINDEX`：保留全部切片（含 MANUAL），仅重嵌 + 双写重建
+- `REBUILD_KB`：知识库级重建（`documentId=0` 哨兵），写新版本物理索引并校验，完成后原子切换读别名，见 `rebuildKbFlow`
 
-`indexAll` 细节：只取 `chunk_type=CHILD and status!=DELETED`；空切片分支负责清掉 ES/Milvus 残留；Embedding 按每批 10 条分组；Milvus 先 deleteByDocument 再 insert；ES 同样先删后写。embedding 文本做增强：`文档：{文件名}\n章节：{section_path}\n类型：{contentType}\n\n{content}`。
+`indexAll` 细节：只取 `chunk_type=CHILD and status!=DELETED`；空切片分支负责清掉 ES/Milvus 残留；Embedding 按每批 10 条分组；Milvus 按 `chunk_id` upsert、ES 按 `_id` 覆盖（先写后删），双路写入成功后再 `deleteStale` 清理陈旧 chunk，并对两侧数量做一致性校验；知识库重建期间额外双写目标版本。embedding 文本做增强：`文档：{文件名}\n章节：{section_path}\n类型：{contentType}\n\n{content}`。
 
 `persistPlans`：重解析只删 `status=AUTO` 旧行（保留 MANUAL）；parentChild 计划先插 PARENT（parentContent/sectionTitle/sectionPath/contentHash），再插关联 CHILDREN（parent_chunk_id 回填）；独立计划直接插 CHILD。
 
@@ -191,12 +193,18 @@ SPI 契约：`ChunkStrategy.mode()` 返回 `ChunkMode`；`plan(ChunkContext)` �
 
 ### 4.3 RabbitMQ 拓扑
 
-```
-direct exchange: rag.ingest（API/Worker 双侧声明，持久化）
-  rk parse   → rag.ingest.parse    主队列（PARSE 与 REINDEX 同队列）
-  rk reindex → rag.ingest.parse
-  rk retry   → rag.ingest.retry    单消息 TTL，死信回 exchange rk=parse
-  rk dlq     → rag.ingest.dlq      超限终态
+```mermaid
+flowchart LR
+    EX["direct exchange: rag.ingest\n（API/Worker 双侧声明，持久化）"]
+    Q_PARSE["rag.ingest.parse\n主队列（PARSE 与 REINDEX 同队列）"]
+    Q_RETRY["rag.ingest.retry\n单消息 TTL"]
+    Q_DLQ["rag.ingest.dlq\n超限终态"]
+
+    EX -- "rk = parse" --> Q_PARSE
+    EX -- "rk = reindex" --> Q_PARSE
+    EX -- "rk = retry" --> Q_RETRY
+    Q_RETRY -. "死信回 exchange (rk = parse)" .-> EX
+    EX -- "rk = dlq" --> Q_DLQ
 ```
 
 可靠性：消息立即 ack；执行前 `claimPending` 原子领取（PENDING→RUNNING）保证重复消息不并发执行；
@@ -221,10 +229,10 @@ PENDING/RUNNING 任务并重投（阈值 `rag.worker.stale-task-minutes`）。
 | tenant_menu | 租户开通的菜单 | tenant+menu |
 | user_feature | 用户功能授权 | user_id + feature_type(MENU/TOOL) + code |
 | user_kb / user_prompt | 用户数据授权 | KB 与提示词模板 |
-| knowledge_base | 知识库 | es_index、milvus_collection 各 KB 独立；chunk_strategy；parent/child/overlap/separators |
+| knowledge_base | 知识库 | es_index、milvus_collection 各 KB 独立；chunk_strategy；parent/child/overlap/separators；index_version/index_state/index_target_version（别名级双版本） |
 | document | 文档 | object_key、file_size、mime_type、status、progress、page_count、warning/error_msg |
 | chunk | 切片 | chunk_type(PARENT/CHILD)、parent_chunk_id、status(AUTO/MANUAL/DELETED)、section_title/path、content、content_hash、page、seq、content_type(TEXT/TABLE/IMAGE/CODE) 及多模态字段 |
-| pipeline_task | 流水线任务 | type(PARSE/REINDEX)、status(PENDING/RUNNING/SUCCESS/FAILED)、retry_count、payload、error_msg |
+| pipeline_task | 流水线任务 | type(PARSE/REINDEX/REBUILD_KB)、status(PENDING/RUNNING/SUCCESS/FAILED)、retry_count、payload、error_msg |
 | prompt_template | 提示词 | 归属 kb_id；is_default |
 | model | 模型池 | tenant+type+enabled；base_url/model/api_key(脱敏返回)；temperature/top_p/max_tokens/embedding_dim |
 | tool_config | 租户工具 | enabled + 凭证 |

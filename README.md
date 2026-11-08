@@ -56,7 +56,7 @@ rag/
 | Rerank 二阶段精排 | 依赖配置（RERANK 模型） | `RerankClient`、`RetrievalService#rerankIfEnabled` | 启用前后对比 Top-K 顺序；`/actuator/metrics/rag.rerank.outcome`；Base URL 为 `.../v1`、裸域名或 `/compatible-mode/v1` 时自动在标准 `/rerank` 与 DashScope 原生路径间回退（仅 404/405 切换） |
 | 检索通道降级 | 已实现 | `RetrievalService` 通道级 try/catch | 停用 ES 或 Embedding 后提问：仍返回引用且 `degraded=true`；双通道故障返回 UPSTREAM 错误 |
 | 检索可观测性 | 已实现 | Micrometer 指标 `rag.retrieval.*` | `GET /actuator/metrics/rag.retrieval.duration`（含 P95） |
-| Query 改写 / Multi-Query | 已实现（默认关闭） | `QueryRewriteService`、`RetrievalService#retrieve(..., extraQueries)` | 开启 `rag.query-rewrite.enabled` 后，RRF 日志出现 `queries=N` 且多路结果去重 |
+| Query 改写 / Multi-Query | 已实现（默认开启） | `QueryRewriteService`、`RetrievalService#retrieve(..., extraQueries)` | 多轮对话时 RRF 日志出现 `queries=N` 且多路结果去重；`RAG_QUERY_REWRITE_ENABLED=false` 可关闭 |
 | Agentic 工具编排 | 已实现（启用外部工具时） | `ChatOrchestrator`、`LlmClient#kbSearchTool` | 天气/Tavily/`kb_search` 多轮统一编排，引用逐次累积并推送 `search_result`；真机验证工具+知识库组合、权限拒绝、工具失败/超时与无答案拒答四条路径 |
 | 上传 → 解析 → 切片 → 双写 | 已实现 | `DocumentAppService`、`PipelineProcessor` | 上传后点击「开始处理」，文档状态到 READY 且进度 100 |
 | 双索引一致性校验 | 已实现 | `PipelineProcessor#indexAll` | `GET /api/v1/documents/{id}/index-status` 返回 `consistent=true` |
@@ -66,7 +66,7 @@ rag/
 | PDF 内嵌图片理解 | 已实现（OCR 可直接用，Vision 需配置） | `pipeline/pdf/PdfLayoutExtractor`、`ParseService#parsePdf` | 图文混排 PDF 检索图片内文字；图片描述按版面位置插入对应页文本 |
 | 表格结构化（Word/Excel/HTML/CSV） | 已实现 | `pipeline/table/TableModel`、`ChunkSupport#mergeContinuedTables` | 多 Sheet Excel、合并单元格、跨页续接表格可按表头+数据行检索 |
 | 重建索引可用性（先写后删） | 已实现 | `PipelineProcessor#indexAll`、`EsIndexer#deleteStale`、`MilvusIndexer#deleteStale` | 新版本写入成功后才清理陈旧 chunk；重建期间旧索引保持可读，失败重试幂等收敛 |
-| 索引别名级双版本切换 | 规划中 | — | 尚未实现 ES alias / Milvus 双集合并行读取 |
+| 索引别名级双版本切换 | 已实现 | `PipelineProcessor#rebuildKbFlow`、`EsIndexer#switchAlias`、`MilvusIndexer#switchAlias`、`KnowledgeBaseService#rebuildIndex` | `POST /api/v1/knowledge-bases/{id}/rebuild-index` 后台重建新版本物理索引，完成后原子切换 `{base}_active` 读别名，重建期间旧版本持续可读 |
 | ES 中文分词与检索调优 | 部分实现 | `EsSearchClient`、`EsIndexer` | 默认 `cjk` 分词 + `content.exact` 精确字段 + 检索指标；真实数据分层调优待评测 |
 | PDF bbox 表格识别与合并单元格 | 已实现（矢量网格优先，启发式回退） | `pipeline/pdf/PdfLayoutExtractor` | 优先用 `PDFGraphicsStreamEngine` 捕获的矢量线段重建规则网格并生成 `colspan/rowspan`，无矢量线时回退行内空隙切列 + 跨行列首对齐；转 `TableModel` Markdown 嵌入页文本，误判受对齐率/单元格长度约束 |
 | PDF 跨页表格续接 | 已实现 | `pipeline/pdf/PdfTableContinuation` | 列数一致且续页重复表头或紧贴页顶时合并数据行并去重表头；整页只剩接续表格与页码时并入上一页，避免表格被页边界切断 |
@@ -85,9 +85,11 @@ rag/
 - **重新解析（PARSE）**：只删除 `status=AUTO` 的旧切片，人工切片保留；新切片落库后重建双索引。
 - **重建索引（REINDEX）**：保留既有切片（含人工），仅重新 Embedding 并重写双索引，切片 ID 不变。
 - **写入顺序（先写后删）**：Milvus 按 `chunk_id` upsert、ES 按 `_id` 覆盖，双路新索引写成功后才删除不属于本次集合的旧 chunk；写入失败不清理旧索引，MQ 重试幂等收敛。
+- **知识库级重建（别名级双版本）**：`POST /api/v1/knowledge-bases/{id}/rebuild-index`（租户管理员）投递 `REBUILD_KB` 任务，Worker 写入新版本物理索引（`{base}_v{N}`），全部文档校验通过后原子切换读别名 `{base}_active`，再更新 `index_version` 并清理旧版本。重建期间检索与上传处理读写的都是旧版本（新增/更新文档会同时写目标版本），失败保持 `BUILDING`、旧版本可读，重试耗尽后自动复位 `IDLE`。
+- **历史索引兼容**：未执行过重建的知识库 `index_version=0`，读别名不存在时自动回退逻辑基名 `kb_{id}`，无需停机迁移。
 - **手动编辑切片**：编辑 AUTO child 会使其脱离 parent，后续重解析不再覆盖该切片。
 - **Milvus 维度变更**：仅当集合被确认（行数探测成功且为 0）为空时允许重建，且需显式开启 `rag.milvus.allow-auto-recreate=true`；drop 前输出 `[AUDIT]` 日志。
-- **回滚**：当前不做别名级双版本并行读取；旧索引在新版本写入完成前保持可读，重建前如需完整快照仍由运维对 Milvus / ES 执行。
+- **回滚**：代码回滚到无别名逻辑后，把 `{base}_active` 指向的物理索引改名为 `kb_{id}` 并删除别名即可（或重新上传/重建）；重建前如需完整快照仍由运维对 Milvus / ES 执行。Flyway V27 仅新增三列，旧代码不读取，可直接保留。
 
 ### ES 分词与检索调优
 
@@ -100,8 +102,7 @@ rag/
 
 ### Query 改写与 Multi-Query
 
-- `rag.query-rewrite.enabled` 默认 `false`；开启后仅多轮对话触发一次非流式模型调用（`max-queries` 默认 3、`timeout-seconds` 默认 8、输出上限 256 tokens）。
-- 含 UUID、URL/接口路径、错误码、snake_case/camelCase、长数字的问题跳过改写；模型失败、超时或解析异常一律回退原始 Query。
+- `rag.query-rewrite.enabled` 默认 `true`；仅多轮对话触发一次非流式模型调用（`max-queries` 默认 3、`timeout-seconds` 默认 8、输出上限 256 tokens），首轮提问、含精确标识（编号/错误码/路径/代码符号）的问题直接跳过，失败/超时一律回退原始 Query。
 - 改写结果与原问题一起进入多路 RRF（每个 Query × 每个通道各算一路），去重后继续 Rerank 与 Token Budget。
 
 ## 快速开始

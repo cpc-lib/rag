@@ -4,6 +4,9 @@ server:
 spring:
   application:
     name: rag-api
+  # 从项目根目录（或模块目录）读取 .env 环境配置；文件不存在时忽略，OS 环境变量优先级更高
+  config:
+    import: "optional:file:./.env[.properties],optional:file:../.env[.properties]"
   datasource:
     url: jdbc:mysql://${MYSQL_HOST:192.168.1.200}:${MYSQL_PORT:3306}/${MYSQL_DB:rag}?serverTimezone=Asia/Shanghai&useUnicode=true&characterEncoding=UTF-8&useSSL=false&allowPublicKeyRetrieval=true
     username: ${MYSQL_USER:root}
@@ -80,8 +83,8 @@ rag:
     # 文本分词器：cjk 为 ES 内置中文二元分词（无需插件）；修改后需删除旧索引并重建文档索引
     analyzer: ${RAG_ES_ANALYZER:cjk}
   query-rewrite:
-    # 多轮指代改写 + Multi-Query；默认关闭，开启后每轮多一次低成本非流式模型调用
-    enabled: ${RAG_QUERY_REWRITE_ENABLED:false}
+    # 多轮指代改写 + Multi-Query；默认开启，仅多轮对话触发一次低成本非流式模型调用（RAG_QUERY_REWRITE_ENABLED=false 关闭）
+    enabled: ${RAG_QUERY_REWRITE_ENABLED:true}
     max-queries: ${RAG_QUERY_REWRITE_MAX_QUERIES:3}
     timeout-seconds: ${RAG_QUERY_REWRITE_TIMEOUT:8}
   agentic:

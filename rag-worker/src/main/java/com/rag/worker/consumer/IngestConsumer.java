@@ -10,6 +10,7 @@ import com.rag.worker.pipeline.StoppedException;
 import com.rag.api.infrastructure.persistence.entity.DocumentEntity;
 import com.rag.api.infrastructure.persistence.entity.PipelineTaskEntity;
 import com.rag.api.infrastructure.persistence.mapper.DocumentMapper;
+import com.rag.api.infrastructure.persistence.mapper.KnowledgeBaseMapper;
 import com.rag.api.infrastructure.persistence.mapper.PipelineTaskMapper;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -42,6 +43,7 @@ public class IngestConsumer {
     private final ObjectMapper objectMapper;
     private final PipelineTaskMapper taskMapper;
     private final DocumentMapper documentMapper;
+    private final KnowledgeBaseMapper kbMapper;
     private final PipelineProcessor processor;
     private final RetryPublisher retryPublisher;
     private final TenantMqSemaphore semaphore;
@@ -111,6 +113,7 @@ public class IngestConsumer {
             // 用户主动停止：任务置 CANCELLED，不进入重试
             task.setStatus("CANCELLED");
             taskMapper.updateById(task);
+            resetKbIndexState(msg);
             log.info("任务已被用户停止 task={} doc={} errorCode=STOPPED_BY_USER",
                     msg.taskId(), msg.documentId());
         } catch (NonRetryableException e) {
@@ -125,6 +128,7 @@ public class IngestConsumer {
                 doc.setErrorMsg(abbreviate(error));
                 documentMapper.updateById(doc);
             }
+            resetKbIndexState(msg);
             log.error("任务不可重试，已置 FAILED task={} doc={} errorCode=NON_RETRYABLE reason={}",
                     msg.taskId(), msg.documentId(), error);
         } catch (Exception e) {
@@ -169,8 +173,25 @@ public class IngestConsumer {
                 retryPublisher.publishDlq(msg);
             } catch (Exception ignored) {
             }
+            resetKbIndexState(msg);
             log.error("任务重试超限，已入 DLQ task={} doc={} retry={} errorCode=RETRY_EXHAUSTED",
                     msg.taskId(), msg.documentId(), nextRetry);
+        }
+    }
+
+    /**
+     * 知识库重建任务终止（不可重试/重试耗尽）时复位 index_state，
+     * 避免状态卡在 BUILDING 阻塞后续重建；读别名仍指向旧版本，不影响读取。
+     */
+    private void resetKbIndexState(RetryPublisher.IngestMessage msg) {
+        if (!"REBUILD_KB".equalsIgnoreCase(msg.type())) {
+            return;
+        }
+        try {
+            kbMapper.resetIndexState(msg.kbId());
+            log.warn("知识库索引重建终止，已复位索引状态 kb={} task={}", msg.kbId(), msg.taskId());
+        } catch (Exception e) {
+            log.error("知识库索引状态复位失败 kb={} task={}: {}", msg.kbId(), msg.taskId(), e.getMessage());
         }
     }
 

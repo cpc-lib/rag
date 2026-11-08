@@ -5,6 +5,8 @@ import co.elastic.clients.elasticsearch._types.FieldValue;
 import co.elastic.clients.elasticsearch._types.Refresh;
 import co.elastic.clients.elasticsearch.core.BulkRequest;
 import co.elastic.clients.elasticsearch.core.BulkResponse;
+import co.elastic.clients.elasticsearch.indices.update_aliases.Action;
+import com.rag.api.infrastructure.search.IndexNames;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
@@ -145,6 +147,51 @@ public class EsIndexer {
             client.indices().delete(d -> d.index(index));
         } catch (Exception e) {
             log.warn("ES 删除索引失败: {}", index, e);
+        }
+    }
+
+    // ---------- 别名级双版本（RAG-003） ----------
+
+    public boolean hasIndex(String index) {
+        try {
+            return client.indices().exists(e -> e.index(index)).value();
+        } catch (Exception e) {
+            throw new IllegalStateException("ES 索引探测失败: " + index + "（" + e.getMessage() + "）", e);
+        }
+    }
+
+    /** 读别名当前是否指向目标索引。 */
+    public boolean aliasPointsTo(String base, String target) {
+        return aliasIndices(IndexNames.alias(base)).contains(target);
+    }
+
+    /** 原子切换读别名到目标索引，同一请求内摘除旧索引。 */
+    public void switchAlias(String base, String target) {
+        String alias = IndexNames.alias(base);
+        try {
+            List<Action> actions = new ArrayList<>();
+            List<String> current = aliasIndices(alias);
+            for (String index : current) {
+                if (!index.equals(target)) {
+                    actions.add(Action.of(a -> a.remove(r -> r.index(index).alias(alias))));
+                }
+            }
+            actions.add(Action.of(a -> a.add(ad -> ad.index(target).alias(alias))));
+            client.indices().updateAliases(u -> u.actions(actions));
+            log.info("ES 读别名已切换 alias={} -> {}（原指向 {}）", alias, target, current);
+        } catch (Exception e) {
+            throw new IllegalStateException("ES 别名切换失败: " + e.getMessage(), e);
+        }
+    }
+
+    private List<String> aliasIndices(String alias) {
+        try {
+            if (!client.indices().existsAlias(e -> e.name(alias)).value()) {
+                return List.of();
+            }
+            return new ArrayList<>(client.indices().getAlias(g -> g.name(alias)).result().keySet());
+        } catch (Exception e) {
+            throw new IllegalStateException("ES 别名解析失败: " + e.getMessage(), e);
         }
     }
 }

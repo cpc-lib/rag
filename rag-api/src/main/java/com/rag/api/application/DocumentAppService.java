@@ -15,6 +15,7 @@ import com.rag.api.infrastructure.persistence.mapper.ChunkMapper;
 import com.rag.api.infrastructure.persistence.mapper.DocumentMapper;
 import com.rag.api.infrastructure.persistence.mapper.PipelineTaskMapper;
 import com.rag.api.infrastructure.search.EsSearchClient;
+import com.rag.api.infrastructure.search.IndexNames;
 import com.rag.api.infrastructure.search.MilvusClientWrapper;
 import com.rag.api.infrastructure.storage.MinioStorage;
 import com.rag.api.interfaces.dto.Dtos;
@@ -300,18 +301,21 @@ public class DocumentAppService {
         }
         KnowledgeBaseEntity kb = knowledgeBaseService.getOwned(doc.getKbId());
         long dbCount = chunkMapper.selectChildrenByDocumentId(documentId).size();
+        // 对账同样走读别名：重建期间读到的是当前可读版本
+        String esReadName = es.resolveReadName(kb.getEsIndex());
+        String milvusReadName = milvus.resolveReadName(kb.getMilvusCollection());
 
         Long esCount = null;
         String esError = null;
         try {
-            esCount = es.countByDocument(kb.getEsIndex(), documentId);
+            esCount = es.countByDocument(esReadName, documentId);
         } catch (Exception e) {
             esError = e.getMessage();
         }
         Long milvusCount = null;
         String milvusError = null;
         try {
-            milvusCount = milvus.countByDocument(kb.getMilvusCollection(), documentId,
+            milvusCount = milvus.countByDocument(milvusReadName, documentId,
                     (int) Math.min(dbCount, 100_000));
         } catch (Exception e) {
             milvusError = e.getMessage();
@@ -345,11 +349,25 @@ public class DocumentAppService {
         }
         KnowledgeBaseEntity kb = knowledgeBaseService.getOwned(doc.getKbId());
 
-        es.deleteByDocument(kb.getEsIndex(), doc.getId());
+        // 读别名指向当前可读版本；重建期间目标版本也写入了该文档，需一并清理
+        String esReadName = es.resolveReadName(kb.getEsIndex());
+        String milvusReadName = milvus.resolveReadName(kb.getMilvusCollection());
+        es.deleteByDocument(esReadName, doc.getId());
         try {
-            milvus.deleteByDocument(kb.getMilvusCollection(), doc.getId());
+            milvus.deleteByDocument(milvusReadName, doc.getId());
         } catch (Exception e) {
             log.warn("Milvus 向量清理失败 doc={} err={}", doc.getId(), e.getMessage());
+        }
+        if ("BUILDING".equals(kb.getIndexState()) && kb.getIndexTargetVersion() != null) {
+            String esTarget = IndexNames.physical(kb.getEsIndex(), kb.getIndexTargetVersion());
+            String milvusTarget = IndexNames.physical(kb.getMilvusCollection(), kb.getIndexTargetVersion());
+            es.deleteByDocument(esTarget, doc.getId());
+            try {
+                milvus.deleteByDocument(milvusTarget, doc.getId());
+            } catch (Exception e) {
+                log.warn("Milvus 目标版本向量清理失败 doc={} target={} err={}",
+                        doc.getId(), milvusTarget, e.getMessage());
+            }
         }
         minio.deleteObject(doc.getObjectKey());
 

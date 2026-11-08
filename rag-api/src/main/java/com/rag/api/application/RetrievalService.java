@@ -106,6 +106,10 @@ public class RetrievalService {
             }
         }
 
+        // 读名称统一走别名（重建切换对检索透明）；别名不存在时回退逻辑基名（兼容历史索引）
+        String milvusReadName = milvus.resolveReadName(kb.getMilvusCollection());
+        String esReadName = es.resolveReadName(kb.getEsIndex());
+
         // 1. 向量通道：Query Embedding + Milvus。逐 Query 独立降级，全部失败才关闭通道。
         boolean vectorAvailable = true;
         List<MilvusClientWrapper.MilvusHit> vectorHits = new ArrayList<>();
@@ -122,16 +126,16 @@ public class RetrievalService {
                     float[] vector = llmClient.embed(emb.getBaseUrl(), emb.getApiKey(),
                             emb.getModel(), List.of(queries.get(i))).get(0);
                     List<MilvusClientWrapper.MilvusHit> hits =
-                            milvus.search(kb.getMilvusCollection(), vector, rc.vectorTopN);
+                            milvus.search(milvusReadName, vector, rc.vectorTopN);
                     vectorHits.addAll(hits);
                     vectorLists.add(hits.stream().map(MilvusClientWrapper.MilvusHit::chunkId).toList());
                     vectorOk++;
                     log.info("向量检索（Milvus）kb={} query#={} collection={} topN={} 命中={}条 耗时={}ms",
-                            kbId, i, kb.getMilvusCollection(), rc.vectorTopN, hits.size(),
+                            kbId, i, milvusReadName, rc.vectorTopN, hits.size(),
                             System.currentTimeMillis() - vecStart);
                 } catch (Exception e) {
                     log.warn("向量检索失败 kb={} query#={} collection={} 耗时={}ms: {}",
-                            kbId, i, kb.getMilvusCollection(),
+                            kbId, i, milvusReadName,
                             System.currentTimeMillis() - vecStart, e.getMessage());
                 }
             }
@@ -148,15 +152,15 @@ public class RetrievalService {
         for (int i = 0; i < queries.size(); i++) {
             long kwStart = System.currentTimeMillis();
             try {
-                List<Long> ids = es.search(kb.getEsIndex(), queries.get(i), rc.keywordTopN);
+                List<Long> ids = es.search(esReadName, queries.get(i), rc.keywordTopN);
                 keywordLists.add(ids);
                 keywordOk++;
                 log.info("关键词检索（ES BM25）kb={} query#={} index={} topN={} 命中={}条 耗时={}ms",
-                        kbId, i, kb.getEsIndex(), rc.keywordTopN, ids.size(),
+                        kbId, i, esReadName, rc.keywordTopN, ids.size(),
                         System.currentTimeMillis() - kwStart);
             } catch (Exception e) {
                 log.warn("关键词检索失败 kb={} query#={} index={} 耗时={}ms: {}",
-                        kbId, i, kb.getEsIndex(), System.currentTimeMillis() - kwStart, e.getMessage());
+                        kbId, i, esReadName, System.currentTimeMillis() - kwStart, e.getMessage());
             }
         }
         if (keywordOk == 0) {

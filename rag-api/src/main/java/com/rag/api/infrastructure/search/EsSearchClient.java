@@ -6,6 +6,7 @@ import co.elastic.clients.elasticsearch.ElasticsearchClient;
 import co.elastic.clients.elasticsearch.core.BulkRequest;
 import co.elastic.clients.elasticsearch.core.BulkResponse;
 import co.elastic.clients.elasticsearch.core.SearchResponse;
+import co.elastic.clients.elasticsearch.indices.update_aliases.Action;
 import jakarta.annotation.PreDestroy;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
@@ -13,6 +14,7 @@ import org.springframework.stereotype.Component;
 
 import java.io.StringReader;
 import java.util.ArrayList;
+import java.util.LinkedHashSet;
 import java.util.List;
 
 /**
@@ -151,6 +153,87 @@ public class EsSearchClient {
             }
         } catch (Exception e) {
             log.warn("ES 删除索引失败: {}", index, e);
+        }
+    }
+
+    // ---------- 别名级双版本（RAG-003） ----------
+
+    /** 读名称：读别名存在则走别名（重建切换对检索透明），否则回退逻辑基名。 */
+    public String resolveReadName(String base) {
+        String alias = IndexNames.alias(base);
+        try {
+            if (client.indices().existsAlias(e -> e.name(alias)).value()) {
+                return alias;
+            }
+        } catch (Exception e) {
+            log.warn("ES 读别名探测失败，回退基名 index={} err={}", base, e.getMessage());
+        }
+        return base;
+    }
+
+    /** 幂等建立读别名（建库预创建时指向当前物理索引）。 */
+    public void ensureAlias(String base, String target) {
+        String alias = IndexNames.alias(base);
+        try {
+            if (client.indices().existsAlias(e -> e.name(alias)).value()) {
+                return;
+            }
+            client.indices().updateAliases(u -> u.actions(
+                    a -> a.add(ad -> ad.index(target).alias(alias))));
+            log.info("ES 读别名已创建 alias={} -> {}", alias, target);
+        } catch (Exception e) {
+            throw new BizException(ErrorCode.UPSTREAM, "ES 别名创建失败: " + e.getMessage());
+        }
+    }
+
+    /** 原子切换读别名到目标索引，同一请求内摘除旧索引，避免读写窗口。 */
+    public void switchAlias(String base, String target) {
+        String alias = IndexNames.alias(base);
+        try {
+            List<Action> actions = new ArrayList<>();
+            List<String> current = aliasIndices(alias);
+            for (String index : current) {
+                if (!index.equals(target)) {
+                    actions.add(Action.of(a -> a.remove(r -> r.index(index).alias(alias))));
+                }
+            }
+            actions.add(Action.of(a -> a.add(ad -> ad.index(target).alias(alias))));
+            client.indices().updateAliases(u -> u.actions(actions));
+            log.info("ES 读别名已切换 alias={} -> {}（原指向 {}）", alias, target, current);
+        } catch (Exception e) {
+            throw new BizException(ErrorCode.UPSTREAM, "ES 别名切换失败: " + e.getMessage());
+        }
+    }
+
+    /** 知识库级删除：读别名指向的索引与全部版本物理索引一并清理。 */
+    public void deleteAcrossVersions(String base, Integer... versions) {
+        String alias = IndexNames.alias(base);
+        try {
+            for (String index : aliasIndices(alias)) {
+                deleteIndex(index);
+            }
+        } catch (Exception e) {
+            log.warn("ES 别名索引清理失败 base={}: {}", base, e.getMessage());
+        }
+        // 别名不存在（重建失败/尚未切换）时按版本兜底删除物理索引
+        LinkedHashSet<String> names = new LinkedHashSet<>();
+        names.add(base);
+        for (Integer version : versions) {
+            names.add(IndexNames.physical(base, version));
+        }
+        for (String name : names) {
+            deleteIndex(name);
+        }
+    }
+
+    private List<String> aliasIndices(String alias) {
+        try {
+            if (!client.indices().existsAlias(e -> e.name(alias)).value()) {
+                return List.of();
+            }
+            return new ArrayList<>(client.indices().getAlias(g -> g.name(alias)).result().keySet());
+        } catch (Exception e) {
+            throw new BizException(ErrorCode.UPSTREAM, "ES 别名解析失败: " + e.getMessage());
         }
     }
 

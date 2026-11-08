@@ -58,6 +58,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
@@ -144,7 +145,7 @@ class TenantIsolationCoverageTest {
                 tenantMenuMapper, passwordEncoder);
         knowledgeBaseService = new KnowledgeBaseService(kbMapper, documentMapper, chunkMapper,
                 modelService, milvus, es, minio, objectMapper, userManageService,
-                promptTemplateService, fileLibraryService, taskMapper);
+                promptTemplateService, fileLibraryService, taskMapper, publisher);
         documentAppService = new DocumentAppService(documentMapper, chunkMapper, taskMapper,
                 knowledgeBaseService, quotaService, modelService, minio, es, milvus,
                 publisher, objectMapper, fileLibraryService, sha256Publisher);
@@ -154,6 +155,9 @@ class TenantIsolationCoverageTest {
         promptTemplateServiceUnderTest = new PromptTemplateService(promptMapper, kbMapper, userPromptMapper);
         retrievalService = new RetrievalService(kbMapper, modelService, chunkMapper, documentMapper,
                 llmClient, rerankClient, milvus, es, minio, etcdService, meterRegistry);
+        // 读名称统一走别名解析：单测中直接回退逻辑基名，保持原有 stub 参数
+        lenient().when(es.resolveReadName(anyString())).thenAnswer(inv -> inv.getArgument(0));
+        lenient().when(milvus.resolveReadName(anyString())).thenAnswer(inv -> inv.getArgument(0));
     }
 
     @AfterEach

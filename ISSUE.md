@@ -5,7 +5,7 @@
 > **审查基准提交**：[`44525dce952ca37a22230400881f47a9b8ff9b06`](https://github.com/cpc-lib/rag/commit/44525dce952ca37a22230400881f47a9b8ff9b06)（提交时间：2026-10-11 UTC）  
 > **整理日期**：2026-11-07  
 > **性质**：静态源码审查 / 待办 ISSUE；**未执行生产压测**（2026-11-08 已完成本地端到端冒烟，见文末「冒烟验证记录」）  
-> **状态**：P0（RAG-001 ~ RAG-005）基本修复，RAG-003 采用「先写后删」（别名级双版本并行读取列为后续增强），RAG-005 少量增强项待办；P1 已完成 RAG-006、RAG-007、RAG-008、RAG-009、RAG-010、RAG-011、RAG-012；P2 已完成 RAG-013、RAG-014、RAG-015；复选框反映当前进度，完成项对应的提交、测试与回滚方案见文末「提交记录」（最新提交 `4d3df93`）
+> **状态**：P0（RAG-001 ~ RAG-005）已全部修复，RAG-003 已实现别名级双版本（读别名 `{base}_active` + 版本化物理索引 `{base}_v{N}`，入口 `POST /api/v1/knowledge-bases/{id}/rebuild-index`）；P1 已完成 RAG-006、RAG-007、RAG-008、RAG-009、RAG-010、RAG-011、RAG-012；P2 已完成 RAG-013、RAG-014、RAG-015；复选框反映当前进度，完成项对应的提交、测试与回滚方案见文末「提交记录」（最新提交 `4d3df93`，本轮变更待提交）
 
 ## 0. 审查结论
 
@@ -167,13 +167,13 @@ flowchart TD
   - [x] 解析 Bulk 每个 item 的失败状态与原因；失败须抛出可重试异常或执行精准重试。
   - [x] 建立文档级索引写入统计与对账；明确双写部分失败的补偿机制。（新增 `GET /api/v1/documents/{id}/index-status`，比对 DB 可索引 child 数 / ES / Milvus 三方条数；任一路探测失败单独返回 error，不掩盖另一路）
   - [x] INDEXING → READY 前校验预期 children 与两个索引的可检索数量/版本是否一致。
-  - [x] 重建索引期间保证旧索引可读，设计失败回滚或双版本切换策略；避免先删除旧版本后失败导致知识不可用。（改为「先写后删」：Milvus 按 `chunk_id` upsert、ES 按 `_id` 覆盖，双路写入成功后才清理陈旧 chunk；写入失败不删除旧索引，重试幂等收敛。未实现别名级双版本并行读取）
-  - [x] 明确删除、重建、手动编辑 chunk 的重索引语义。（见 README「索引与重建语义」，已同步先写后删与失败恢复语义）
+  - [x] 重建索引期间保证旧索引可读，设计失败回滚或双版本切换策略；避免先删除旧版本后失败导致知识不可用。（文档级先写后删 + 知识库级别名双版本：Worker 写入新版本物理索引 `{base}_v{N}`，逐文档校验通过后原子切换读别名 `{base}_active`，再更新 `index_version` 并清理旧版本；重建期间读请求走别名、新增/更新文档双写当前与目标版本；失败保持 BUILDING、旧版本可读，重试耗尽复位 IDLE。入口 `POST /api/v1/knowledge-bases/{id}/rebuild-index`，Flyway V27 新增 `index_version/index_state/index_target_version`）
+  - [x] 明确删除、重建、手动编辑 chunk 的重索引语义。（见 README「索引与重建语义」；删除文档同时清理当前版本与重建目标版本，知识库删除清理别名与全部版本；已同步先写后删与失败恢复语义）
 - **验收标准**：
   1. ES Bulk 部分失败不能错误地标记任务 READY。
   2. Milvus 成功而 ES 失败、ES 成功而 Milvus 失败时均能恢复到一致状态。
   3. 多次重试后 chunk 数与有效文档数一致，不出现重复或孤儿索引。
-- **涉及文件**：[`EsIndexer.java`](https://github.com/cpc-lib/rag/blob/main/rag-worker/src/main/java/com/rag/worker/infrastructure/search/EsIndexer.java)、[`PipelineProcessor.java`](https://github.com/cpc-lib/rag/blob/main/rag-worker/src/main/java/com/rag/worker/pipeline/PipelineProcessor.java)。
+- **涉及文件**：[`EsIndexer.java`](https://github.com/cpc-lib/rag/blob/main/rag-worker/src/main/java/com/rag/worker/infrastructure/search/EsIndexer.java)、[`PipelineProcessor.java`](https://github.com/cpc-lib/rag/blob/main/rag-worker/src/main/java/com/rag/worker/pipeline/PipelineProcessor.java)、[`KnowledgeBaseService.java`](https://github.com/cpc-lib/rag/blob/main/rag-api/src/main/java/com/rag/api/application/KnowledgeBaseService.java)、[`EsSearchClient.java`](https://github.com/cpc-lib/rag/blob/main/rag-api/src/main/java/com/rag/api/infrastructure/search/EsSearchClient.java)、[`MilvusClientWrapper.java`](https://github.com/cpc-lib/rag/blob/main/rag-api/src/main/java/com/rag/api/infrastructure/search/MilvusClientWrapper.java)、[`V27__kb_index_version.sql`](https://github.com/cpc-lib/rag/blob/main/rag-api/src/main/resources/db/migration/V27__kb_index_version.sql)。
 
 ### RAG-004：查询 Embedding 不可用时的 ES-only 降级
 
@@ -217,7 +217,7 @@ flowchart TD
 |---|---|---|---|
 | `txt` `md` | 文本直读（去 BOM） | PARENT_CHILD | 空文件解析为空页，切片阶段给出"未提取到可检索内容" |
 | `json` `xml` `yml` `yaml` `sql` `log` `ini` `conf` `properties` | 文本直读 | PARENT_CHILD | 不解析结构，按原文切片 |
-| `java` `py` `go` `js` `jsx` `ts` `tsx` | 文本直读 | CODE | 代码切片按语言结构 |
+| `java` `py` `go` `js` `jsx` `ts` `tsx` `sh` | 文本直读 | CODE | 代码切片按语言结构 |
 | `csv` | RFC4180 解析 → Markdown 表格 | PARENT_CHILD | 支持引号内逗号/换行与 BOM |
 | `docx` `xlsx` | Apache POI | PARENT_CHILD / TABLE | 扫描件无文本时返回告警 |
 | `pdf` | PDFBox 2.x 文本层 + 扫描页 Tess4J OCR | PDF_LAYOUT | OCR 不可用时降级为文本层并告警 |
@@ -311,7 +311,7 @@ flowchart TD
 - [x] 多轮问题补全指代，例如“它的限制是什么”重写为独立检索 Query。（`QueryRewriteService`：仅多轮触发，取最近 6 条历史，输出 JSON queries）
 - [x] 区分无需改写的精确编号、错误码及代码符号。（UUID、URL/接口路径、错误码、snake_case/camelCase、长数字直接跳过改写）
 - [x] 支持可配置 Multi-Query，合并去重后继续 RRF / Rerank。（`rag.query-rewrite.max-queries` 默认 3；`RetrievalService#retrieve(..., extraQueries)` 多路 RRF 去重）
-- [x] 增加成本与延迟保护，失败时使用原始 Query。（独立超时、maxTokens=256、查询数上限；开关默认关闭；异常/超时/解析失败回退原问题）
+- [x] 增加成本与延迟保护，失败时使用原始 Query。（独立超时、maxTokens=256、查询数上限；开关默认开启，仅多轮触发；异常/超时/解析失败回退原问题）
 - [x] 在固定多轮与歧义评测集上输出改写前后 Recall@K、答案质量与延迟对比。（`QueryRewriteEvalTest` + `eval/rewrite-dataset.json`：3 条多轮指代 + 3 条歧义样本，Mock `LlmClient` 返回 gold rewrite 后调用真实 `QueryRewriteService#expand`，before 为原始 Query 的 RRF，after 为原始 + 改写 Query 的多路 RRF；输出 `rag-api/target/eval/rewrite-compare.json`。实测 Recall@5 0.50→1.00、MRR 0.50→1.00、nDCG@5 0.08→0.59、引用精确率 0→1、拒答正确率 0→1，改写平均延迟约 6.3ms；真实模型可按同一数据集复跑）
 
 **验收**：对固定多轮与歧义评测集输出改写前后 Recall@K、答案质量及延迟对比。
@@ -425,7 +425,7 @@ flowchart TD
 | Agentic 工具编排（RAG-015）· 工具失败/超时 | 通过：`tavily_enabled=1` 且 key 无效时触发 `search_start(tavily)`，Tavily 内部异常被捕获后降级为“抱歉，当前无法访问外部网络…”，SSE 正常 `message`/`done`，不产生 error 事件 |
 | Agentic 工具编排（RAG-015）· 无答案 | 通过：知识库无命中时回答明确说明未检索到相关内容，不捏造引用 |
 | 检索可观测性 | 通过：`rag.retrieval.duration` 等 Micrometer 指标经 `/actuator/metrics` 输出 |
-| Query 改写（RAG-013） | 通过（离线固定集）：`QueryRewriteEvalTest` 输出 Recall@5 0.50→1.00、MRR 0.50→1.00、nDCG@5 0.08→0.59、引用精确率 0→1、拒答 0→1，改写平均延迟约 6.3ms；`rag.query-rewrite.enabled` 默认 false，真机需重启 API 显式开启 |
+| Query 改写（RAG-013） | 通过（离线固定集）：`QueryRewriteEvalTest` 输出 Recall@5 0.50→1.00、MRR 0.50→1.00、nDCG@5 0.08→0.59、引用精确率 0→1、拒答 0→1，改写平均延迟约 6.3ms；`rag.query-rewrite.enabled` 默认 true（仅多轮触发、精确标识跳过、失败回退原始 Query），`RAG_QUERY_REWRITE_ENABLED=false` 可关闭 |
 | PDF 语义块与合并单元格（RAG-007） | 通过（测试）：`PdfLayoutExtractorTest` 覆盖标题/列表/公式/代码/段落分类与矢量网格 `colspan=2`/`rowspan=2` 重建；`ParseServiceHeaderFooterTest` 覆盖 3 页重复页眉与页码剔除；`chunk.block_type` 经 Flyway V26 落库 |
 
 ---
@@ -453,3 +453,14 @@ flowchart TD
 | 测试命令 | `mvn -f rag-api/pom.xml test -Dtest=TenantIsolationE2ETest -DRAG_E2E=true`；回归：`mvn clean install` |
 | 测试结果 | E2E 通过：真实 MySQL 落库、真实 ES 建索引、真实 Milvus 建集合；向量/关键词双通道均命中 2 条，跨租户残留 chunk 被过滤，跨租户 KB 返回 `NOT_FOUND`。常规构建 `BUILD SUCCESS`（rag-api 41 项、1 项 E2E 默认跳过；rag-worker 46 项） |
 | 回滚方案 | `git revert b317bcb`。测试类默认被 `@EnabledIfSystemProperty` 跳过，不影响常规构建；真实中间件测试无生产数据变更（用例结束自动删除 KB/文档/切片、ES 索引与 Milvus 集合） |
+
+### 本轮变更：RAG-003 别名级双版本与文档收尾（待提交）
+
+| 项 | 内容 |
+|---|---|
+| Commit | 待提交（工作区变更） |
+| 主题 | `feat(index): 实现知识库索引别名级双版本与重建入口` |
+| 覆盖 ISSUE | RAG-003（别名双版本切换）、RAG-006（`sh` 纳入 CODE 切片）、RAG-012（README/AGENTS/CODE_INTRO 同步） |
+| 变更文件 | 新增 `V27__kb_index_version.sql`、`rag-common/.../search/IndexNames.java`；公共层 `KnowledgeBaseEntity.java`、`KnowledgeBaseMapper.java`、`KnowledgeBaseMapper.xml`；API `KnowledgeBaseService.java`、`KnowledgeBaseController.java`、`Dtos.java`、`DocumentAppService.java`、`RetrievalService.java`、`EsSearchClient.java`、`MilvusClientWrapper.java`；Worker `PipelineProcessor.java`、`IngestConsumer.java`、`EsIndexer.java`、`MilvusIndexer.java`、`ChunkStrategyRouter.java`、`CodeStrategy.java`；文档 `README.md`、`AGENTS.md`、`CODE_INTRO.md`、`ISSUE.md`、`.gitignore` |
+| 测试命令 | `mvn clean install`（根目录聚合）；`cd knowledge-console && npm run typecheck` |
+| 回滚方案 | 代码回滚后把 `{base}_active` 指向的物理索引改回 `kb_{id}` 并删除别名；Flyway V27 仅新增三列（`index_version/index_state/index_target_version`），旧代码不读取，可直接保留。重建前仍建议由运维对 Milvus / ES 做快照 |

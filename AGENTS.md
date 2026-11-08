@@ -27,7 +27,7 @@ MySQL 8.4 / Redis 7.4 / MinIO（9000 API + 9001 控制台）/ etcd 3.5 / ES 8.14
 
 > 注意：compose 不包含 `rabbitmq`，但 rag-worker 代码依赖 RabbitMQ（exchange `rag.ingest`）。本地跑 Worker 前需自备 RabbitMQ（5672/15672，guest/guest）。
 
-所有中间件地址默认指向 `192.168.1.200`，可用环境变量覆盖：`MIDDLEWARE_HOST`、`MYSQL_HOST/PORT/DB/USER/PASSWORD`、`MINIO_PORT`、`ES_PORT`、`MILVUS_PORT`、`ETCD_PORT` 等。
+所有中间件地址默认指向 `192.168.1.200`，可用环境变量覆盖：`MIDDLEWARE_HOST`、`MYSQL_HOST/PORT/DB/USER/PASSWORD`、`MINIO_PORT`、`ES_PORT`、`MILVUS_PORT`、`ETCD_PORT` 等。也可在根目录创建 `.env`（模板 `.env.example`，已被 gitignore），两个模块 `application.yml` 均通过 `spring.config.import: optional:file:./.env[.properties]`（及模块目录回退 `../.env`）读取；优先级 OS 环境变量 > .env > yml 默认值。
 
 ### 2.2 数据库初始化（Flyway 自动迁移）
 
@@ -116,40 +116,55 @@ cd knowledge-console && npm run build
 
 ### 4.1 文档上传到可检索
 
+```mermaid
+flowchart TD
+    subgraph Upload["1. 上传文档：POST /api/v1/knowledge-bases/{kbId}/documents (DocumentAppService.upload)"]
+        U1["QuotaService.checkStorage（存储配额）"] --> U2["MinIO 上传原文件 key: {tenantId}/{kbId}/{yyyy-MM-dd}/{uuid}.{ext}"]
+        U2 --> U3["document 落库 UPLOADED（待处理）+ 文件库登记；不自动投递，等待手动触发"]
+    end
+
+    subgraph Start["2. 开始/继续处理：POST /api/v1/documents/{id}/start (DocumentAppService.startProcessing)"]
+        S1{"已有切片？"}
+        S1 -- "是 (resume=true)" --> S2["document 置 EMBEDDING，Worker 跳过解析/切片断点续跑"]
+        S1 -- "否 (resume=false)" --> S3["document 置 PARSING，从头跑"]
+        S2 --> S4["pipeline_task(PARSE, PENDING) + IngestPublisher → exchange rag.ingest"]
+        S3 --> S4
+    end
+
+    subgraph Stop["停止处理：POST /api/v1/documents/{id}/stop (DocumentAppService.stopProcessing)"]
+        T1["stop_requested=1"] --> T2{"任务仍为 PENDING？"}
+        T2 -- "是" --> T3["直接 CANCELLED + 文档 STOPPED"]
+        T2 -- "否" --> T4["Worker 在阶段边界/向量化批次间检测（StoppedException，不重试）→ STOPPED"]
+    end
+
+    subgraph Worker["3. 异步消费：IngestConsumer（租户并发信号量 → RUNNING） / PipelineProcessor.parseFlow"]
+        W1["PARSING：ParseService.parse（产物写 MinIO derived/{version}/）"] --> W2["CHUNKING：ChunkStrategyRouter.route(kb.chunk_strategy, 文件名).plan(ctx) → persistPlans"]
+        W2 --> W3["EMBEDDING：EmbeddingClient.embed（OpenAI 兼容 /embeddings，每批 ≤10 条）"]
+        W3 --> W4["INDEXING：Milvus（先写后删，按 chunk_id upsert）+ ES（写物理索引，检索读别名 {base}_active）"]
+        W4 --> W5["READY 100"]
+    end
+
+    U3 --> S1
+    S4 --> W1
+    T4 -. "中断检测" .-> Worker
 ```
-POST /api/v1/knowledge-bases/{kbId}/documents (multipart)
-  DocumentAppService.upload
-    ├─ QuotaService.checkStorage（存储配额）
-    ├─ MinIO 上传原文件  key: {tenantId}/{kbId}/{yyyy-MM-dd}/{uuid}.{ext}
-    └─ document 落库 UPLOADED（待处理）+ 文件库登记；**不自动投递**，等待手动触发
-POST /api/v1/documents/{id}/start（开始/继续处理，DocumentAppService.startProcessing）
-    ├─ 已有切片 → resume=true：document 置 EMBEDDING，Worker 跳过解析/切片断点续跑
-    ├─ 无切片 → resume=false：document 置 PARSING，从头跑
-    └─ pipeline_task(PARSE, PENDING) + IngestPublisher → exchange rag.ingest
-POST /api/v1/documents/{id}/stop（停止，DocumentAppService.stopProcessing）
-    └─ stop_requested=1；任务仍 PENDING 则直接 CANCELLED + 文档 STOPPED，
-       否则 Worker 在阶段边界/向量化批次间检测（StoppedException，不重试）→ STOPPED
-         ↓
-IngestConsumer（租户并发信号量 → RUNNING）
-  PipelineProcessor.parseFlow
-    PARSING   ParseService.parse（产物写 MinIO derived/{version}/）
-    CHUNKING  ChunkStrategyRouter.route(kb.chunk_strategy, 文件名).plan(ctx) → persistPlans
-    EMBEDDING EmbeddingClient.embed（OpenAI 兼容 /embeddings，每批 ≤10 条）
-    INDEXING  Milvus（先删后写，schema 仅 [chunk_id, document_id]）
-              + ES（索引名 kb.es_index，BM25）
-    READY 100
-```
+
+索引命名（RAG-003 别名级双版本）：逻辑基名 `kb_{id}`（`knowledge_base.es_index` / `milvus_collection`），检索统一读别名 `kb_{id}_active`，物理索引为 `index_version<=0 ? kb_{id} : kb_{id}_v{version}`。`POST /api/v1/knowledge-bases/{id}/rebuild-index` 投递 `REBUILD_KB` 任务：Worker 写目标版本 → 逐文档校验 → 原子切换 ES/Milvus 别名 → 更新 `index_version` → 清理旧版本。重建期间新增/更新文档双写当前与目标版本；失败保持 `BUILDING`，重试耗尽由 `IngestConsumer` 复位 `IDLE`。`KnowledgeBaseEntity` 的 `index_version/index_state/index_target_version` 由 Flyway V27 引入。
+
 
 ### 4.2 问答检索（RetrievalService）
 
-```
-Milvus 向量召回 vectorTopN(20) + ES BM25 keywordTopN(20)
-  → 通道级降级（单路失败保留另一路，两路均失败才报错）
-  → RRF 融合(rrf-k=60) 取 candidateTopK(20)
-  → 可选 RERANK 模型二阶段精排（未配置/调用失败静默降级，沿用 RRF 序）取 topK(8)
-  → CHILD 命中扩展到 PARENT 内容并按 parent 去重
-  → Token Budget（max-context-tokens=12000）截断
-  → 组装 system prompt → LLM SSE
+```mermaid
+flowchart TD
+    Q["用户提问"] --> V["Milvus 向量召回 vectorTopN(20)"]
+    Q --> K["ES BM25 keywordTopN(20)"]
+    V --> D["通道级降级（单路失败保留另一路，两路均失败才报错）"]
+    K --> D
+    D --> R["RRF 融合(rrf-k=60) 取 candidateTopK(20)"]
+    R --> RK["可选 RERANK 模型二阶段精排（未配置/调用失败静默降级，沿用 RRF 序）取 topK(8)"]
+    RK --> P["CHILD 命中扩展到 PARENT 内容并按 parent 去重"]
+    P --> B["Token Budget（max-context-tokens=12000）截断"]
+    B --> L["组装 system prompt → LLM SSE"]
 ```
 
 SSE 事件类型（ChatOrchestrator）：`session` / `search_start` / `search_result`（含 citations）/ `message`（delta）/ `done`（usage）/ `error`。
@@ -162,7 +177,7 @@ SSE 事件类型（ChatOrchestrator）：`session` / `search_start` / `search_re
 
 `FIXED_SIZE / RECURSIVE / PARAGRAPH / SENTENCE / SEMANTIC / STRUCTURE / MARKDOWN / HTML / PDF_LAYOUT / TABLE / QA / PARENT_CHILD / SLIDING_WINDOW / CODE / AUTO`
 
-- AUTO 映射（当前代码）：`pdf→PDF_LAYOUT`；`java/py/go/js/jsx/ts/tsx→CODE`；其余→`PARENT_CHILD`
+- AUTO 映射（当前代码）：`pdf→PDF_LAYOUT`；`java/py/go/js/jsx/ts/tsx/sh→CODE`；其余→`PARENT_CHILD`
 - 知识库 `chunk_strategy` 字段显式指定，AUTO 为默认
 - 详细切片/多模态/语义边界规则见根文档 [RAG_DOCUMENT_PROCESSING_PIPELINE.md](RAG_DOCUMENT_PROCESSING_PIPELINE.md)（§1–§32），改 chunk 相关代码前必读
 - 估算 token 用 worker 的 `TokenCounter`（中文 1 字≈1 token，ASCII run≈len/4），**不要引入重量级 tokenizer**

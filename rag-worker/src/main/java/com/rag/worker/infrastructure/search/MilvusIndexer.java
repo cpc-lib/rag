@@ -13,6 +13,10 @@ import io.milvus.v2.service.collection.request.HasCollectionReq;
 import io.milvus.v2.service.collection.request.LoadCollectionReq;
 import io.milvus.v2.common.IndexParam;
 import io.milvus.v2.service.vector.request.DeleteReq;
+import io.milvus.v2.service.utility.request.AlterAliasReq;
+import io.milvus.v2.service.utility.request.CreateAliasReq;
+import io.milvus.v2.service.utility.request.DescribeAliasReq;
+import com.rag.api.infrastructure.search.IndexNames;
 import jakarta.annotation.PreDestroy;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
@@ -299,6 +303,41 @@ public class MilvusIndexer {
 
     public void dropCollection(String collection) {
         client().dropCollection(DropCollectionReq.builder().collectionName(collection).build());
+    }
+
+    // ---------- 别名级双版本（RAG-003） ----------
+
+    /** 读别名当前是否指向目标集合。 */
+    public boolean aliasPointsTo(String base, String target) {
+        return target.equals(aliasTarget(IndexNames.alias(base)));
+    }
+
+    /** 幂等确保读别名指向目标集合；已存在则原子改指。 */
+    public void switchAlias(String base, String target) {
+        String alias = IndexNames.alias(base);
+        try {
+            String current = aliasTarget(alias);
+            if (target.equals(current)) {
+                return;
+            }
+            if (current == null) {
+                client().createAlias(CreateAliasReq.builder().alias(alias).collectionName(target).build());
+            } else {
+                client().alterAlias(AlterAliasReq.builder().alias(alias).collectionName(target).build());
+            }
+            log.info("Milvus 读别名已切换 alias={} -> {}（原指向 {}）", alias, target, current);
+        } catch (Exception e) {
+            throw new IllegalStateException("Milvus 别名切换失败: " + e.getMessage(), e);
+        }
+    }
+
+    private String aliasTarget(String alias) {
+        try {
+            var resp = client().describeAlias(DescribeAliasReq.builder().alias(alias).build());
+            return resp == null ? null : resp.getCollectionName();
+        } catch (Exception e) {
+            return null;
+        }
     }
 
     @PreDestroy

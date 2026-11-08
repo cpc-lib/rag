@@ -12,7 +12,9 @@ import com.rag.api.infrastructure.persistence.mapper.ChunkMapper;
 import com.rag.api.infrastructure.persistence.mapper.DocumentMapper;
 import com.rag.api.infrastructure.persistence.mapper.KnowledgeBaseMapper;
 import com.rag.api.infrastructure.persistence.mapper.PipelineTaskMapper;
+import com.rag.api.infrastructure.mq.IngestPublisher;
 import com.rag.api.infrastructure.search.EsSearchClient;
+import com.rag.api.infrastructure.search.IndexNames;
 import com.rag.api.infrastructure.search.MilvusClientWrapper;
 import com.rag.api.infrastructure.storage.MinioStorage;
 import com.rag.api.interfaces.dto.Dtos;
@@ -43,6 +45,7 @@ public class KnowledgeBaseService {
     private final PromptTemplateService promptTemplateService;
     private final FileLibraryService fileLibraryService;
     private final PipelineTaskMapper pipelineTaskMapper;
+    private final IngestPublisher publisher;
 
     public KnowledgeBaseEntity create(Dtos.KbCreateReq req) {
         TenantContext.Session s = TenantContext.require();
@@ -62,6 +65,8 @@ public class KnowledgeBaseService {
         kbMapper.insert(kb);
         kb.setMilvusCollection("kb_" + kb.getId());
         kb.setEsIndex("kb_" + kb.getId());
+        kb.setIndexVersion(0);
+        kb.setIndexState("IDLE");
         kbMapper.updateById(kb);
         promptTemplateService.seedDefault(s.tenantId(), kb.getId());
         provisionSafely(kb);
@@ -133,21 +138,53 @@ public class KnowledgeBaseService {
         userManageService.onKbDeleted(kbId);
         minio.deletePrefix(kb.getTenantId() + "/" + kbId + "/");
         fileLibraryService.removeByDocuments(docIds);
-        try {
-            if (kb.getMilvusCollection() != null && milvus.hasCollection(kb.getMilvusCollection())) {
-                milvus.dropCollection(kb.getMilvusCollection());
-            }
-        } catch (Exception e) {
-            log.warn("Milvus 集合删除失败 kb={}: {}", kbId, e.getMessage());
-        }
-        try {
-            if (kb.getEsIndex() != null) {
-                es.deleteIndex(kb.getEsIndex());
-            }
-        } catch (Exception e) {
-            log.warn("ES 索引删除失败 kb={}: {}", kbId, e.getMessage());
-        }
+        // 别名级双版本：读别名 + 各版本物理索引/集合一并清理
+        milvus.deleteAcrossVersions(kb.getMilvusCollection(),
+                kb.getIndexVersion(), kb.getIndexTargetVersion());
+        es.deleteAcrossVersions(kb.getEsIndex(),
+                kb.getIndexVersion(), kb.getIndexTargetVersion());
         kbMapper.logicDeleteById(kbId);
+    }
+
+    /**
+     * 知识库级索引重建（RAG-003 别名级双版本）：
+     * Worker 写新版本物理索引，完成后原子切换读别名；重建期间旧版本持续可读。
+     */
+    public Dtos.KbRebuildView rebuildIndex(long kbId) {
+        KnowledgeBaseEntity kb = getOwned(kbId);
+        if (TenantContext.require().userType() != 1) {
+            throw BizException.forbidden("仅租户管理员可重建知识库索引");
+        }
+        // 未启用向量模型时快速失败，不投递必然失败的任务
+        modelService.requireEnabled(kb.getTenantId(), ModelService.EMBEDDING);
+
+        int targetVersion = (kb.getIndexVersion() == null ? 0 : kb.getIndexVersion()) + 1;
+        if (kbMapper.markIndexBuilding(kbId, targetVersion) != 1) {
+            throw BizException.badRequest("知识库索引重建已在进行中，请稍后重试");
+        }
+
+        PipelineTaskEntity task = new PipelineTaskEntity();
+        task.setTenantId(kb.getTenantId());
+        task.setKbId(kbId);
+        // 知识库级任务无关联文档，document_id 使用哨兵 0（该列 NOT NULL，无外键）
+        task.setDocumentId(0L);
+        task.setType("REBUILD_KB");
+        task.setStatus("PENDING");
+        task.setRetryCount(0);
+        try {
+            pipelineTaskMapper.insert(task);
+            var msg = new IngestPublisher.IngestMessage(task.getId(), "REBUILD_KB", kb.getTenantId(),
+                    kbId, 0L, null, false);
+            task.setPayload(objectMapper.writeValueAsString(msg));
+            pipelineTaskMapper.updateById(task);
+            publisher.publish(msg);
+        } catch (Exception e) {
+            // 投递失败必须复位，否则知识库永久卡在 BUILDING 无法再次发起
+            kbMapper.resetIndexState(kbId);
+            throw new IllegalStateException("索引重建任务投递失败: " + e.getMessage(), e);
+        }
+        log.info("知识库索引重建任务已投递 kb={} task={} targetVersion={}", kbId, task.getId(), targetVersion);
+        return new Dtos.KbRebuildView(task.getId(), targetVersion);
     }
 
     /** 基础设施准备失败不阻塞建库（可延后到首次入库）。 */
@@ -155,8 +192,13 @@ public class KnowledgeBaseService {
         try {
             var emb = modelService.findEnabled(kb.getTenantId(), ModelService.EMBEDDING);
             int dim = (emb == null || emb.getEmbeddingDim() == null) ? 1024 : emb.getEmbeddingDim();
-            milvus.ensureCollection(kb.getMilvusCollection(), dim);
-            es.ensureIndex(kb.getEsIndex());
+            String milvusPhysical = IndexNames.physical(kb.getMilvusCollection(), kb.getIndexVersion());
+            String esPhysical = IndexNames.physical(kb.getEsIndex(), kb.getIndexVersion());
+            milvus.ensureCollection(milvusPhysical, dim);
+            es.ensureIndex(esPhysical);
+            // 读别名指向当前版本，检索始终通过别名（未建立时读取会回退基名）
+            milvus.switchAlias(kb.getMilvusCollection(), milvusPhysical);
+            es.ensureAlias(kb.getEsIndex(), esPhysical);
         } catch (Exception e) {
             log.warn("知识库索引预创建失败（首次入库时重试）kb={}: {}", kb.getId(), e.getMessage());
         }

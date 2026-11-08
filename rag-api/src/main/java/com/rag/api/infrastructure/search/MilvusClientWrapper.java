@@ -18,12 +18,17 @@ import io.milvus.v2.service.vector.request.InsertReq;
 import io.milvus.v2.service.vector.request.SearchReq;
 import io.milvus.v2.service.vector.request.data.FloatVec;
 import io.milvus.v2.service.vector.response.SearchResp;
+import io.milvus.v2.service.utility.request.AlterAliasReq;
+import io.milvus.v2.service.utility.request.CreateAliasReq;
+import io.milvus.v2.service.utility.request.DescribeAliasReq;
+import io.milvus.v2.service.utility.request.DropAliasReq;
 import jakarta.annotation.PreDestroy;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 
 import java.util.ArrayList;
+import java.util.LinkedHashSet;
 import java.util.List;
 
 /**
@@ -265,6 +270,78 @@ public class MilvusClientWrapper {
 
     public void dropCollection(String collection) {
         client().dropCollection(DropCollectionReq.builder().collectionName(collection).build());
+    }
+
+    // ---------- 别名级双版本（RAG-003） ----------
+
+    /** 读名称：读别名存在则走别名（重建切换对检索透明），否则回退逻辑基名。 */
+    public String resolveReadName(String base) {
+        String alias = IndexNames.alias(base);
+        try {
+            var resp = client().describeAlias(DescribeAliasReq.builder().alias(alias).build());
+            if (resp != null && resp.getCollectionName() != null) {
+                return alias;
+            }
+        } catch (Exception e) {
+            // 别名不存在时 Milvus 抛异常，按未创建处理
+            log.debug("Milvus 读别名不存在或探测失败 base={}: {}", base, e.getMessage());
+        }
+        return base;
+    }
+
+    /** 幂等确保读别名指向目标集合；已存在则原子改指（重建完成时调用）。 */
+    public void switchAlias(String base, String target) {
+        String alias = IndexNames.alias(base);
+        try {
+            String current = aliasTarget(alias);
+            if (target.equals(current)) {
+                return;
+            }
+            if (current == null) {
+                client().createAlias(CreateAliasReq.builder().alias(alias).collectionName(target).build());
+            } else {
+                client().alterAlias(AlterAliasReq.builder().alias(alias).collectionName(target).build());
+            }
+            log.info("Milvus 读别名已切换 alias={} -> {}（原指向 {}）", alias, target, current);
+        } catch (Exception e) {
+            throw new BizException(ErrorCode.UPSTREAM, "Milvus 别名切换失败: " + e.getMessage());
+        }
+    }
+
+    /** 知识库级删除：读别名与全部版本物理集合一并清理。 */
+    public void deleteAcrossVersions(String base, Integer... versions) {
+        String alias = IndexNames.alias(base);
+        try {
+            if (aliasTarget(alias) != null) {
+                client().dropAlias(DropAliasReq.builder().alias(alias).build());
+            }
+        } catch (Exception e) {
+            log.warn("Milvus 别名删除失败 alias={}: {}", alias, e.getMessage());
+        }
+        LinkedHashSet<String> names = new LinkedHashSet<>();
+        names.add(base);
+        for (Integer version : versions) {
+            names.add(IndexNames.physical(base, version));
+        }
+        for (String name : names) {
+            try {
+                if (hasCollection(name)) {
+                    dropCollection(name);
+                }
+            } catch (Exception e) {
+                log.warn("Milvus 集合删除失败 collection={}: {}", name, e.getMessage());
+            }
+        }
+    }
+
+    /** 别名当前指向的集合名；别名不存在返回 null。 */
+    private String aliasTarget(String alias) {
+        try {
+            var resp = client().describeAlias(DescribeAliasReq.builder().alias(alias).build());
+            return resp == null ? null : resp.getCollectionName();
+        } catch (Exception e) {
+            return null;
+        }
     }
 
     @PreDestroy

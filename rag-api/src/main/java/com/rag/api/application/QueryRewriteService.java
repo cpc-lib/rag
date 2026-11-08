@@ -43,7 +43,7 @@ public class QueryRewriteService {
     private final LlmClient llmClient;
     private final ObjectMapper objectMapper;
 
-    @Value("${rag.query-rewrite.enabled:false}")
+    @Value("${rag.query-rewrite.enabled:true}")
     private boolean enabled;
     @Value("${rag.query-rewrite.max-queries:3}")
     private int maxQueries;

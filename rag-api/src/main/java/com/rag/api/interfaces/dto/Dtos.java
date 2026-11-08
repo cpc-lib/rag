@@ -127,6 +127,10 @@ public final class Dtos {
                                   boolean consistent, String esError, String milvusError) {
     }
 
+    /** 知识库索引重建（RAG-003 别名级双版本）：返回任务与目标版本。 */
+    public record KbRebuildView(long taskId, int targetVersion) {
+    }
+
     public record ToolConfigReq(Boolean weatherEnabled, Boolean tavilyEnabled, String tavilyApiKey) {
     }
 

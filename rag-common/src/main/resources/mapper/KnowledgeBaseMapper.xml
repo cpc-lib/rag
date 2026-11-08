@@ -1,9 +1,9 @@
-﻿<?xml version="1.0" encoding="UTF-8"?>
+﻿﻿<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
 <mapper namespace="com.rag.api.infrastructure.persistence.mapper.KnowledgeBaseMapper">
 
     <sql id="Base_Column_List">
-        id, tenant_id, name, description, milvus_collection, es_index, chunk_size, chunk_overlap, parent_chunk_size, child_chunk_size, child_overlap, chunk_strategy, separators, deleted
+        id, tenant_id, name, description, milvus_collection, es_index, chunk_size, chunk_overlap, parent_chunk_size, child_chunk_size, child_overlap, chunk_strategy, separators, index_version, index_state, index_target_version, deleted
     </sql>
 
     <select id="selectById" resultType="com.rag.api.infrastructure.persistence.entity.KnowledgeBaseEntity">
@@ -27,6 +27,9 @@
             <if test="childOverlap != null">child_overlap,</if>
             <if test="chunkStrategy != null">chunk_strategy,</if>
             <if test="separators != null">separators,</if>
+            <if test="indexVersion != null">index_version,</if>
+            <if test="indexState != null">index_state,</if>
+            <if test="indexTargetVersion != null">index_target_version,</if>
             <if test="deleted != null">deleted,</if>
         </trim>
         <trim prefix="VALUES (" suffix=")" suffixOverrides=",">
@@ -42,6 +45,9 @@
             <if test="childOverlap != null">#{childOverlap},</if>
             <if test="chunkStrategy != null">#{chunkStrategy},</if>
             <if test="separators != null">#{separators},</if>
+            <if test="indexVersion != null">#{indexVersion},</if>
+            <if test="indexState != null">#{indexState},</if>
+            <if test="indexTargetVersion != null">#{indexTargetVersion},</if>
             <if test="deleted != null">#{deleted},</if>
         </trim>
     </insert>
@@ -61,6 +67,9 @@
             <if test="childOverlap != null">child_overlap = #{childOverlap},</if>
             <if test="chunkStrategy != null">chunk_strategy = #{chunkStrategy},</if>
             <if test="separators != null">separators = #{separators},</if>
+            <if test="indexVersion != null">index_version = #{indexVersion},</if>
+            <if test="indexState != null">index_state = #{indexState},</if>
+            <if test="indexTargetVersion != null">index_target_version = #{indexTargetVersion},</if>
             <if test="deleted != null">deleted = #{deleted},</if>
         </set>
         WHERE deleted = 0 AND id = #{id}
@@ -82,6 +91,26 @@
 
     <update id="logicDeleteById">
         UPDATE knowledge_base SET deleted = 1 WHERE deleted = 0 AND id = #{id}
+    </update>
+
+    <!-- 条件置 BUILDING：并发发起重建时只有一个请求能成功（RAG-003） -->
+    <update id="markIndexBuilding">
+        UPDATE knowledge_base
+        SET index_state = 'BUILDING', index_target_version = #{targetVersion}
+        WHERE deleted = 0 AND id = #{id} AND index_state &lt;&gt; 'BUILDING'
+    </update>
+
+    <update id="finishIndexRebuild">
+        UPDATE knowledge_base
+        SET index_version = #{version}, index_state = 'IDLE', index_target_version = NULL
+        WHERE deleted = 0 AND id = #{id}
+    </update>
+
+    <!-- 重建失败重试耗尽/不可重试：复位状态，旧版本别名继续提供读取 -->
+    <update id="resetIndexState">
+        UPDATE knowledge_base
+        SET index_state = 'IDLE', index_target_version = NULL
+        WHERE deleted = 0 AND id = #{id}
     </update>
 
 </mapper>

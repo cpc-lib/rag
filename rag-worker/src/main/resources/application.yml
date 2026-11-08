@@ -1,6 +1,9 @@
 spring:
   application:
     name: rag-worker
+  # 从项目根目录（或模块目录）读取 .env 环境配置；文件不存在时忽略，OS 环境变量优先级更高
+  config:
+    import: "optional:file:./.env[.properties],optional:file:../.env[.properties]"
   main:
     web-application-type: none
   datasource:

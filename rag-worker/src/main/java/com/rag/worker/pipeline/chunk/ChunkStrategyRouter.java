@@ -51,7 +51,7 @@ public class ChunkStrategyRouter {
         ext = dot < 0 ? "" : fileName.substring(dot + 1).toLowerCase(Locale.ROOT);
         return switch (ext) {
             case "pdf" -> ChunkMode.PDF_LAYOUT;
-            case "java", "py", "go", "js", "jsx", "ts", "tsx" -> ChunkMode.CODE;
+            case "java", "py", "go", "js", "jsx", "ts", "tsx", "sh" -> ChunkMode.CODE;
             default -> ChunkMode.PARENT_CHILD;
         };
     }

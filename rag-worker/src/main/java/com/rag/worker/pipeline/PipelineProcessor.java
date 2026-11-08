@@ -11,6 +11,7 @@ import com.rag.api.infrastructure.persistence.mapper.ChunkMapper;
 import com.rag.api.infrastructure.persistence.mapper.DocumentMapper;
 import com.rag.api.infrastructure.persistence.mapper.KnowledgeBaseMapper;
 import com.rag.api.infrastructure.persistence.mapper.ModelMapper;
+import com.rag.api.infrastructure.search.IndexNames;
 import com.rag.worker.infrastructure.search.EsIndexer;
 import com.rag.worker.infrastructure.search.MilvusIndexer;
 import com.rag.worker.mq.RetryPublisher;
@@ -25,6 +26,7 @@ import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -63,21 +65,29 @@ public class PipelineProcessor {
         log.info("流水线开始 task={} doc={} tenant={} kb={} type={} retry={} resume={}",
                 msg.taskId(), msg.documentId(), msg.tenantId(), msg.kbId(), msg.type(),
                 task.getRetryCount(), msg.resume());
+        KnowledgeBaseEntity kb = kbMapper.selectById(msg.kbId());
+        if (kb == null) {
+            throw new IllegalStateException("知识库不存在: " + msg.kbId());
+        }
+        ModelEntity embedding = findEnabled(msg.tenantId(), EMBEDDING);
+        if (embedding == null) {
+            throw new NonRetryableException("租户未启用向量(EMBEDDING)模型，无法处理文档");
+        }
+        // 知识库级重建：无关联文档，走别名级双版本流程
+        if ("REBUILD_KB".equalsIgnoreCase(msg.type())) {
+            rebuildKbFlow(kb, embedding);
+            task.setStatus("SUCCESS");
+            log.info("知识库索引重建任务成功 task={} kb={} costMs={}",
+                    msg.taskId(), msg.kbId(), System.currentTimeMillis() - startedAt);
+            return;
+        }
         DocumentEntity doc = documentMapper.selectById(msg.documentId());
         if (doc == null) {
             throw new IllegalStateException("文档不存在: " + msg.documentId());
         }
         // 停止标记由 stopProcessing 单独维护：置 null 避免后续 updateById 回写旧值覆盖用户停止请求
         doc.setStopRequested(null);
-        KnowledgeBaseEntity kb = kbMapper.selectById(msg.kbId());
-        if (kb == null) {
-            throw new IllegalStateException("知识库不存在: " + msg.kbId());
-        }
         ModelEntity vision = findEnabled(msg.tenantId(), VISION);
-        ModelEntity embedding = findEnabled(msg.tenantId(), EMBEDDING);
-        if (embedding == null) {
-            throw new NonRetryableException("租户未启用向量(EMBEDDING)模型，无法处理文档");
-        }
         if ("PARSE".equalsIgnoreCase(msg.type())) {
             parseFlow(doc, kb, vision, embedding, msg.resume());
         } else {
@@ -160,6 +170,125 @@ public class PipelineProcessor {
     }
 
     /**
+     * 知识库级重建（RAG-003 别名级双版本）：
+     * 写入新版本物理索引 → 逐文档校验 → 原子切换读别名 → 更新版本号 → 清理旧版本。
+     *
+     * <p>失败时保持 BUILDING，读别名仍指向旧版本，重试从头重建目标版本（开始即清空，幂等）。
+     */
+    private void rebuildKbFlow(KnowledgeBaseEntity kb, ModelEntity embedding) {
+        if (embedding.getModel() == null) {
+            throw new NonRetryableException("启用的向量(EMBEDDING)模型缺少模型名称");
+        }
+        int current = kb.getIndexVersion() == null ? 0 : kb.getIndexVersion();
+        int target = kb.getIndexTargetVersion() != null ? kb.getIndexTargetVersion() : current + 1;
+        String esBase = kb.getEsIndex();
+        String milvusBase = kb.getMilvusCollection();
+        String esActive = IndexNames.physical(esBase, current);
+        String milvusActive = IndexNames.physical(milvusBase, current);
+        String esTarget = IndexNames.physical(esBase, target);
+        String milvusTarget = IndexNames.physical(milvusBase, target);
+
+        kb.setIndexState("BUILDING");
+        kb.setIndexTargetVersion(target);
+        kbMapper.updateById(kb);
+        log.info("知识库索引重建开始 kb={} current={} target={} es={} milvus={}",
+                kb.getId(), current, target, esTarget, milvusTarget);
+
+        // 上次重试可能中断在别名切换阶段：先把两侧别名归位到当前可读版本，再清空目标版本
+        try {
+            if (!esIndexer.aliasPointsTo(esBase, esActive) && esIndexer.hasIndex(esActive)) {
+                esIndexer.switchAlias(esBase, esActive);
+            }
+            if (!milvusIndexer.aliasPointsTo(milvusBase, milvusActive)
+                    && milvusIndexer.hasCollection(milvusActive)) {
+                milvusIndexer.switchAlias(milvusBase, milvusActive);
+            }
+        } catch (Exception e) {
+            log.warn("重建前置别名归位失败（继续重建）kb={}: {}", kb.getId(), e.getMessage());
+        }
+        if (!esTarget.equals(esActive)) {
+            esIndexer.deleteIndex(esTarget);
+        }
+        if (!milvusTarget.equals(milvusActive)) {
+            try {
+                if (milvusIndexer.hasCollection(milvusTarget)) {
+                    milvusIndexer.dropCollection(milvusTarget);
+                }
+            } catch (Exception e) {
+                throw new IllegalStateException("清理残留目标集合失败: " + milvusTarget
+                        + "（" + e.getMessage() + "）", e);
+            }
+        }
+
+        long startedAt = System.currentTimeMillis();
+        List<Long> docIds = documentMapper.selectIdsByKbId(kb.getId());
+        int docs = 0;
+        int totalChunks = 0;
+        int dim = 0;
+        for (Long docId : docIds) {
+            DocumentEntity doc = documentMapper.selectById(docId);
+            if (doc == null) {
+                continue;
+            }
+            List<ChunkEntity> chunks = chunkMapper.selectChildrenByDocumentId(docId);
+            if (chunks.isEmpty()) {
+                continue;
+            }
+            List<String> contents = chunks.stream().map(c -> embeddingText(doc, c)).toList();
+            List<float[]> vectors = embeddingClient.embed(embedding.getBaseUrl(), embedding.getApiKey(),
+                    embedding.getModel(), contents, done -> { });
+            if (vectors.size() != chunks.size()) {
+                throw new IllegalStateException("向量数量与切片不一致 doc=" + docId
+                        + " expected=" + chunks.size() + " actual=" + vectors.size());
+            }
+            dim = embedding.getEmbeddingDim() == null ? vectors.get(0).length : embedding.getEmbeddingDim();
+            milvusIndexer.ensureCollection(milvusTarget, dim);
+            milvusIndexer.upsert(milvusTarget,
+                    chunks.stream().map(c -> new long[]{c.getId(), doc.getId()}).toList(), vectors);
+            esIndexer.ensureIndex(esTarget);
+            esIndexer.indexDocs(esTarget, chunks.stream()
+                    .map(c -> new EsIndexer.EsDoc(c.getId(), doc.getId(), kb.getId(),
+                            doc.getFileName(), c.getPage() == null ? 0 : c.getPage(),
+                            embeddingText(doc, c)))
+                    .toList());
+            List<String> mismatches = verifyCounts(List.of(esTarget), List.of(milvusTarget),
+                    doc.getId(), chunks.size());
+            if (!mismatches.isEmpty()) {
+                throw new IllegalStateException("重建索引写入不一致 doc=" + doc.getId() + " 偏差=" + mismatches);
+            }
+            docs++;
+            totalChunks += chunks.size();
+        }
+        // 空知识库也要创建目标索引，保证别名切换后读侧不落空
+        if (dim == 0) {
+            dim = embedding.getEmbeddingDim() == null ? 1024 : embedding.getEmbeddingDim();
+            milvusIndexer.ensureCollection(milvusTarget, dim);
+            esIndexer.ensureIndex(esTarget);
+        }
+
+        // 原子切换：两侧别名都指向目标版本后才更新版本号，读侧无感
+        esIndexer.switchAlias(esBase, esTarget);
+        milvusIndexer.switchAlias(milvusBase, milvusTarget);
+        kbMapper.finishIndexRebuild(kb.getId(), target);
+        log.info("知识库索引重建完成 kb={} version={} docs={} chunks={} costMs={}",
+                kb.getId(), target, docs, totalChunks, System.currentTimeMillis() - startedAt);
+
+        // 旧版本清理尽力而为：失败不影响读取（别名已切换）
+        if (!esActive.equals(esTarget)) {
+            esIndexer.deleteIndex(esActive);
+        }
+        if (!milvusActive.equals(milvusTarget)) {
+            try {
+                if (milvusIndexer.hasCollection(milvusActive)) {
+                    milvusIndexer.dropCollection(milvusActive);
+                }
+            } catch (Exception e) {
+                log.warn("旧版本 Milvus 集合清理失败 collection={}: {}", milvusActive, e.getMessage());
+            }
+        }
+    }
+
+    /**
      * 全量重嵌 + 双写索引（先写新后删旧）。
      * 写入新版本期间旧索引保持可读；双路写入成功后才按 chunk_id 清理陈旧条目，
      * 任一步失败由 MQ 重试幂等收敛，避免"先删后写"中途失败导致知识不可用。
@@ -177,13 +306,17 @@ public class PipelineProcessor {
         if (chunks.isEmpty()) {
             // 切片被清空（如一键清空）：清理该文档在 ES/Milvus 的旧索引
             log.warn("文档无有效切片，清理旧索引 doc={}", doc.getId());
-            esIndexer.ensureIndex(kb.getEsIndex());
-            esIndexer.deleteByDocument(kb.getEsIndex(), doc.getId());
-            try {
-                milvusIndexer.deleteByDocument(kb.getMilvusCollection(), doc.getId());
-            } catch (Exception e) {
-                log.warn("Milvus 旧向量清理失败（集合可能不存在）doc={} err={}",
-                        doc.getId(), e.getMessage());
+            for (String esName : writeNames(kb.getEsIndex(), kb)) {
+                esIndexer.ensureIndex(esName);
+                esIndexer.deleteByDocument(esName, doc.getId());
+            }
+            for (String milvusName : writeNames(kb.getMilvusCollection(), kb)) {
+                try {
+                    milvusIndexer.deleteByDocument(milvusName, doc.getId());
+                } catch (Exception e) {
+                    log.warn("Milvus 旧向量清理失败（集合可能不存在）doc={} collection={} err={}",
+                            doc.getId(), milvusName, e.getMessage());
+                }
             }
             return;
         }
@@ -217,44 +350,92 @@ public class PipelineProcessor {
         long indexStart = System.currentTimeMillis();
         int dim = embedding.getEmbeddingDim() == null ? vectors.get(0).length : embedding.getEmbeddingDim();
         List<Long> keepIds = chunks.stream().map(ChunkEntity::getId).toList();
-        milvusIndexer.ensureCollection(kb.getMilvusCollection(), dim);
+        List<String> milvusNames = writeNames(kb.getMilvusCollection(), kb);
+        List<String> esNames = writeNames(kb.getEsIndex(), kb);
         List<long[]> ids = chunks.stream().map(c -> new long[]{c.getId(), doc.getId()}).toList();
-        // 先写新版本（upsert 按 chunk_id 覆盖），旧向量在新版本写完前一直可读
-        milvusIndexer.upsert(kb.getMilvusCollection(), ids, vectors);
+        // 先写新版本（upsert 按 chunk_id 覆盖），旧向量在新版本写完前一直可读；
+        // 知识库重建期间同时写目标版本，避免重建期间新增/更新的文档在切换后丢失
+        for (String milvusName : milvusNames) {
+            milvusIndexer.ensureCollection(milvusName, dim);
+            milvusIndexer.upsert(milvusName, ids, vectors);
+        }
         setStage(doc, "INDEXING", idxStart + (100 - idxStart) / 2);
 
-        esIndexer.ensureIndex(kb.getEsIndex());
-        esIndexer.indexDocs(kb.getEsIndex(), chunks.stream()
-                .map(c -> new EsIndexer.EsDoc(c.getId(), doc.getId(), kb.getId(),
-                        doc.getFileName(), c.getPage() == null ? 0 : c.getPage(),
-                        embeddingText(doc, c)))
-                .toList());
+        for (String esName : esNames) {
+            esIndexer.ensureIndex(esName);
+            esIndexer.indexDocs(esName, chunks.stream()
+                    .map(c -> new EsIndexer.EsDoc(c.getId(), doc.getId(), kb.getId(),
+                            doc.getFileName(), c.getPage() == null ? 0 : c.getPage(),
+                            embeddingText(doc, c)))
+                    .toList());
+        }
         setStage(doc, "INDEXING", 95);
 
         // 双路新索引均已写成功，再清理旧版本残留；失败由 MQ 重试幂等收敛
-        milvusIndexer.deleteStale(kb.getMilvusCollection(), doc.getId(), keepIds);
-        esIndexer.deleteStale(kb.getEsIndex(), doc.getId(), keepIds);
+        for (String milvusName : milvusNames) {
+            milvusIndexer.deleteStale(milvusName, doc.getId(), keepIds);
+        }
+        for (String esName : esNames) {
+            esIndexer.deleteStale(esName, doc.getId(), keepIds);
+        }
 
         // 双写一致性校验：两侧数量必须等于预期 child 数，否则不允许进入 READY
-        long esCount = esIndexer.countByDocument(kb.getEsIndex(), doc.getId());
-        long milvusCount = milvusIndexer.countByDocument(kb.getMilvusCollection(), doc.getId(), chunks.size());
+        List<String> mismatches = verifyCounts(esNames, milvusNames, doc.getId(), chunks.size());
         // Milvus 删除异步生效，对账时陈旧行可能仍可见；有限次重清并重查，收敛不了才判失败
-        for (int recheck = 0; recheck < 5 && milvusCount != chunks.size(); recheck++) {
+        for (int recheck = 0; recheck < 5 && !mismatches.isEmpty(); recheck++) {
             try {
                 Thread.sleep(2000);
             } catch (InterruptedException ie) {
                 Thread.currentThread().interrupt();
                 break;
             }
-            milvusIndexer.deleteStale(kb.getMilvusCollection(), doc.getId(), keepIds);
-            milvusCount = milvusIndexer.countByDocument(kb.getMilvusCollection(), doc.getId(), chunks.size());
+            for (String milvusName : milvusNames) {
+                milvusIndexer.deleteStale(milvusName, doc.getId(), keepIds);
+            }
+            mismatches = verifyCounts(esNames, milvusNames, doc.getId(), chunks.size());
         }
-        if (esCount != chunks.size() || milvusCount != chunks.size()) {
+        if (!mismatches.isEmpty()) {
             throw new IllegalStateException("双索引写入数量不一致 doc=" + doc.getId()
-                    + " expected=" + chunks.size() + " es=" + esCount + " milvus=" + milvusCount);
+                    + " expected=" + chunks.size() + " 偏差=" + mismatches);
         }
         log.info("阶段完成 doc={} stage=INDEXING costMs={} chunks={} es={} milvus={}",
-                doc.getId(), System.currentTimeMillis() - indexStart, chunks.size(), esCount, milvusCount);
+                doc.getId(), System.currentTimeMillis() - indexStart, chunks.size(), esNames, milvusNames);
+    }
+
+    /**
+     * 写入目标：当前可读物理版本；知识库重建期间额外写入目标版本。
+     * 双写保证重建期间新增/更新的文档在别名切换后仍可见，重建失败时旧版本数据也完整。
+     */
+    private List<String> writeNames(String base, KnowledgeBaseEntity kb) {
+        List<String> names = new ArrayList<>();
+        int current = kb.getIndexVersion() == null ? 0 : kb.getIndexVersion();
+        names.add(IndexNames.physical(base, current));
+        if ("BUILDING".equals(kb.getIndexState()) && kb.getIndexTargetVersion() != null) {
+            String target = IndexNames.physical(base, kb.getIndexTargetVersion());
+            if (!names.contains(target)) {
+                names.add(target);
+            }
+        }
+        return names;
+    }
+
+    /** 返回与预期数量不一致的索引明细，空列表表示双路一致。 */
+    private List<String> verifyCounts(List<String> esNames, List<String> milvusNames,
+                                      long documentId, int expected) {
+        List<String> mismatches = new ArrayList<>();
+        for (String name : esNames) {
+            long count = esIndexer.countByDocument(name, documentId);
+            if (count != expected) {
+                mismatches.add("es:" + name + "=" + count);
+            }
+        }
+        for (String name : milvusNames) {
+            long count = milvusIndexer.countByDocument(name, documentId, expected);
+            if (count != expected) {
+                mismatches.add("milvus:" + name + "=" + count);
+            }
+        }
+        return mismatches;
     }
 
     /** 页索引：同一页码优先保留带块区间（spans）的解析页，供切片元数据定位使用。 */
