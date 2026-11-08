@@ -2,6 +2,7 @@ package com.rag.worker.infrastructure.search;
 
 import co.elastic.clients.elasticsearch.ElasticsearchClient;
 import co.elastic.clients.elasticsearch._types.FieldValue;
+import co.elastic.clients.elasticsearch._types.Refresh;
 import co.elastic.clients.elasticsearch.core.BulkRequest;
 import co.elastic.clients.elasticsearch.core.BulkResponse;
 import lombok.RequiredArgsConstructor;
@@ -60,7 +61,8 @@ public class EsIndexer {
             return;
         }
         try {
-            BulkRequest.Builder bulk = new BulkRequest.Builder().index(index);
+            // refresh=wait_for：bulk 返回时文档即可被检索/count 到，避免紧随其后的双写一致性校验误读为 0
+            BulkRequest.Builder bulk = new BulkRequest.Builder().index(index).refresh(Refresh.WaitFor);
             for (EsDoc doc : docs) {
                 bulk.operations(op -> op.index(idx -> idx
                         .index(index)
@@ -101,7 +103,7 @@ public class EsIndexer {
             List<FieldValue> keep = keepIds.stream()
                     .map(id -> FieldValue.of(String.valueOf(id)))
                     .toList();
-            var resp = client.deleteByQuery(d -> d.index(index).query(q -> q.bool(b -> b
+            var resp = client.deleteByQuery(d -> d.index(index).refresh(true).query(q -> q.bool(b -> b
                     .filter(f -> f.term(t -> t.field("documentId").value(String.valueOf(documentId))))
                     .mustNot(mn -> mn.terms(t -> t.field("chunkId").terms(v -> v.value(keep)))))));
             log.info("ES 陈旧索引清理完成 index={} doc={} 删除={}条", index, documentId, resp.deleted());
@@ -117,7 +119,7 @@ public class EsIndexer {
      */
     public void deleteByDocument(String index, long documentId) {
         try {
-            client.deleteByQuery(d -> d.index(index)
+            client.deleteByQuery(d -> d.index(index).refresh(true)
                     .query(q -> q.term(t -> t.field("documentId").value(String.valueOf(documentId)))));
             log.info("ES 删除文档旧索引完成 index={} doc={}", index, documentId);
         } catch (Exception e) {

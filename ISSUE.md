@@ -4,7 +4,7 @@
 > **审查分支**：`main`  
 > **审查基准提交**：[`44525dce952ca37a22230400881f47a9b8ff9b06`](https://github.com/cpc-lib/rag/commit/44525dce952ca37a22230400881f47a9b8ff9b06)（提交时间：2026-10-11 UTC）  
 > **整理日期**：2026-11-07  
-> **性质**：静态源码审查 / 待办 ISSUE；**未执行部署、端到端测试或生产压测**  
+> **性质**：静态源码审查 / 待办 ISSUE；**未执行生产压测**（2026-11-08 已完成本地端到端冒烟，见文末「冒烟验证记录」）  
 > **状态**：P0（RAG-001 ~ RAG-005）基本修复，RAG-003 采用「先写后删」（别名级双版本并行读取列为后续增强），RAG-005 少量增强项待办；P1 已完成 RAG-006、RAG-008、RAG-010、RAG-011、RAG-012，RAG-007/009 部分完成；P2 RAG-013/014/015 部分完成（Query 改写、Multi-Query、中文分词、指标与工具/KB 统一编排已实现，真实模型评测与端到端验收待补）；复选框反映当前进度
 
 ## 0. 审查结论
@@ -404,3 +404,22 @@ flowchart TD
 ---
 
 **建议最终目标**：保证文档可可靠入库、向量与全文索引一致、检索可降级、精排真实生效、答案来源可追溯，并以自动化回归与可观测指标量化这些能力。
+
+---
+
+## 冒烟验证记录（2026-11-08，本地全套中间件 + 阿里云模型）
+
+环境：MySQL/Redis/MinIO/etcd/ES/Milvus（docker-compose）+ RabbitMQ（rabbitmq-env），rag-api + rag-worker + 租户 `705879`（CHAT qwen-plus / EMBEDDING text-embedding-v4 / RERANK qwen3-rerank 已启用）。
+
+| 项 | 结果 |
+|---|---|
+| 上传 → 解析 → 切片 → Embedding → 双写 → READY 100 | 通过（`smoke-rag.md`，9 个 chunk / 5 个可索引 child） |
+| 双索引一致性（RAG-003） | 通过：`GET /documents/11/index-status` 返回 `consistent=true`（DB 5 = ES 5 = Milvus 5） |
+| **冒烟发现的新缺陷** | ES bulk 写入后**未 refresh**，紧随的一致性校验读到 `es=0` 误抛"双索引数量不一致"进入重试。已修复：`EsIndexer` bulk 改 `refresh=wait_for`、`deleteByQuery` 加 `refresh(true)`，修复后一次通过 |
+| 重建期可用性（先写后删） | 通过：reparse 进行中 ES 旧 chunk 保持可查（count=5）；完成后新 chunk ID 全量替换、无陈旧残留 |
+| SSE 问答 + Citation | 通过：`search_result` 带 4 条引用（章节路径/表格类型/预签名 URL），答案带 `[1]` 标注，`degraded=false`，done 含 token 用量 |
+| Rerank 二阶段精排（RAG-001） | 通过：`/actuator/metrics/rag.rerank.outcome` 计数生效，qwen3-rerank 参与排序 |
+| ES 精确匹配（RAG-014） | 通过：错误码 `SB-E1001` 问题 top-1 命中「故障处理」章节（`content.exact` 加权生效） |
+| Agentic 工具编排（RAG-015） | 通过：天气工具 + `kb_search` 同一轮回答组合问题，引用累积推送 |
+| 检索可观测性 | 通过：`rag.retrieval.duration` 等 Micrometer 指标经 `/actuator/metrics` 输出 |
+| Query 改写（RAG-013） | 未实测：`rag.query-rewrite.enabled` 默认 false，需重启 API 显式开启；逻辑已由单测覆盖 |
