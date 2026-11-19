@@ -9,7 +9,7 @@ import com.rag.api.infrastructure.persistence.entity.VideoPlaybackHistoryEntity;
 import com.rag.api.infrastructure.persistence.mapper.LibraryFileMapper;
 import com.rag.api.infrastructure.persistence.mapper.SubtitleCueBackupMapper;
 import com.rag.api.infrastructure.persistence.mapper.VideoPlaybackHistoryMapper;
-import com.rag.api.infrastructure.storage.MinioStorage;
+import com.rag.api.infrastructure.storage.ObjectStorage;
 import com.rag.api.interfaces.dto.Dtos;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -23,7 +23,7 @@ import java.util.Map;
 import java.util.stream.Collectors;
 
 /**
- * 文件库：字幕保存等操作产出的文件归档到 MinIO，元数据落 library_file。
+ * 文件库：字幕保存等操作产出的文件归档到对象存储，元数据落 library_file。
  * 每次保存新增一条归档（版本化），保留历史版本不覆盖。
  */
 @Service
@@ -50,7 +50,7 @@ public class FileLibraryService {
     private final LibraryFileMapper libraryFileMapper;
     private final SubtitleCueBackupMapper cueBackupMapper;
     private final VideoPlaybackHistoryMapper playbackHistoryMapper;
-    private final MinioStorage minioStorage;
+    private final ObjectStorage minioStorage;
     private final UserManageService userManageService;
     private final MediaTranscodeService mediaTranscodeService;
     private final Sha256Publisher sha256Publisher;

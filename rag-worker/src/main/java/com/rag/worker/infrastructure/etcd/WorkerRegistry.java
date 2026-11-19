@@ -26,7 +26,7 @@ public class WorkerRegistry {
     private volatile Client client;
     private volatile io.etcd.jetcd.support.CloseableClient keepAlive;
 
-    public WorkerRegistry(@Value("${rag.etcd.endpoints:http://192.168.1.200:2379}") String endpoints,
+    public WorkerRegistry(@Value("${rag.etcd.endpoints:http://127.0.0.1:2379}") String endpoints,
                           @Value("${rag.etcd.enabled:true}") boolean enabled) {
         this.endpoints = endpoints;
         this.enabled = enabled;

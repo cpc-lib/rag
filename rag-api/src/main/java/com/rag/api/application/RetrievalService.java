@@ -14,7 +14,7 @@ import com.rag.api.infrastructure.persistence.mapper.DocumentMapper;
 import com.rag.api.infrastructure.persistence.mapper.KnowledgeBaseMapper;
 import com.rag.api.infrastructure.search.EsSearchClient;
 import com.rag.api.infrastructure.search.MilvusClientWrapper;
-import com.rag.api.infrastructure.storage.MinioStorage;
+import com.rag.api.infrastructure.storage.ObjectStorage;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
@@ -31,7 +31,7 @@ import java.util.function.Function;
 import java.util.stream.Collectors;
 
 /**
- * 混合检索（spec 4.2）：Milvus 余弦 + ES BM25 双路召回 → RRF(k) 融合 → Top-K。
+ * 混合检索（spec 4.2）：Milvus 余弦 + ES BM25 双路召回 → RRF(k) 融合 → Top-K → 可选 Rerank 重排。
  */
 @Slf4j
 @Service
@@ -40,12 +40,15 @@ public class RetrievalService {
 
     public record Citation(int seq, long chunkId, Long parentChunkId, long documentId,
                            String documentName, int page, String sectionPath, String contentType,
-                           String previewUrl, String content) {
+                           String previewUrl, String content, String imageUrl) {
         public String material() {
             StringBuilder sb = new StringBuilder("[").append(seq).append("] （")
                     .append(documentName).append(" 第").append(page + 1).append("页");
             if (sectionPath != null && !sectionPath.isBlank()) {
                 sb.append(" · 章节：").append(sectionPath);
+            }
+            if (imageUrl != null) {
+                sb.append(" · 图片");
             }
             return sb.append("）\n").append(content).toString();
         }
@@ -61,7 +64,7 @@ public class RetrievalService {
     private final LlmClient llmClient;
     private final MilvusClientWrapper milvus;
     private final EsSearchClient es;
-    private final MinioStorage minio;
+    private final ObjectStorage minio;
     private final EtcdService etcdService;
 
     public RetrievalResult retrieve(TenantContext.Session session, long kbId, String question) {
@@ -125,11 +128,16 @@ public class RetrievalService {
         log.info("RRF 融合 kb={} rrfK={} 向量={}条 关键词={}条 双路重叠={}条 融合去重={}条 入选topK={}条 ids={}",
                 kbId, rc.rrfK, vectorHits.size(), keywordIds.size(), overlap, rrf.size(), topIds.size(), topIds);
 
-        // 4. child → parent 扩展：同 parent 去重（保留最高排名），parent 内容作为引用上下文
+        // 4. 拉取候选切片（Rerank 需要正文，parent 扩展同样需要）
         Map<Long, ChunkEntity> chunks = topIds.isEmpty() ? Map.of()
                 : chunkMapper.selectByIds(topIds).stream()
                 .filter(c -> !"DELETED".equals(c.getStatus()))
                 .collect(Collectors.toMap(ChunkEntity::getId, Function.identity(), (a, b) -> a));
+
+        // 5. 可选 Rerank：RRF 之后、parent 扩展之前重排（未配置/失败静默降级，沿用 RRF 序）
+        List<Long> orderedIds = rerank(kb, question, topIds, chunks);
+
+        // 6. child → parent 扩展：同 parent 去重（保留最高排名），parent 内容作为引用上下文
         Set<Long> needLoad = new HashSet<>(chunks.keySet());
         chunks.values().forEach(c -> {
             if (c.getParentChunkId() != null) {
@@ -142,7 +150,7 @@ public class RetrievalService {
 
         Set<Long> docIds = new HashSet<>();
         Set<Long> emittedUnits = new HashSet<>();
-        for (Long id : topIds) {
+        for (Long id : orderedIds) {
             ChunkEntity child = chunks.get(id);
             if (child == null) {
                 continue;
@@ -162,7 +170,7 @@ public class RetrievalService {
         int seq = 1;
         int usedTokens = 0;
         Set<Long> citedUnits = new HashSet<>();
-        for (Long id : topIds) {
+        for (Long id : orderedIds) {
             if (citations.size() >= rc.finalContextTopK || usedTokens >= rc.maxContextTokens) {
                 break;
             }
@@ -193,12 +201,12 @@ public class RetrievalService {
                     doc == null ? "" : doc.getFileName(),
                     child.getPage() == null ? 0 : child.getPage(), sectionPath, child.getContentType(),
                     doc == null ? null : minio.presignUrl(doc.getObjectKey()),
-                    unit.getContent());
+                    unit.getContent(), imageUrl(child));
             int remaining = rc.maxContextTokens - usedTokens;
             if (countTokens(citation.material()) > remaining && unit != child) {
                 citation = new Citation(seq, id, null, child.getDocumentId(), citation.documentName(),
                         citation.page(), sectionPath, child.getContentType(), citation.previewUrl(),
-                        child.getContent());
+                        child.getContent(), citation.imageUrl());
                 unitKey = child.getId();
             }
             if (countTokens(citation.material()) > remaining) {
@@ -210,7 +218,7 @@ public class RetrievalService {
                 String bounded = truncateToTokens(citation.content(), contentBudget);
                 citation = new Citation(seq, id, citation.parentChunkId(), citation.documentId(),
                         citation.documentName(), citation.page(), citation.sectionPath(),
-                        citation.contentType(), citation.previewUrl(), bounded);
+                        citation.contentType(), citation.previewUrl(), bounded, citation.imageUrl());
             }
             int citationTokens = countTokens(citation.material());
             if (citation.content().isBlank() || citationTokens > remaining) {
@@ -222,6 +230,65 @@ public class RetrievalService {
             seq++;
         }
         return new RetrievalResult(citations, bestScore);
+    }
+
+    /** IMAGE 切片返回稳定的图片访问路径（走接口鉴权，避免预签名 URL 过期导致历史会话缺图）。 */
+    private static String imageUrl(ChunkEntity chunk) {
+        if (!"IMAGE".equals(chunk.getContentType())
+                || chunk.getImageKey() == null || chunk.getImageKey().isBlank()) {
+            return null;
+        }
+        return "/api/v1/chunks/" + chunk.getId() + "/image";
+    }
+
+    /**
+     * 可选 Rerank：取租户启用的 RERANK 模型，对 RRF 候选按相关度重排。
+     * 未配置模型、配置不完整或上游调用失败时静默降级，沿用 RRF 顺序。
+     */
+    private List<Long> rerank(KnowledgeBaseEntity kb, String question, List<Long> ids,
+                              Map<Long, ChunkEntity> chunks) {
+        if (ids.size() < 2) {
+            return ids;
+        }
+        ModelEntity model = modelService.findEnabled(kb.getTenantId(), ModelService.RERANK);
+        if (model == null) {
+            return ids;
+        }
+        if (model.getBaseUrl() == null || model.getBaseUrl().isBlank()
+                || model.getModel() == null || model.getModel().isBlank()) {
+            log.warn("Rerank 模型配置不完整（缺少 Base URL 或模型名称），跳过重排 modelId={}", model.getId());
+            return ids;
+        }
+        List<Long> candidates = ids.stream()
+                .filter(id -> {
+                    ChunkEntity c = chunks.get(id);
+                    return c != null && c.getContent() != null && !c.getContent().isBlank();
+                })
+                .toList();
+        if (candidates.size() < 2) {
+            return ids;
+        }
+        List<String> documents = candidates.stream().map(id -> chunks.get(id).getContent()).toList();
+        long start = System.currentTimeMillis();
+        try {
+            List<Integer> order = llmClient.rerank(model.getBaseUrl(), model.getApiKey(),
+                    model.getModel(), question, documents);
+            List<Long> reranked = new ArrayList<>(ids.size());
+            for (int index : order) {
+                reranked.add(candidates.get(index));
+            }
+            // 无正文候选取不到分数，保持原位置追加，避免丢失
+            Set<Long> rerankedIds = new HashSet<>(reranked);
+            ids.stream().filter(id -> !rerankedIds.contains(id)).forEach(reranked::add);
+            log.info("Rerank 重排 kb={} model={} 候选={}条 耗时={}ms 新序={}",
+                    kb.getId(), model.getModel(), candidates.size(),
+                    System.currentTimeMillis() - start, reranked);
+            return reranked;
+        } catch (Exception e) {
+            log.warn("Rerank 调用失败，沿用 RRF 顺序 kb={} model={} 耗时={}ms: {}",
+                    kb.getId(), model.getModel(), System.currentTimeMillis() - start, e.getMessage());
+            return ids;
+        }
     }
 
     /** 与 Worker 的切片计数保持同一近似口径。 */

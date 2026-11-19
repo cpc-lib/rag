@@ -26,12 +26,13 @@
         <milvus.version>2.4.3</milvus.version>
         <jetcd.version>0.7.7</jetcd.version>
         <jjwt.version>0.12.6</jjwt.version>
-        <minio.version>8.5.12</minio.version>
         <awssdk.version>2.25.70</awssdk.version>
         <!-- 统一 grpc 版本，避免 jetcd 与 milvus-sdk 传递依赖冲突 -->
         <grpc.version>1.64.0</grpc.version>
         <dashscope.version>2.22.30</dashscope.version>
         <flyway.version>10.21.0</flyway.version>
+        <!-- 老版 .doc（Word 97-2003 二进制）转 HTML 预览 -->
+        <poi.version>5.2.5</poi.version>
     </properties>
 
     <dependencyManagement>
@@ -56,6 +57,12 @@
         <dependency>
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-web</artifactId>
+        </dependency>
+        <!-- .doc 在线预览：HWPF 解析 + WordToHtmlConverter -->
+        <dependency>
+            <groupId>org.apache.poi</groupId>
+            <artifactId>poi-scratchpad</artifactId>
+            <version>${poi.version}</version>
         </dependency>
         <dependency>
             <groupId>org.springframework.boot</groupId>
@@ -104,12 +111,7 @@
             <artifactId>mysql-connector-j</artifactId>
             <scope>runtime</scope>
         </dependency>
-        <dependency>
-            <groupId>io.minio</groupId>
-            <artifactId>minio</artifactId>
-            <version>${minio.version}</version>
-        </dependency>
-        <!-- MinIO 原生 Multipart（S3 兼容接口）：大文件分片上传；minio-java 未暴露分片 API，故用 AWS SDK v2 -->
+        <!-- 对象存储统一走 S3 协议（RustFS/MinIO 等 S3 兼容服务）：普通对象与分片上传共用同一 SDK -->
         <dependency>
             <groupId>software.amazon.awssdk</groupId>
             <artifactId>s3</artifactId>

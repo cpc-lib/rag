@@ -14,7 +14,7 @@ import com.rag.api.infrastructure.persistence.mapper.KnowledgeBaseMapper;
 import com.rag.api.infrastructure.persistence.mapper.PipelineTaskMapper;
 import com.rag.api.infrastructure.search.EsSearchClient;
 import com.rag.api.infrastructure.search.MilvusClientWrapper;
-import com.rag.api.infrastructure.storage.MinioStorage;
+import com.rag.api.infrastructure.storage.ObjectStorage;
 import com.rag.api.interfaces.dto.Dtos;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -37,7 +37,7 @@ public class KnowledgeBaseService {
     private final ModelService modelService;
     private final MilvusClientWrapper milvus;
     private final EsSearchClient es;
-    private final MinioStorage minio;
+    private final ObjectStorage minio;
     private final ObjectMapper objectMapper;
     private final UserManageService userManageService;
     private final PromptTemplateService promptTemplateService;

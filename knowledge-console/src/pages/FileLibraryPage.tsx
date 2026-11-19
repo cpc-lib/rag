@@ -12,6 +12,7 @@ import { libraryApi } from '../api/library';
 import { uploadApi } from '../api/uploads';
 import type { LibraryFile, PlaybackHistory } from '../api/types';
 import { useAuthStore } from '../store/auth';
+import MarkdownViewer from '../components/MarkdownViewer';
 import SubtitleEditDrawer from '../components/SubtitleEditDrawer';
 
 /** 上传速度格式化 */
@@ -44,7 +45,8 @@ function formatDuration(sec: number): string {
 }
 
 const IMAGE_EXT = ['png', 'jpg', 'jpeg'];
-const TEXT_EXT = ['txt', 'md', 'html', 'htm'];
+const MARKDOWN_EXT = ['md', 'markdown'];
+const TEXT_EXT = ['txt', 'html', 'htm'];
 const VIDEO_EXT = ['mp4', 'mkv', 'avi', 'ts'];
 const AUDIO_EXT = ['mp3', 'flac'];
 
@@ -53,13 +55,14 @@ function extOf(name: string): string {
   return i >= 0 ? name.slice(i + 1).toLowerCase() : '';
 }
 
-function previewKind(f: LibraryFile): 'image' | 'text' | 'video' | 'audio' | null {
+function previewKind(f: LibraryFile): 'image' | 'markdown' | 'text' | 'video' | 'audio' | null {
   if (f.bizType === 'IMAGE') return 'image';
   if (f.bizType === 'SUBTITLE') return 'text';
   const ext = extOf(f.fileName);
   if (IMAGE_EXT.includes(ext)) return 'image';
   if (VIDEO_EXT.includes(ext)) return 'video';
   if (AUDIO_EXT.includes(ext)) return 'audio';
+  if (MARKDOWN_EXT.includes(ext)) return 'markdown';
   return TEXT_EXT.includes(ext) ? 'text' : null;
 }
 
@@ -857,11 +860,11 @@ export default function FileLibraryPage() {
         onSaved={() => load(kw)}
       />
 
-      {/* 文本/图片只读预览 */}
+      {/* 文本/Markdown/图片只读预览 */}
       <Drawer
         title={viewing?.fileName}
-        width={viewing?.bizType === 'IMAGE' ? 820 : 640}
-        open={!!viewing && ['text', 'image'].includes(previewKind(viewing) ?? '')}
+        width={viewing && ['image', 'markdown'].includes(previewKind(viewing) ?? '') ? 820 : 640}
+        open={!!viewing && ['text', 'markdown', 'image'].includes(previewKind(viewing) ?? '')}
         onClose={() => setViewing(null)}
         destroyOnHidden
       >
@@ -877,6 +880,8 @@ export default function FileLibraryPage() {
               style={{ maxWidth: '100%', borderRadius: 6, display: 'block', margin: '0 auto' }}
             />
           ) : null
+        ) : viewing && previewKind(viewing) === 'markdown' ? (
+          <MarkdownViewer content={content} compact />
         ) : (
           <Typography.Paragraph>
             <pre

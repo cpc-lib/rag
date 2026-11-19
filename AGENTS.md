@@ -20,14 +20,14 @@
 ### 2.1 中间件（根目录 docker-compose.yml）
 
 ```bash
-docker compose up -d mysql redis minio mc-init etcd elasticsearch milvus
+docker compose up -d mysql redis rustfs rustfs-init etcd elasticsearch milvus
 ```
 
-MySQL 8.4 / Redis 7.4 / MinIO（9000 API + 9001 控制台）/ etcd 3.5 / ES 8.14 / Milvus 2.5 standalone。MinIO 桶由 `mc-init` 自动建：`rag-files`（业务）、`a-bucket`（Milvus）。
+MySQL 8.4 / Redis 7.4 / RustFS（9000 S3 API + 9001 控制台，S3 兼容对象存储，替代 MinIO）/ etcd 3.5 / ES 8.14 / Milvus 2.5 standalone。桶由 `rustfs-init`（amazon/aws-cli）自动建：`rag-files`（业务）、`a-bucket`（Milvus）。Milvus 的 `MINIO_ADDRESS/MINIO_ACCESS_KEY_ID/...` 是 Milvus 自身固定的变量名，指向 RustFS。
 
 > 注意：compose 不包含 `rabbitmq`，但 rag-worker 代码依赖 RabbitMQ（exchange `rag.ingest`）。本地跑 Worker 前需自备 RabbitMQ（5672/15672，guest/guest）。
 
-所有中间件地址默认指向 `192.168.1.200`，可用环境变量覆盖：`MIDDLEWARE_HOST`、`MYSQL_HOST/PORT/DB/USER/PASSWORD`、`MINIO_PORT`、`ES_PORT`、`MILVUS_PORT`、`ETCD_PORT` 等。
+所有中间件地址默认指向 `127.0.0.1`，可用环境变量覆盖：`MIDDLEWARE_HOST`、`MYSQL_HOST/PORT/DB/USER/PASSWORD`、`RUSTFS_PORT/USER/PASSWORD/BUCKET/REGION`、`ES_PORT`、`MILVUS_PORT`、`ETCD_PORT` 等。
 
 ### 2.2 数据库初始化（Flyway 自动迁移）
 
@@ -54,7 +54,7 @@ rag-worker **不引入 Flyway**（两进程连同一库，只由 rag-api 负责�
 ### 2.3 启动应用
 
 ```bash
-# 后端两个进程必须使用同一套密钥/中间件（API 与 Worker 共享 MySQL/MinIO/Milvus/ES）
+# 后端两个进程必须使用同一套密钥/中间件（API 与 Worker 共享 MySQL/RustFS/Milvus/ES）
 mvn -f rag-api/pom.xml spring-boot:run      # http://localhost:8080
 mvn -f rag-worker/pom.xml spring-boot:run   # 无 Web 端口，纯消费者
 
@@ -83,10 +83,10 @@ cd knowledge-console && npm run build
 - `application/` — 业务服务（无接口的单实现 @Service）：`AuthService`、`ChatOrchestrator`（SSE 编排）、`RetrievalService`（混合检索）、`DocumentAppService`、`ChunkAppService`、`KnowledgeBaseService`、`PromptTemplateService`、`ModelService`、`TenantService`、`UserManageService`、`MenuService`、`ToolConfigService`、`QuotaService`、`ChatSessionService`、`ImageGenerationService`
 - `infrastructure/`（**persistence 层已整体抽到 rag-common**，本模块不再有 entity/mapper）
   - `llm/LlmClient`、`image/ZImageClient`（文生图）
-  - `search/{EsSearchClient,MilvusClientWrapper}`、`storage/MinioStorage`、`etcd/EtcdService`、`mq/IngestPublisher`
+  - `search/{EsSearchClient,MilvusClientWrapper}`、`storage/{ObjectStorage,MultipartStorage}`（S3 协议，RustFS/MinIO 通用）、`etcd/EtcdService`、`mq/IngestPublisher`
   - `tool/{WeatherClient,TavilyClient}`
 - `common/` — `ApiResult`、`BizException`、`ErrorCode`、`TenantContext`（ThreadLocal 会话）
-- `config/` — `DataInitializer`（种子账号）、`MinioConfig`、`MybatisPlusConfig`、`RabbitMqConfig`、`WebCorsConfig`
+- `config/` — `DataInitializer`（种子账号）、`StorageConfig`（S3Client/S3Presigner）、`MybatisPlusConfig`、`RabbitMqConfig`、`WebCorsConfig`
 
 ### 3.2 rag-common 包结构 `com.rag.api.infrastructure.persistence`
 
@@ -102,7 +102,7 @@ cd knowledge-console && npm run build
 - `pipeline/PipelineProcessor` — 状态机：`PARSE`（解析→切片→Embedding→双写）与 `REINDEX`（保留切片重嵌重建）
 - `pipeline/ParseService` — txt/md 直读；docx/xlsx 用 POI；pdf 用 PDFBox 2.x 文本层 + 扫描页 Tess4J OCR；html 用 jsoup；图片走 Vision
 - `pipeline/chunk/` — 15 种切片策略（见 §5），SPI 风格：`ChunkStrategy.mode()/plan(ChunkContext)`；`ChunkStrategyRouter` 注入 `List<ChunkStrategy>` 并解析 AUTO；`ChunkSupport` 提供共享机制
-- `infrastructure/llm/{EmbeddingClient,VisionClient}`、`ocr/OcrService`、`search/{EsIndexer,MilvusIndexer}`、`storage/MinioStorage`、`etcd/WorkerRegistry`
+- `infrastructure/llm/{EmbeddingClient,VisionClient}`、`ocr/OcrService`、`search/{EsIndexer,MilvusIndexer}`、`storage/ObjectStorage`（S3 协议）、`etcd/WorkerRegistry`
 - **PDFBox 是 2.x**：用 `PDDocument.load(...)`，不存在 `org.apache.pdfbox.Loader`（那是 3.x API）
 
 ### 3.3 knowledge-console/src
@@ -120,7 +120,7 @@ cd knowledge-console && npm run build
 POST /api/v1/knowledge-bases/{kbId}/documents (multipart)
   DocumentAppService.upload
     ├─ QuotaService.checkStorage（存储配额）
-    ├─ MinIO 上传原文件  key: {tenantId}/{kbId}/{yyyy-MM-dd}/{uuid}.{ext}
+    ├─ 对象存储上传原文件  key: {tenantId}/{kbId}/{yyyy-MM-dd}/{uuid}.{ext}
     └─ document 落库 UPLOADED（待处理）+ 文件库登记；**不自动投递**，等待手动触发
 POST /api/v1/documents/{id}/start（开始/继续处理，DocumentAppService.startProcessing）
     ├─ 已有切片 → resume=true：document 置 EMBEDDING，Worker 跳过解析/切片断点续跑
@@ -132,7 +132,7 @@ POST /api/v1/documents/{id}/stop（停止，DocumentAppService.stopProcessing）
          ↓
 IngestConsumer（租户并发信号量 → RUNNING）
   PipelineProcessor.parseFlow
-    PARSING   ParseService.parse（产物写 MinIO derived/{version}/）
+    PARSING   ParseService.parse（产物写对象存储 derived/{version}/）
     CHUNKING  ChunkStrategyRouter.route(kb.chunk_strategy, 文件名).plan(ctx) → persistPlans
     EMBEDDING EmbeddingClient.embed（OpenAI 兼容 /embeddings，每批 ≤10 条）
     INDEXING  Milvus（先删后写，schema 仅 [chunk_id, document_id]）
@@ -178,7 +178,7 @@ SSE 事件类型（ChatOrchestrator）：`session` / `search_start` / `search_re
 
 ## 7. 配置与外部依赖
 
-- 后端配置命名空间 `rag.*`：jwt、minio、milvus、etcd、mq、retrieval（top-k/rrf-k/max-context-tokens 等）、llm 超时、chat SSE 超时、worker 重试、ocr tessdata
+- 后端配置命名空间 `rag.*`：jwt、storage（S3 协议 endpoint/access-key/secret-key/bucket/region/presign-minutes）、milvus、etcd、mq、retrieval（top-k/rrf-k/max-context-tokens 等）、llm 超时、chat SSE 超时、worker 重试、ocr tessdata
 - etcd 双重身份：Milvus 元数据后端 + 业务动态配置/注册中心，业务前缀 `/rag/`；检索参数 etcd `/rag/config/global/retrieval` 可热更覆盖 yml 兜底值
 - 模型连接：OpenAI 兼容 HTTP（WebClient），Base URL 入库时自动去除首尾反引号/引号/空白/斜杠；Embedding 每批 ≤10（阿里云 MAAS 限制）
 - LLM/WebClient 用 `ConnectionProvider.newConnection()`，避免空闲长连接被中间网络设备 RST
@@ -190,7 +190,7 @@ SSE 事件类型（ChatOrchestrator）：`session` / `search_start` / `search_re
 2. Controller 只做参数与鉴权（`AuthGuard.requirePlatform()/requireTenantAdmin()` 静态调用），业务在 `application/`；DTO 一律加到 `interfaces/dto/Dtos.java` 的 record 中
 3. 跨租户访问一律返回"不存在"（NOT_FOUND），不泄露资源存在性；未匹配路由由 `GlobalExceptionHandler` 返回 404 `请求的资源不存在`（含 Spring 6 `NoResourceFoundException` 专项处理）
 4. 租户上下文取自 `TenantContext`（JWT 过滤器填充），SQL 必须带 `tenant_id` 条件，不允许跨租户 IN 批查遗漏隔离
-5. 外部调用失败的降级策略要显式：Rerank/OCR/Vision 失败静默降级并打 warn 日志，不阻断主流程；存储配额统计优先 MinIO 真实用量，不可达才回退 DB 求和
+5. 外部调用失败的降级策略要显式：Rerank/OCR/Vision 失败静默降级并打 warn 日志，不阻断主流程；存储配额统计优先对象存储真实用量，不可达才回退 DB 求和
 6. 中文注释、中文用户提示信息；JSON 响应中文断言用 UTF-8（MockMvc 默认 ISO-8859-1）
 7. 前端：类型集中在 `api/types.ts`；UI 用 Antd 5，风格简洁明亮；按钮字体清晰；权限相关弹窗用列表勾选（菜单授权与工具授权分两个弹窗），不要做非要求的"灵活配置"
 8. 最小改动原则：不顺手重构无关代码、不重排格式；改动产生的孤儿 import/方法要清理，历史死代码只提示不删除
@@ -198,11 +198,11 @@ SSE 事件类型（ChatOrchestrator）：`session` / `search_start` / `search_re
 
 ## 9. 常见坑位
 
-- **启动报连不上 192.168.1.200**：中间件没起或地址不对，用 §2 的环境变量指向本机；HikariPool 反复 Starting 就是 MySQL 不可达
+- **启动报连不上 127.0.0.1**：中间件没起或地址不对，用 §2 的环境变量指向实际中间件主机；HikariPool 反复 Starting 就是 MySQL 不可达
 - **Vite 代理 ECONNREFUSED**：rag-api(8080) 没启动，不是前端问题
 - **改了 @Service 构造函数后**：跑一次 `mvn clean test`，增量编译可能残留 "Unresolved compilation problem" class
 - **PDFBox API 报错**：确认用的是 2.x 的 `Loader` 不存在；`PDDocument.load`
-- **MinIO 预签名 URL 403**：签名 URL 含 `?Expires&Signature`，WebClient 必须 `.uri(URI.create(url))`，用字符串会被当模板二次编码
+- **对象存储预签名 URL 403**：签名 URL 含 `?X-Amz-Expires&X-Amz-Signature`，WebClient 必须 `.uri(URI.create(url))`，用字符串会被当模板二次编码；ffmpeg/ffprobe 直读同样要求 URL 不被二次转义
 - **文生图 404 NOT_FOUND**：image base 要填裸 host，不能带 `/compatible-mode/v1` 后缀（`ZImageClient` 会规整一次但别依赖）
 - **MyBatis XML/实体包名**：所有实体与 Mapper 已统一抽到 rag-common（`com.rag.api.infrastructure.persistence.*`），worker 直接引用 rag-common 的类，**不再有 `com.rag.worker.*` 的持久层类**。新增表时实体/Mapper/XML 都加到 rag-common
 - **Windows PowerShell**：不支持 `&&` 连接命令，用 `;` 或分行；路径含中文注意 UTF-8

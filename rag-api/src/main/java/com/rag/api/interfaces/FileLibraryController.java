@@ -3,7 +3,7 @@ package com.rag.api.interfaces;
 import com.rag.api.application.FileLibraryService;
 import com.rag.api.common.ApiResult;
 import com.rag.api.infrastructure.persistence.entity.LibraryFileEntity;
-import com.rag.api.infrastructure.storage.MinioStorage;
+import com.rag.api.infrastructure.storage.ObjectStorage;
 import com.rag.api.interfaces.dto.Dtos;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
@@ -32,7 +32,7 @@ import java.util.List;
 public class FileLibraryController {
 
     private final FileLibraryService fileLibraryService;
-    private final MinioStorage minioStorage;
+    private final ObjectStorage minioStorage;
 
     /** 文件库列表；keyword 非空时按文件名模糊查询。 */
     @GetMapping

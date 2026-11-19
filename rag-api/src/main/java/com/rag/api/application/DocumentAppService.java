@@ -16,20 +16,31 @@ import com.rag.api.infrastructure.persistence.mapper.DocumentMapper;
 import com.rag.api.infrastructure.persistence.mapper.PipelineTaskMapper;
 import com.rag.api.infrastructure.search.EsSearchClient;
 import com.rag.api.infrastructure.search.MilvusClientWrapper;
-import com.rag.api.infrastructure.storage.MinioStorage;
+import com.rag.api.infrastructure.storage.ObjectStorage;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.apache.poi.hwpf.HWPFDocument;
+import org.apache.poi.hwpf.converter.WordToHtmlConverter;
+import org.springframework.http.MediaType;
+import org.springframework.http.MediaTypeFactory;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.multipart.MultipartFile;
+import org.w3c.dom.Element;
 
+import java.io.InputStream;
+import java.io.StringWriter;
 import java.time.LocalDate;
 import java.time.format.DateTimeFormatter;
 import java.util.Set;
 import java.util.UUID;
+import javax.xml.parsers.DocumentBuilderFactory;
+import javax.xml.transform.TransformerFactory;
+import javax.xml.transform.dom.DOMSource;
+import javax.xml.transform.stream.StreamResult;
 
 /**
- * 文档上传编排：配额校验 → MinIO 落盘 → 落库为 UPLOADED（待处理）。
+ * 文档上传编排：配额校验 → 对象存储落盘 → 落库为 UPLOADED（待处理）。
  * 处理流水线由用户手动触发：开始处理（startProcessing）/ 停止（stopProcessing）/ 断点续跑。
  */
 @Slf4j
@@ -37,7 +48,7 @@ import java.util.UUID;
 @RequiredArgsConstructor
 public class DocumentAppService {
 
-    private static final Set<String> ALLOWED_EXT = Set.of("txt", "md", "pdf", "docx", "xlsx", "html", "htm", "png", "jpg", "jpeg");
+    private static final Set<String> ALLOWED_EXT = Set.of("txt", "md", "pdf", "doc", "docx", "xlsx", "html", "htm", "png", "jpg", "jpeg");
 
     private final DocumentMapper documentMapper;
     private final ChunkMapper chunkMapper;
@@ -45,14 +56,13 @@ public class DocumentAppService {
     private final KnowledgeBaseService knowledgeBaseService;
     private final QuotaService quotaService;
     private final ModelService modelService;
-    private final MinioStorage minio;
+    private final ObjectStorage minio;
     private final EsSearchClient es;
     private final MilvusClientWrapper milvus;
     private final IngestPublisher publisher;
     private final ObjectMapper objectMapper;
     private final FileLibraryService fileLibraryService;
     private final Sha256Publisher sha256Publisher;
-
 
     /**
      * 知识库文档上传前置校验：租户管理员权限 + 扩展名白名单 + 存储配额。
@@ -292,6 +302,91 @@ public class DocumentAppService {
     }
 
     /**
+     * 在线预览原文件：返回原始字节流与真实 Content-Type，不做任何转换，保留文件原格式。
+     */
+    public Preview preview(long documentId) {
+        DocumentEntity doc = documentMapper.selectById(documentId);
+        if (doc == null) {
+            throw BizException.notFound("文档不存在");
+        }
+        knowledgeBaseService.getOwned(doc.getKbId());
+        String contentType = MediaTypeFactory.getMediaType(doc.getFileName())
+                .map(MediaType::toString)
+                .orElse(MediaType.APPLICATION_OCTET_STREAM_VALUE);
+        return new Preview(doc.getFileName(), contentType, minio.download(doc.getObjectKey()));
+    }
+
+    public record Preview(String fileName, String contentType, InputStream in) {
+    }
+
+    /**
+     * 老版 .doc（Word 97-2003 二进制）浏览器无法渲染，服务端用 HWPF 转成 HTML 供前端 iframe 展示。
+     */
+    public String previewHtml(long documentId) {
+        DocumentEntity doc = documentMapper.selectById(documentId);
+        if (doc == null) {
+            throw BizException.notFound("文档不存在");
+        }
+        knowledgeBaseService.getOwned(doc.getKbId());
+        if (doc.getFileName() == null || !doc.getFileName().toLowerCase().endsWith(".doc")) {
+            throw BizException.badRequest("仅 .doc 文件需要转换为 HTML 预览");
+        }
+        try (InputStream in = minio.download(doc.getObjectKey())) {
+            HWPFDocument hwpf = new HWPFDocument(in);
+            WordToHtmlConverter converter = new WordToHtmlConverter(
+                    DocumentBuilderFactory.newInstance().newDocumentBuilder().newDocument());
+            // 图片以 data URI 内嵌，避免落盘；浏览器不支持的 EMF/WMF 会显示为占位
+            converter.setPicturesManager((content, pictureType, suggestedName, widthInches, heightInches) ->
+                    "data:" + pictureType.getMime() + ";base64,"
+                            + java.util.Base64.getEncoder().encodeToString(content));
+            converter.processDocument(hwpf);
+            org.w3c.dom.Document html = converter.getDocument();
+            fixInvisibleWhiteText(html);
+            // 补一层阅读样式：A4 纸张观感（居中、页边距、阴影），表格铺满版心
+            org.w3c.dom.NodeList heads = html.getElementsByTagName("head");
+            if (heads.getLength() > 0) {
+                Element style = html.createElement("style");
+                style.setTextContent("html{background:#f2f3f5;}"
+                        + "body{font-family:'Microsoft YaHei','PingFang SC',Arial,sans-serif;font-size:15px;"
+                        + "line-height:1.8;color:#1f2937;background:#fff;box-sizing:border-box;"
+                        + "margin:24px auto !important;max-width:8.5in;min-height:calc(100vh - 48px);"
+                        + "padding:0.75in 0.65in !important;box-shadow:0 1px 4px rgba(0,0,0,.08);}"
+                        + "table{width:100% !important;table-layout:auto !important;margin:8px 0 16px;}"
+                        + "td,th{padding:6px 10px;vertical-align:middle;word-break:break-word;}"
+                        + "td p,th p{margin:0;}img{max-width:100%;}");
+                heads.item(0).appendChild(style);
+            }
+            StringWriter writer = new StringWriter();
+            TransformerFactory.newInstance().newTransformer()
+                    .transform(new DOMSource(html), new StreamResult(writer));
+            return writer.toString();
+        } catch (Exception e) {
+            log.warn("doc 转 HTML 失败 documentId={} fileName={}", documentId, doc.getFileName(), e);
+            throw new BizException(ErrorCode.INTERNAL, "文档转换失败，请下载后查看");
+        }
+    }
+
+    /**
+     * HWPF 转 HTML 不输出单元格底纹：整篇没有背景声明时，白字会落在白底上不可见，
+     * 统一改成深蓝保证可读（有底纹声明时保持原色）。
+     */
+    private void fixInvisibleWhiteText(org.w3c.dom.Document html) {
+        org.w3c.dom.NodeList styles = html.getElementsByTagName("style");
+        StringBuilder css = new StringBuilder();
+        for (int i = 0; i < styles.getLength(); i++) {
+            css.append(styles.item(i).getTextContent());
+        }
+        if (css.toString().contains("background")) {
+            return;
+        }
+        for (int i = 0; i < styles.getLength(); i++) {
+            org.w3c.dom.Node node = styles.item(i);
+            node.setTextContent(node.getTextContent()
+                    .replaceAll("(?i)color:\\s*(white|#ffffff\\b|#fff\\b)", "color:#1f4e79"));
+        }
+    }
+
+    /**
      * 删除文档（同步）：清理 ES/Milvus 索引与 MinIO 原文件，
      * 物理删除该文档全部切片、流水线任务及文档记录本身。
      */
@@ -310,6 +405,8 @@ public class DocumentAppService {
             log.warn("Milvus 向量清理失败 doc={} err={}", doc.getId(), e.getMessage());
         }
         minio.deleteObject(doc.getObjectKey());
+        // 清理该文档派生图片（PDF 内嵌图片切片）
+        minio.deletePrefix(doc.getTenantId() + "/" + doc.getKbId() + "/derived/" + doc.getId() + "/");
 
         chunkMapper.logicDeleteByDocumentId(doc.getId());
         taskMapper.logicDeleteByDocumentId(doc.getId());

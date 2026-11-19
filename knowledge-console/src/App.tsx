@@ -16,6 +16,7 @@ import SubtitlePage from './pages/SubtitlePage';
 import FileLibraryPage from './pages/FileLibraryPage';
 import TranslateLangPage from './pages/TranslateLangPage';
 import UsersPage from './pages/UsersPage';
+import FilePreviewPage from './pages/FilePreviewPage';
 
 function RequireAuth({ children }: { children: ReactNode }) {
   const token = useAuthStore((s) => s.token);
@@ -62,9 +63,18 @@ function HomeRedirect() {
 
 export default function App() {
   return (
-    <BrowserRouter>
+    <BrowserRouter future={{ v7_startTransition: true, v7_relativeSplatPath: true }}>
       <Routes>
         <Route path="/login" element={<LoginPage />} />
+        {/* 原文件预览：独立窗口展示，不套用管理端布局 */}
+        <Route
+          path="/preview/:id"
+          element={
+            <RequireAuth>
+              <FilePreviewPage />
+            </RequireAuth>
+          }
+        />
         <Route
           path="/"
           element={

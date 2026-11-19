@@ -9,6 +9,7 @@ import com.rag.api.infrastructure.persistence.entity.PipelineTaskEntity;
 import com.rag.api.infrastructure.persistence.mapper.ChunkMapper;
 import com.rag.api.infrastructure.persistence.mapper.DocumentMapper;
 import com.rag.api.infrastructure.persistence.mapper.PipelineTaskMapper;
+import com.rag.api.infrastructure.storage.ObjectStorage;
 import com.rag.api.interfaces.dto.Dtos;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -27,6 +28,7 @@ public class ChunkAppService {
     private final PipelineTaskMapper taskMapper;
     private final KnowledgeBaseService knowledgeBaseService;
     private final IngestPublisher publisher;
+    private final ObjectStorage objectStorage;
 
     public Page<ChunkEntity> page(long documentId, long page, long size) {
         assertDocOwned(documentId);
@@ -36,6 +38,21 @@ public class ChunkAppService {
     /** 查询切片详情（校验归属），供编辑前回显。 */
     public ChunkEntity get(long chunkId) {
         return getOwnedChunk(chunkId);
+    }
+
+    /** 读取 IMAGE 切片的图片字节（引用区缩略图与正文插图，鉴权 + 租户校验）。 */
+    public byte[] imageBytes(long chunkId) {
+        ChunkEntity chunk = getOwnedChunk(chunkId);
+        if (!"IMAGE".equals(chunk.getContentType())
+                || chunk.getImageKey() == null || chunk.getImageKey().isBlank()) {
+            throw BizException.notFound("图片不存在");
+        }
+        try (var in = objectStorage.download(chunk.getImageKey())) {
+            return in.readAllBytes();
+        } catch (Exception e) {
+            log.warn("切片图片读取失败 chunk={} key={} err={}", chunkId, chunk.getImageKey(), e.getMessage());
+            throw BizException.notFound("图片不存在");
+        }
     }
 
     public ChunkEntity create(Dtos.ChunkCreateReq req) {

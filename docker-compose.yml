@@ -27,37 +27,48 @@ services:
     volumes:
       - redis-data:/data
 
-  minio:
-    image: minio/minio:latest
-    container_name: rag-minio
+  # RustFS：S3 兼容对象存储（替代 MinIO），9000 为 S3 API、9001 为 Web 控制台
+  rustfs:
+    image: rustfs/rustfs:latest
+    container_name: rag-rustfs
     restart: unless-stopped
-    command: server /data --console-address ":9001"
     environment:
-      MINIO_ROOT_USER: minioadmin
-      MINIO_ROOT_PASSWORD: minioadmin123
+      RUSTFS_VOLUMES: /data
+      RUSTFS_ADDRESS: 0.0.0.0:9000
+      RUSTFS_CONSOLE_ADDRESS: 0.0.0.0:9001
+      RUSTFS_CONSOLE_ENABLE: "true"
+      RUSTFS_ACCESS_KEY: ${RUSTFS_USER:-rustfsadmin}
+      RUSTFS_SECRET_KEY: ${RUSTFS_PASSWORD:-rustfsadmin123}
+      RUSTFS_REGION: us-east-1
       TZ: Asia/Shanghai
     ports:
       - "9000:9000"
       - "9001:9001"
     volumes:
-      - minio-data:/data
+      - rustfs-data:/data
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      test: ["CMD", "curl", "-f", "http://localhost:9000/health"]
       interval: 10s
       timeout: 5s
       retries: 12
+      start_period: 10s
 
-  # 初始化 MinIO 桶：rag-files 存业务文件，a-bucket 为 Milvus 默认桶
-  mc-init:
-    image: minio/mc:latest
+  # 初始化桶：rag-files 存业务文件，a-bucket 为 Milvus 默认桶（已存在时幂等忽略）
+  rustfs-init:
+    image: amazon/aws-cli:latest
     depends_on:
-      minio:
+      rustfs:
         condition: service_healthy
-    entrypoint: >
-      /bin/sh -c "
-      mc alias set local http://minio:9000 minioadmin minioadmin123 &&
-      mc mb -p local/rag-files &&
-      mc mb -p local/a-bucket || true"
+    environment:
+      AWS_ACCESS_KEY_ID: ${RUSTFS_USER:-rustfsadmin}
+      AWS_SECRET_ACCESS_KEY: ${RUSTFS_PASSWORD:-rustfsadmin123}
+      AWS_DEFAULT_REGION: us-east-1
+      AWS_EC2_METADATA_DISABLED: "true"
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        aws --endpoint-url http://rustfs:9000 s3 mb s3://rag-files || true
+        aws --endpoint-url http://rustfs:9000 s3 mb s3://a-bucket || true
 
   # etcd：同时作为 Milvus 元数据后端与业务服务注册/动态配置中心（业务前缀 /rag/）
   etcd:
@@ -100,18 +111,20 @@ services:
     command: ["milvus", "run", "standalone"]
     environment:
       ETCD_ENDPOINTS: etcd:2379
-      MINIO_ADDRESS: minio:9000
-      MINIO_ACCESS_KEY_ID: minioadmin
-      MINIO_SECRET_ACCESS_KEY: minioadmin123
+      # Milvus 的对象存储配置变量名固定为 MINIO_*，此处指向 RustFS
+      MINIO_ADDRESS: rustfs:9000
+      MINIO_ACCESS_KEY_ID: ${RUSTFS_USER:-rustfsadmin}
+      MINIO_SECRET_ACCESS_KEY: ${RUSTFS_PASSWORD:-rustfsadmin123}
       MINIO_BUCKET: a-bucket
       COMMON_STORAGETYPE: remote
       TZ: Asia/Shanghai
     depends_on:
       etcd:
         condition: service_started
-      minio:
-        condition: service_healthy
+      rustfs-init:
+        condition: service_completed_successfully
     ports:
+      - "8000:8000"
       - "19530:19530"
       - "9091:9091"
     volumes:
@@ -125,7 +138,7 @@ services:
 volumes:
   mysql-data: {}
   redis-data: {}
-  minio-data: {}
+  rustfs-data: {}
   etcd-data: {}
   es-data: {}
   milvus-data: {}

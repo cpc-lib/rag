@@ -8,7 +8,7 @@ import com.rag.api.infrastructure.mq.Sha256Publisher;
 import com.rag.api.infrastructure.persistence.entity.GeneratedImageEntity;
 import com.rag.api.infrastructure.persistence.entity.ModelEntity;
 import com.rag.api.infrastructure.persistence.mapper.GeneratedImageMapper;
-import com.rag.api.infrastructure.storage.MinioStorage;
+import com.rag.api.infrastructure.storage.ObjectStorage;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
@@ -21,18 +21,18 @@ import java.util.regex.Pattern;
 
 /**
  * 文生图编排：取租户模型配置（留空回退官方地址/LLM Key/z-image-turbo）
- * → 同步生成 → 下载图片持久化到 MinIO → 落 generated_image 历史。
+ * → 同步生成 → 下载图片持久化到对象存储 → 落 generated_image 历史。
  */
 @Slf4j
 @Service
 @RequiredArgsConstructor
 public class ImageGenerationService {
 
-    /** 下载视图：鉴权后从 MinIO 读取原图字节。 */
+    /** 下载视图：鉴权后从对象存储读取原图字节。 */
     public record Download(String fileName, String contentType, byte[] bytes) {
     }
 
-    /** 历史视图：url 为 MinIO 预签名地址。 */
+    /** 历史视图：url 为对象存储预签名地址。 */
     public record ImageView(long id, String prompt, String negativePrompt, String model, String size, Long seed,
                             String url, LocalDateTime createdAt, Long fileSize) {
     }
@@ -49,7 +49,7 @@ public class ImageGenerationService {
     private final ModelService modelService;
     private final GeneratedImageMapper imageMapper;
     private final ZImageClient zImageClient;
-    private final MinioStorage minio;
+    private final ObjectStorage minio;
     private final UserManageService userManageService;
     private final FileLibraryService fileLibraryService;
     private final Sha256Publisher sha256Publisher;

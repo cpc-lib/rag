@@ -2,7 +2,7 @@ package com.rag.worker.media;
 
 import com.rag.api.infrastructure.persistence.entity.LibraryFileEntity;
 import com.rag.api.infrastructure.persistence.mapper.LibraryFileMapper;
-import com.rag.worker.infrastructure.storage.MinioStorage;
+import com.rag.worker.infrastructure.storage.ObjectStorage;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
@@ -22,7 +22,7 @@ import java.util.stream.Stream;
  * 文件库视频转码：ffprobe 探测分辨率/帧率 → 保持源画质单档 HLS（不缩放、锁源帧率）。
  * 源为 H.264+AAC 时 -c copy 直切（不重编码，秒级）；其余长视频按时间轴 3 段并行 NVENC 硬编后 concat 直拷封装，
  * 短视频走单次 NVENC（-cq 画质模式，帧全程驻留 GPU），失败逐级回退 CPU 软编。
- * 产物上传 MinIO {objectKey}.hls/（master.m3u8 + 分片），回写 library_file.playback_key/status。
+ * 产物上传对象存储 {objectKey}.hls/（master.m3u8 + 分片），回写 library_file.playback_key/status。
  */
 @Service
 @Slf4j
@@ -38,7 +38,7 @@ public class MediaTranscodeService {
     private static final int SEG_GRID_SEC = 6;
 
     private final LibraryFileMapper libraryFileMapper;
-    private final MinioStorage minioStorage;
+    private final ObjectStorage minioStorage;
     private final MediaProgressPublisher progressPublisher;
     private final String ffmpegPath;
     private final String ffprobePath;
@@ -72,7 +72,7 @@ public class MediaTranscodeService {
     }
 
     public MediaTranscodeService(LibraryFileMapper libraryFileMapper,
-                                 MinioStorage minioStorage,
+                                 ObjectStorage minioStorage,
                                  MediaProgressPublisher progressPublisher,
                                  @Value("${rag.media.ffmpeg-path:ffmpeg}") String ffmpegPath,
                                  @Value("${rag.media.transcode-parallel:3}") int transcodeParallel) {
@@ -85,7 +85,7 @@ public class MediaTranscodeService {
     }
 
     /** 执行转码：READY 幂等跳过；产物就绪回写 READY，异常由调用方置 FAILED。
-     *  输入走 MinIO 预签名 URL 直读（ffprobe/ffmpeg 支持 HTTP 输入，省下载落盘）。 */
+     *  输入走对象存储预签名 URL 直读（ffprobe/ffmpeg 支持 HTTP 输入，省下载落盘）。 */
     public void transcode(long fileId) throws Exception {
         LibraryFileEntity e = libraryFileMapper.selectById(fileId);
         if (e == null) {

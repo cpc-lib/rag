@@ -10,8 +10,8 @@
 - **15 种切片策略**：固定大小、递归、段落、句子、语义、结构化、Markdown、HTML、PDF 版面、表格、QA、Parent-Child、滑动窗口、代码、AUTO
 - **混合检索**：Milvus 向量召回 + ES BM25 关键词召回 → RRF 融合 → 可选 Rerank 精排 → Parent 内容扩展 → Token Budget 截断
 - **流式问答**：SSE 输出（检索过程 / 引用来源 / 正文增量 / 用量统计），支持多轮会话与提示词模板；历史会话可删除（逻辑删除）
-- **AI 文生图**：独立画图工作台，生成结果持久化到 MinIO，保留个人历史记录
-- **文件库**：MinIO 原生分片上传（断点续传）+ 在线播放，视频自动转 HLS（H.264+AAC，NVENC 优先），音频/文本/图片即点即播；支持重新转码
+- **AI 文生图**：独立画图工作台，生成结果持久化到对象存储（RustFS），保留个人历史记录
+- **文件库**：S3 原生分片上传（断点续传）+ 在线播放，视频自动转 HLS（H.264+AAC，NVENC 优先），音频/文本/图片即点即播；支持重新转码
 - **字幕翻译**：多语言字幕导入/编辑/翻译，支持 SRT/VTT/ASS，翻译结果存档到文件库；目标语言由租户在「目标语言管理」维护；字幕条有备份表（subtitle_cue_backup），删除字幕记录后文件库归档仍可编辑
 - **运维能力**：租户存储配额管理、etcd 动态配置热更、Worker 服务注册、视频转码 WebSocket 实时进度
 
@@ -22,7 +22,7 @@
 | 后端 | Java 17、Spring Boot 3.3.5、Spring WebFlux（模型调用）、MyBatis-Plus 3.5.7 |
 | 前端 | React 18、TypeScript 5、Vite 5、Ant Design 5、Zustand |
 | 消息 | RabbitMQ 3.13（手动 ack、TTL + DLQ 重试、租户信号量限流） |
-| 存储/检索 | MySQL 8.4、Redis 7.4、MinIO、Elasticsearch 8.14、Milvus 2.5、etcd 3.5 |
+| 存储/检索 | MySQL 8.4、Redis 7.4、RustFS（S3 兼容）、Elasticsearch 8.14、Milvus 2.5、etcd 3.5 |
 | 文档处理 | Apache PDFBox 2.x、POI、jsoup、JavaParser、Tess4J |
 | 模型接入 | OpenAI 兼容 HTTP 接口（Chat / Embedding / Vision / Rerank / 文生图） |
 | 视频处理 | FFmpeg 7.1（HLS、NVENC、WebSocket 实时进度推送） |
@@ -53,12 +53,12 @@ rag/
 ### 2. 启动中间件
 
 ```bash
-docker compose up -d mysql redis minio mc-init etcd elasticsearch milvus
+docker compose up -d mysql redis rustfs rustfs-init etcd elasticsearch milvus
 ```
 
 > **RabbitMQ 提示**：compose 中 `rabbitmq` 服务默认被注释，Worker 依赖它。本地运行前请取消注释后执行 `docker compose up -d rabbitmq`，或自备 RabbitMQ（5672 / 15672，guest/guest）。
 
-所有中间件默认地址指向 `192.168.1.200`。如果中间件部署在本机，启动后端时设置环境变量 `MIDDLEWARE_HOST=127.0.0.1` 即可整体切换，也可用 `MYSQL_HOST`、`MINIO_PORT`、`ES_PORT`、`MILVUS_PORT`、`ETCD_PORT` 等单独覆盖。
+所有中间件默认地址为 `127.0.0.1`（本机）。如果中间件部署在其他机器，启动后端时设置环境变量 `MIDDLEWARE_HOST=<中间件主机IP>` 即可整体切换，也可用 `MYSQL_HOST`、`RUSTFS_PORT`、`ES_PORT`、`MILVUS_PORT`、`ETCD_PORT` 等单独覆盖。
 
 ### 3. 初始化数据库
 
@@ -124,10 +124,10 @@ npm run build
 
 ```
 文档上传（multipart，存储配额校验）
-  → MinIO 保存原文件 + document/pipeline_task 落库
+  → 对象存储（RustFS）保存原文件 + document/pipeline_task 落库
   → RabbitMQ exchange: rag.ingest
       → IngestConsumer（租户并发信号量 → RUNNING）
-          PARSING    解析（产物写 MinIO derived/{version}/）
+          PARSING    解析（产物写对象存储 derived/{version}/）
           CHUNKING   策略路由切片（Parent-Child 时仅 CHILD 入向量库）
           EMBEDDING  每批 ≤10 条调 /embeddings
           INDEXING   Milvus（先删后写）+ Elasticsearch（BM25）
@@ -172,10 +172,10 @@ SSE 事件：`session` / `search_start` / `search_result`（含引用）/ `messa
 
 | 环境变量 | 默认值 | 说明 |
 |---|---|---|
-| `MIDDLEWARE_HOST` | `192.168.1.200` | Redis/RabbitMQ/MinIO/Milvus/ES/etcd 统一主机 |
-| `MYSQL_HOST` / `MYSQL_PORT` / `MYSQL_DB` / `MYSQL_USER` / `MYSQL_PASSWORD` | `192.168.1.200` / `3306` / `rag` / `root` / `rag123456` | MySQL 连接 |
+| `MIDDLEWARE_HOST` | `127.0.0.1` | Redis/RabbitMQ/RustFS/Milvus/ES/etcd 统一主机 |
+| `MYSQL_HOST` / `MYSQL_PORT` / `MYSQL_DB` / `MYSQL_USER` / `MYSQL_PASSWORD` | `127.0.0.1` / `3306` / `rag` / `root` / `rag123456` | MySQL 连接 |
 | `RAG_JWT_SECRET` | 开发默认值 | JWT 签名密钥，**生产环境必须修改**，且 API / Worker 保持一致 |
-| `MINIO_PORT` / `MINIO_USER` / `MINIO_PASSWORD` / `MINIO_BUCKET` | `9000` / `minioadmin` / `minioadmin123` / `rag-files` | MinIO |
+| `RUSTFS_PORT` / `RUSTFS_USER` / `RUSTFS_PASSWORD` / `RUSTFS_BUCKET` | `9000` / `rustfsadmin` / `rustfsadmin123` / `rag-files` | RustFS 对象存储 |
 | `ES_PORT` / `MILVUS_PORT` / `ETCD_PORT` | `9200` / `19530` / `2379` | 检索组件端口 |
 | `RAG_OCR_TESSDATA` / `RAG_OCR_LANGS` | 空 / `chi_sim+eng` | OCR 训练数据目录与语言，留空则 OCR 静默降级 |
 | `RAG_MEDIA_FFMPEG_PATH` | `D:\release\rag\tools\ffmpeg-7.1\bin\ffmpeg.exe` | FFmpeg 路径（Windows 需正确配置） |
@@ -186,9 +186,9 @@ SSE 事件：`session` / `search_start` / `search_result`（含引用）/ `messa
 
 ### 容器开机自启
 
-`docker-compose.yml` 中 6 个常驻服务（mysql、redis、minio、etcd、elasticsearch、milvus）均已配置 `restart: unless-stopped`：Linux 重启后 Docker 守护进程会自动拉起容器；手动 `docker compose stop/down` 过的容器不会自动启动。
+`docker-compose.yml` 中 6 个常驻服务（mysql、redis、rustfs、etcd、elasticsearch、milvus）均已配置 `restart: unless-stopped`：Linux 重启后 Docker 守护进程会自动拉起容器；手动 `docker compose stop/down` 过的容器不会自动启动。
 
-- `mc-init` 是一次性建桶任务（跑完即退出），未配置重启策略，避免反复执行
+- `rustfs-init` 是一次性建桶任务（跑完即退出），未配置重启策略，避免反复执行
 - 修改过 restart 策略后需重建容器才能生效：`docker compose up -d`
 
 ### 重启后端口映射正常但 telnet 不通

@@ -3,13 +3,22 @@ package com.rag.worker.pipeline;
 import com.rag.worker.infrastructure.ocr.OcrService;
 import com.rag.api.infrastructure.persistence.entity.DocumentEntity;
 import com.rag.api.infrastructure.persistence.entity.ModelEntity;
-import com.rag.worker.infrastructure.storage.MinioStorage;
+import com.rag.worker.infrastructure.storage.ObjectStorage;
 import com.rag.worker.infrastructure.llm.VisionClient;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.apache.pdfbox.contentstream.PDFGraphicsStreamEngine;
+import org.apache.pdfbox.cos.COSName;
 import org.apache.pdfbox.pdmodel.PDDocument;
+import org.apache.pdfbox.pdmodel.PDPage;
+import org.apache.pdfbox.pdmodel.PDResources;
+import org.apache.pdfbox.pdmodel.graphics.PDXObject;
+import org.apache.pdfbox.pdmodel.graphics.image.PDImage;
+import org.apache.pdfbox.pdmodel.graphics.image.PDImageXObject;
 import org.apache.pdfbox.rendering.PDFRenderer;
 import org.apache.pdfbox.text.PDFTextStripper;
+import org.apache.poi.hwpf.HWPFDocument;
+import org.apache.poi.hwpf.extractor.WordExtractor;
 import org.apache.poi.xssf.usermodel.XSSFRow;
 import org.apache.poi.xssf.usermodel.XSSFSheet;
 import org.apache.poi.xssf.usermodel.XSSFWorkbook;
@@ -21,14 +30,20 @@ import org.apache.poi.xwpf.usermodel.XWPFTableRow;
 import org.springframework.stereotype.Service;
 
 import javax.imageio.ImageIO;
+import java.awt.geom.Point2D;
 import java.awt.image.BufferedImage;
 import java.io.ByteArrayInputStream;
+import java.io.ByteArrayOutputStream;
+import java.io.IOException;
 import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Set;
 
 /**
- * 多格式解析（spec 4.1）：MD/TXT 直读；DOCX/XLSX 用 POI；PDF 文本层 + 扫描页 OCR；
+ * 多格式解析（spec 4.1）：MD/TXT 直读；DOC/DOCX/XLSX 用 POI；PDF 文本层 + 扫描页 OCR；
  * 图片同时提取 OCR 文字与视觉描述（可用时）。
  */
 @Slf4j
@@ -36,13 +51,34 @@ import java.util.List;
 @RequiredArgsConstructor
 public class ParseService {
 
+    /** 宽或高小于该值的图片视为图标/装饰，不进入切片。 */
+    private static final int MIN_IMAGE_SIZE = 120;
+    /** 单文档最多抽取的内嵌图片数，避免视觉模型调用失控。 */
+    private static final int MAX_IMAGES = 200;
+    /** 单页矢量绘制操作数达到该值视为图形密集页（架构图/流程图）。 */
+    private static final int VECTOR_OP_THRESHOLD = 40;
+    /** 图形密集页的文字量上限：超过说明主要是正文/表格，整页截图会与文本切片重复。 */
+    private static final int PAGE_SNAPSHOT_MAX_TEXT = 800;
+    /** 单文档最多渲染的整页截图数（矢量图兜底，Vision 成本控制）。 */
+    private static final int MAX_PAGE_SNAPSHOTS = 20;
+
     public record RawPage(int page, String text) {
     }
 
-    public record ParseOutcome(List<RawPage> pages, List<String> warnings) {
+    /**
+     * PDF 图片素材：page 从 0 起，png 为归一化后的 PNG 字节，hash 为前 8 位 SHA-256（去重与命名）。
+     * pageSnapshot=true 表示整页截图（矢量图兜底），文本层已单独抽取，无需再做 OCR。
+     */
+    public record RawImage(int page, int width, int height, byte[] png, String hash, boolean pageSnapshot) {
     }
 
-    private final MinioStorage minio;
+    public record ParseOutcome(List<RawPage> pages, List<String> warnings, List<RawImage> images) {
+        public ParseOutcome(List<RawPage> pages, List<String> warnings) {
+            this(pages, warnings, new ArrayList<>());
+        }
+    }
+
+    private final ObjectStorage minio;
     private final OcrService ocrService;
     private final VisionClient visionClient;
 
@@ -58,12 +94,27 @@ public class ParseService {
             case "txt", "md" -> new ParseOutcome(
                     List.of(new RawPage(0, new String(bytes, StandardCharsets.UTF_8))), new ArrayList<>());
             case "docx" -> parseDocx(bytes);
+            case "doc" -> parseDoc(bytes);
             case "xlsx" -> parseXlsx(bytes);
-            case "pdf" -> parsePdf(doc, bytes);
+            case "pdf" -> parsePdf(doc, vision, bytes);
             case "html", "htm" -> parseHtml(bytes);
             case "png", "jpg", "jpeg" -> parseImage(doc, vision, bytes, ext);
             default -> throw new IllegalStateException("不支持的文件类型: " + ext);
         };
+    }
+
+    /**
+     * .doc（Word 97-2003 二进制）：HWPF 抽取正文，换行归一化为 \n。
+     */
+    private ParseOutcome parseDoc(byte[] bytes) {
+        try (HWPFDocument document = new HWPFDocument(new ByteArrayInputStream(bytes))) {
+            String text = new WordExtractor(document).getText();
+            String normalized = text.replace("\r\n", "\n").replace('\r', '\n')
+                    .replaceAll("\n{3,}", "\n\n");
+            return new ParseOutcome(List.of(new RawPage(0, normalized.strip())), new ArrayList<>());
+        } catch (Exception e) {
+            throw new IllegalStateException("doc 解析失败: " + e.getMessage(), e);
+        }
     }
 
     private ParseOutcome parseDocx(byte[] bytes) {
@@ -191,17 +242,30 @@ public class ParseService {
         return new ParseOutcome(pages, new ArrayList<>());
     }
 
-    private ParseOutcome parsePdf(DocumentEntity doc, byte[] bytes) {
+    private ParseOutcome parsePdf(DocumentEntity doc, ModelEntity vision, byte[] bytes) {
         List<RawPage> pages = new ArrayList<>();
         List<String> warnings = new ArrayList<>();
+        List<RawImage> images = new ArrayList<>();
+        Set<String> imageHashes = new HashSet<>();
+        boolean visionReady = vision != null
+                && visionClient.isConfigured(vision.getBaseUrl(), vision.getModel());
+        int snapshots = 0;
         try (PDDocument pdf = PDDocument.load(bytes)) {
             PDFTextStripper stripper = new PDFTextStripper();
             PDFRenderer renderer = new PDFRenderer(pdf);
             int total = pdf.getNumberOfPages();
             for (int i = 0; i < total; i++) {
+                PDPage page = pdf.getPage(i);
                 stripper.setStartPage(i + 1);
                 stripper.setEndPage(i + 1);
                 String text = stripper.getText(pdf);
+                extractImages(page, i, images, imageHashes, warnings);
+                // 矢量架构图（路径绘制）按整页截图兜底；需 Vision 才有检索价值
+                if (visionReady && snapshots < MAX_PAGE_SNAPSHOTS && text != null
+                        && text.strip().length() <= PAGE_SNAPSHOT_MAX_TEXT
+                        && addPageSnapshot(page, i, images, imageHashes, renderer)) {
+                    snapshots++;
+                }
                 if (text != null && text.strip().length() >= 10) {
                     pages.add(new RawPage(i, text));
                     continue;
@@ -225,7 +289,180 @@ public class ParseService {
         } catch (Exception e) {
             throw new IllegalStateException("PDF 解析失败: " + e.getMessage(), e);
         }
-        return new ParseOutcome(pages, warnings);
+        return new ParseOutcome(pages, warnings, images);
+    }
+
+    /**
+     * 抽取一页内嵌位图（PDImageXObject）：跳过蒙版/小图标，按内容哈希去重。
+     * 矢量绘制的图表不是位图，由 {@link #addPageSnapshot} 整页截图兜底。
+     */
+    private void extractImages(PDPage page, int pageIndex, List<RawImage> images,
+                               Set<String> hashes, List<String> warnings) {
+        PDResources resources = page.getResources();
+        if (resources == null) {
+            return;
+        }
+        for (COSName name : resources.getXObjectNames()) {
+            if (images.size() >= MAX_IMAGES) {
+                if (!warnings.contains("图片数量超过" + MAX_IMAGES + "张，其余已忽略")) {
+                    warnings.add("图片数量超过" + MAX_IMAGES + "张，其余已忽略");
+                }
+                return;
+            }
+            PDXObject xObject;
+            try {
+                xObject = resources.getXObject(name);
+            } catch (Exception e) {
+                continue;
+            }
+            if (!(xObject instanceof PDImageXObject image) || image.isStencil()
+                    || image.getWidth() < MIN_IMAGE_SIZE || image.getHeight() < MIN_IMAGE_SIZE) {
+                continue;
+            }
+            byte[] png;
+            try {
+                BufferedImage buffered = image.getImage();
+                if (buffered == null) {
+                    continue;
+                }
+                png = toPng(buffered);
+            } catch (Exception e) {
+                log.warn("PDF 第 {} 页图片解码失败已跳过: {}", pageIndex + 1, e.getMessage());
+                continue;
+            }
+            String hash = sha256Prefix(png);
+            if (!hashes.add(hash)) {
+                continue;
+            }
+            images.add(new RawImage(pageIndex, image.getWidth(), image.getHeight(), png, hash, false));
+        }
+    }
+
+    /**
+     * 图形密集页整页截图（矢量架构图/流程图兜底）：矢量绘制操作多、文字量少时触发。
+     * 截图仅交给 Vision 描述（文本层已单独抽取，不重复 OCR）。
+     */
+    private boolean addPageSnapshot(PDPage page, int pageIndex, List<RawImage> images,
+                                    Set<String> hashes, PDFRenderer renderer) {
+        try {
+            if (countVectorOps(page) < VECTOR_OP_THRESHOLD) {
+                return false;
+            }
+        } catch (Exception e) {
+            log.warn("PDF 第 {} 页矢量内容统计失败: {}", pageIndex + 1, e.getMessage());
+            return false;
+        }
+        try {
+            BufferedImage rendered = renderer.renderImageWithDPI(pageIndex, 150);
+            byte[] png = toPng(rendered);
+            String hash = sha256Prefix(png);
+            if (!hashes.add(hash)) {
+                return false;
+            }
+            images.add(new RawImage(pageIndex, rendered.getWidth(), rendered.getHeight(), png, hash, true));
+            return true;
+        } catch (Exception e) {
+            log.warn("PDF 第 {} 页整页截图失败: {}", pageIndex + 1, e.getMessage());
+            return false;
+        }
+    }
+
+    /** 统计页面矢量绘制操作数（填充/描边/阴影），用于识别矢量绘制的架构图页面。 */
+    private int countVectorOps(PDPage page) throws IOException {
+        VectorOpCounter counter = new VectorOpCounter(page);
+        counter.processPage(page);
+        return counter.ops;
+    }
+
+    /** 只统计绘制操作，忽略路径点细节（文字是字形不是路径，正文页操作数很低）。 */
+    private static final class VectorOpCounter extends PDFGraphicsStreamEngine {
+
+        private int ops;
+
+        VectorOpCounter(PDPage page) {
+            super(page);
+        }
+
+        @Override
+        public void appendRectangle(Point2D p0, Point2D p1, Point2D p2, Point2D p3) {
+            ops++;
+        }
+
+        @Override
+        public void drawImage(PDImage pdImage) {
+        }
+
+        @Override
+        public void clip(int windingRule) {
+        }
+
+        @Override
+        public void moveTo(float x, float y) {
+        }
+
+        @Override
+        public void lineTo(float x, float y) {
+        }
+
+        @Override
+        public void curveTo(float x1, float y1, float x2, float y2, float x3, float y3) {
+        }
+
+        @Override
+        public void endPath() {
+        }
+
+        @Override
+        public void strokePath() {
+            ops++;
+        }
+
+        @Override
+        public void fillPath(int windingRule) {
+            ops++;
+        }
+
+        @Override
+        public void fillAndStrokePath(int windingRule) {
+            ops++;
+        }
+
+        @Override
+        public void shadingFill(COSName shadingName) {
+            ops++;
+        }
+    }
+
+    /** 统一转 PNG：PDF 里可能是 CMYK/1-bit/带 alpha 等 ImageIO 不直接支持的颜色模型。 */
+    private byte[] toPng(BufferedImage source) throws IOException {
+        int type = source.getColorModel().hasAlpha()
+                ? BufferedImage.TYPE_INT_ARGB : BufferedImage.TYPE_INT_RGB;
+        BufferedImage rgb = new BufferedImage(source.getWidth(), source.getHeight(), type);
+        java.awt.Graphics2D g = rgb.createGraphics();
+        try {
+            g.drawImage(source, 0, 0, null);
+        } finally {
+            g.dispose();
+        }
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        if (!ImageIO.write(rgb, "png", out)) {
+            throw new IOException("PNG 编码器不可用");
+        }
+        return out.toByteArray();
+    }
+
+    /** 内容哈希前 8 位十六进制：用于同一文档内图片去重与对象命名。 */
+    private String sha256Prefix(byte[] data) {
+        try {
+            byte[] digest = MessageDigest.getInstance("SHA-256").digest(data);
+            StringBuilder sb = new StringBuilder();
+            for (int i = 0; i < 4; i++) {
+                sb.append(String.format("%02x", digest[i]));
+            }
+            return sb.toString();
+        } catch (Exception e) {
+            return Integer.toHexString(java.util.Arrays.hashCode(data));
+        }
     }
 
     private ParseOutcome parseImage(DocumentEntity doc, ModelEntity vision, byte[] bytes, String ext) {

@@ -1,6 +1,6 @@
 package com.rag.worker.pipeline.chunk;
 
-import com.rag.worker.infrastructure.storage.MinioStorage;
+import com.rag.worker.infrastructure.storage.ObjectStorage;
 import com.rag.worker.pipeline.ParseService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -27,7 +27,7 @@ public class PdfLayoutStrategy implements ChunkStrategy {
     private static final double REPEAT_RATIO = 0.6;
 
     private final ParentChildStrategy parentChildStrategy;
-    private final MinioStorage minioStorage;
+    private final ObjectStorage minioStorage;
 
     @Override
     public ChunkMode mode() {

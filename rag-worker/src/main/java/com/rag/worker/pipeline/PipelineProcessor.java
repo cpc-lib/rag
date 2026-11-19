@@ -20,11 +20,13 @@ import com.rag.worker.pipeline.chunk.ChunkPlan;
 import com.rag.worker.pipeline.chunk.ChunkStrategy;
 import com.rag.worker.pipeline.chunk.ChunkStrategyRouter;
 import com.rag.worker.pipeline.chunk.PlannedChild;
+import com.rag.worker.pipeline.image.ImageAssetService;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 
+import java.util.ArrayList;
 import java.util.List;
 
 /**
@@ -43,8 +45,11 @@ public class PipelineProcessor {
 
     private static final String VISION = "VISION";
     private static final String EMBEDDING = "EMBEDDING";
+    /** 切片批量插入的每批行数（控制单条 SQL 体积）。 */
+    private static final int CHUNK_INSERT_BATCH = 200;
 
     private final ParseService parseService;
+    private final ImageAssetService imageAssetService;
     private final ChunkStrategyRouter strategyRouter;
     private final EmbeddingClient embeddingClient;
     private final MilvusIndexer milvusIndexer;
@@ -92,27 +97,38 @@ public class PipelineProcessor {
             log.info("文档从断点继续处理（跳过解析/切片）doc={}", doc.getId());
         } else {
             setStage(doc, "PARSING", 5);
+            long tParse = System.currentTimeMillis();
             ParseService.ParseOutcome outcome = parseService.parse(doc, vision);
             doc.setPageCount(outcome.pages().size());
             doc.setWarning(outcome.warnings().isEmpty() ? null : String.join("；", outcome.warnings()));
             setStage(doc, "PARSING", 20);
+            long parseMs = System.currentTimeMillis() - tParse;
             checkStop(doc);
 
             setStage(doc, "CHUNKING", 25);
+            long tChunk = System.currentTimeMillis();
             ChunkContext chunkCtx = new ChunkContext(doc.getTenantId(), doc.getId(), doc.getFileName(),
                     doc.getObjectKey(), outcome.pages(), chunkParams(kb));
             ChunkStrategy strategy = strategyRouter.route(kb.getChunkStrategy(), doc.getFileName());
             List<ChunkPlan> plans = strategy.plan(chunkCtx);
-            if (plans.stream().noneMatch(p -> !p.children().isEmpty())) {
+            // PDF 内嵌图片：OCR + 视觉描述后追加为 IMAGE 切片（失败只记 warning）
+            ImageAssetService.Result imageResult = imageAssetService.process(doc, outcome.images(), vision);
+            if (!imageResult.warnings().isEmpty()) {
+                List<String> allWarnings = new ArrayList<>(outcome.warnings());
+                allWarnings.addAll(imageResult.warnings());
+                doc.setWarning(String.join("；", allWarnings));
+            }
+            if (plans.stream().noneMatch(p -> !p.children().isEmpty()) && imageResult.assets().isEmpty()) {
                 throw new IllegalStateException("文档未提取到可检索内容，请检查文件或 OCR/Vision 配置");
             }
-            persistPlans(doc, plans);
+            persistPlans(doc, plans, imageResult.assets());
             setStage(doc, "CHUNKING", 40);
             int children = plans.stream().mapToInt(p -> p.children().size()).sum();
             int parents = (int) plans.stream().filter(ChunkPlan::parentChild).count();
-            log.info("文档解析切片完成 doc={} strategy={} pages={} parents={} children={} warnings={}",
+            log.info("文档解析切片完成 doc={} strategy={} pages={} parents={} children={} images={} parseMs={} chunkMs={} warnings={}",
                     doc.getId(), strategy.mode(), outcome.pages().size(), parents, children,
-                    outcome.warnings());
+                    imageResult.assets().size(), parseMs, System.currentTimeMillis() - tChunk,
+                    doc.getWarning());
         }
         checkStop(doc);
         indexAll(doc, kb, embedding, 45, 78, 85);
@@ -176,6 +192,7 @@ public class PipelineProcessor {
         setStage(doc, "EMBEDDING", embStart);
         List<String> contents = chunks.stream().map(c -> embeddingText(doc, c)).toList();
         int totalBatches = (contents.size() + 9) / 10;
+        long tEmbed = System.currentTimeMillis();
         List<float[]> vectors;
         try {
             vectors = embeddingClient.embed(
@@ -193,10 +210,14 @@ public class PipelineProcessor {
             }
             throw ce;
         }
+        long embedMs = System.currentTimeMillis() - tEmbed;
+        log.info("Embedding 完成 doc={} 切片={}条 批次={} 耗时={}ms",
+                doc.getId(), contents.size(), totalBatches, embedMs);
         setStage(doc, "EMBEDDING", embEnd);
         checkStop(doc);
 
         setStage(doc, "INDEXING", idxStart);
+        long tIndex = System.currentTimeMillis();
         int dim = embedding.getEmbeddingDim() == null ? vectors.get(0).length : embedding.getEmbeddingDim();
         milvusIndexer.ensureCollection(kb.getMilvusCollection(), dim);
         milvusIndexer.deleteByDocument(kb.getMilvusCollection(), doc.getId());
@@ -206,23 +227,31 @@ public class PipelineProcessor {
 
         esIndexer.ensureIndex(kb.getEsIndex());
         esIndexer.deleteByDocument(kb.getEsIndex(), doc.getId());
-        esIndexer.indexDocs(kb.getEsIndex(), chunks.stream()
-                .map(c -> new EsIndexer.EsDoc(c.getId(), doc.getId(), kb.getId(),
-                        doc.getFileName(), c.getPage() == null ? 0 : c.getPage(),
-                        embeddingText(doc, c)))
-                .toList());
+        List<EsIndexer.EsDoc> esDocs = new ArrayList<>(chunks.size());
+        for (int i = 0; i < chunks.size(); i++) {
+            ChunkEntity c = chunks.get(i);
+            esDocs.add(new EsIndexer.EsDoc(c.getId(), doc.getId(), kb.getId(),
+                    doc.getFileName(), c.getPage() == null ? 0 : c.getPage(), contents.get(i)));
+        }
+        esIndexer.indexDocs(kb.getEsIndex(), esDocs);
+        log.info("索引写入完成 doc={} 切片={}条 collection={} index={} 耗时={}ms",
+                doc.getId(), esDocs.size(), kb.getMilvusCollection(), kb.getEsIndex(),
+                System.currentTimeMillis() - tIndex);
     }
 
     /**
      * 持久化策略输出：删除旧 AUTO 行（含旧 parent），保留 MANUAL；
      * parentChild 计划先插 PARENT 再插关联 CHILDREN；独立计划直接插 CHILD。
      */
-    private void persistPlans(DocumentEntity doc, List<ChunkPlan> plans) {
+    private void persistPlans(DocumentEntity doc, List<ChunkPlan> plans,
+                             List<ImageAssetService.ImageAsset> images) {
         chunkMapper.logicDeleteAutoByDocumentId(doc.getId());
         ChunkEntity maxSeqChunk = chunkMapper.selectMaxSeqByDocumentId(doc.getId());
         Integer maxSeq = maxSeqChunk == null ? null : maxSeqChunk.getSeq();
         int seq = maxSeq == null ? 1 : maxSeq + 1;
 
+        // parent 需逐条插入拿自增 id；child 先攒齐再批量插入，避免几百次 DB 往返
+        List<ChunkEntity> children = new ArrayList<>();
         for (ChunkPlan plan : plans) {
             Long parentId = null;
             if (plan.parentChild()) {
@@ -247,9 +276,34 @@ public class PipelineProcessor {
                 c.setContentType(contentType(doc.getFileName(), child.content()));
                 c.setSectionTitle(plan.sectionTitle());
                 c.setSectionPath(plan.sectionPath());
-                chunkMapper.insert(c);
+                children.add(c);
             }
         }
+        // 图片切片：独立 CHILD、无 parent，content 为 OCR/视觉描述文本（参与 embedding 与 BM25）
+        for (ImageAssetService.ImageAsset image : images) {
+            ChunkEntity c = newChunk(doc, seq++, image.page());
+            c.setChunkType("CHILD");
+            c.setContentType("IMAGE");
+            c.setContent(imageContent(image));
+            c.setImageKey(image.objectKey());
+            c.setImageOcr(image.ocr());
+            c.setImageVision(image.vision());
+            children.add(c);
+        }
+        for (int from = 0; from < children.size(); from += CHUNK_INSERT_BATCH) {
+            chunkMapper.insertBatch(children.subList(from, Math.min(from + CHUNK_INSERT_BATCH, children.size())));
+        }
+    }
+
+    private String imageContent(ImageAssetService.ImageAsset image) {
+        StringBuilder sb = new StringBuilder("图片（第").append(image.page() + 1).append("页）");
+        if (image.ocr() != null) {
+            sb.append("\nOCR：").append(image.ocr());
+        }
+        if (image.vision() != null) {
+            sb.append("\n视觉描述：").append(image.vision());
+        }
+        return sb.toString();
     }
 
     private ChunkParams chunkParams(KnowledgeBaseEntity kb) {

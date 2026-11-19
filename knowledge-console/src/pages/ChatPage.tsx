@@ -22,7 +22,10 @@ import {
   CloseOutlined,
 } from '@ant-design/icons';
 import ReactMarkdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
 import type { ReactNode } from 'react';
+import Mermaid from '../components/Mermaid';
+import CitationImage from '../components/CitationImage';
 import { kbApi } from '../api/knowledgeBases';
 import { promptApi } from '../api/prompts';
 import { streamChat } from '../api/chat';
@@ -57,27 +60,38 @@ const SEARCH_HINT: Record<string, string> = {
   tavily: '正在联网搜索最新资讯…',
 };
 
-/** 将 Markdown 文本中的 [n] 角标渲染为可点击引用按钮 */
+/** 将 Markdown 文本中的 [n] 角标渲染为可点击引用按钮；图片引用在角标后直接插图 */
 function renderWithCitations(
   text: string,
   msgId: string,
+  citations: Citation[],
   onCite: (msgId: string, n: number) => void,
 ): ReactNode {
   const parts = text.split(/\[(\d+)\]/g);
   return parts.map((part, i) => {
     if (i % 2 === 1) {
       const n = Number(part);
+      const imageCitation = citations.find((c) => c.seq === n);
       return (
-        <Button
-          key={i}
-          type="text"
-          size="small"
-          className="cite-badge"
-          onClick={() => onCite(msgId, n)}
-          style={{ padding: '0 4px', height: 20, fontSize: 12, verticalAlign: 'baseline' }}
-        >
-          [{n}]
-        </Button>
+        <span key={i}>
+          <Button
+            type="text"
+            size="small"
+            className="cite-badge"
+            onClick={() => onCite(msgId, n)}
+            style={{ padding: '0 4px', height: 20, fontSize: 12, verticalAlign: 'baseline' }}
+          >
+            [{n}]
+          </Button>
+          {imageCitation?.contentType === 'IMAGE' && imageCitation.imageUrl && (
+            <CitationImage
+              chunkId={imageCitation.chunkId}
+              imageUrl={imageCitation.imageUrl}
+              height={140}
+              block
+            />
+          )}
+        </span>
       );
     }
     return part;
@@ -88,14 +102,19 @@ function renderWithCitations(
 function renderNodes(
   nodes: ReactNode,
   msgId: string,
+  citations: Citation[],
   onCite: (msgId: string, n: number) => void,
 ): ReactNode {
   if (typeof nodes === 'string') {
-    return renderWithCitations(nodes, msgId, onCite);
+    return renderWithCitations(nodes, msgId, citations, onCite);
   }
   if (Array.isArray(nodes)) {
     return nodes.map((c, i) =>
-      typeof c === 'string' ? <span key={i}>{renderWithCitations(c, msgId, onCite)}</span> : c,
+      typeof c === 'string' ? (
+        <span key={i}>{renderWithCitations(c, msgId, citations, onCite)}</span>
+      ) : (
+        c
+      ),
     );
   }
   return nodes;
@@ -509,27 +528,75 @@ export default function ChatPage() {
                     <div className="markdown-body" style={{ fontSize: 14, lineHeight: 1.8 }}>
                       {m.content ? (
                         <ReactMarkdown
+                          remarkPlugins={[remarkGfm]}
                           components={{
                             p: ({ children }) => (
                               <p style={{ marginBottom: 8 }}>
-                                {renderNodes(children, m.id, jumpToCitation)}
+                                {renderNodes(children, m.id, m.citations, jumpToCitation)}
                               </p>
                             ),
                             li: ({ children }) => (
-                              <li>{renderNodes(children, m.id, jumpToCitation)}</li>
+                              <li>{renderNodes(children, m.id, m.citations, jumpToCitation)}</li>
                             ),
-                            pre: ({ children }) => (
-                              <pre
+                            table: ({ children }) => (
+                              <div style={{ overflowX: 'auto', margin: '8px 0' }}>
+                                <table
+                                  style={{
+                                    borderCollapse: 'collapse',
+                                    width: '100%',
+                                    fontSize: 13,
+                                  }}
+                                >
+                                  {children}
+                                </table>
+                              </div>
+                            ),
+                            th: ({ children }) => (
+                              <th
                                 style={{
-                                  background: '#f5f5f5',
-                                  padding: 10,
-                                  borderRadius: 6,
-                                  overflowX: 'auto',
+                                  border: '1px solid #e5e7eb',
+                                  padding: '6px 10px',
+                                  background: '#fafafa',
+                                  fontWeight: 600,
+                                  textAlign: 'left',
                                 }}
                               >
                                 {children}
-                              </pre>
+                              </th>
                             ),
+                            td: ({ children }) => (
+                              <td style={{ border: '1px solid #e5e7eb', padding: '6px 10px' }}>
+                                {children}
+                              </td>
+                            ),
+                            code: ({ className, children }) => {
+                              const lang = /language-(\w+)/.exec(className ?? '')?.[1];
+                              if (lang === 'mermaid') {
+                                return <Mermaid code={String(children).replace(/\n$/, '')} />;
+                              }
+                              return <code className={className}>{children}</code>;
+                            },
+                            pre: ({ children }) => {
+                              const first = (Array.isArray(children) ? children[0] : children) as
+                                | { props?: { className?: string } }
+                                | undefined;
+                              // mermaid 代码块由 Mermaid 组件独立渲染，不套 pre
+                              if (first?.props?.className?.includes('language-mermaid')) {
+                                return <>{children}</>;
+                              }
+                              return (
+                                <pre
+                                  style={{
+                                    background: '#f5f5f5',
+                                    padding: 10,
+                                    borderRadius: 6,
+                                    overflowX: 'auto',
+                                  }}
+                                >
+                                  {children}
+                                </pre>
+                              );
+                            },
                           }}
                         >
                           {m.content}
@@ -584,9 +651,9 @@ export default function ChatPage() {
                               {c.contentType && c.contentType !== 'TEXT' && (
                                 <Tag>{({ TABLE: '表格', CODE: '代码', IMAGE: '图片' } as Record<string, string>)[c.contentType] ?? c.contentType}</Tag>
                               )}
-                              {c.previewUrl && (
+                              {c.documentId != null && (
                                 <a
-                                  href={c.previewUrl}
+                                  href={`/preview/${c.documentId}?name=${encodeURIComponent(c.documentName)}`}
                                   target="_blank"
                                   rel="noreferrer"
                                   style={{ fontSize: 12 }}
@@ -602,6 +669,9 @@ export default function ChatPage() {
                             >
                               {c.content}
                             </Typography.Paragraph>
+                            {c.contentType === 'IMAGE' && c.imageUrl && (
+                              <CitationImage chunkId={c.chunkId} imageUrl={c.imageUrl} height={160} />
+                            )}
                           </Space>
                         </Card>
                       ))}

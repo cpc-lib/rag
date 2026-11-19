@@ -6,7 +6,7 @@ import com.rag.api.common.BizException;
 import com.rag.api.common.TenantContext;
 import com.rag.api.infrastructure.persistence.entity.UploadSessionEntity;
 import com.rag.api.infrastructure.persistence.mapper.UploadSessionMapper;
-import com.rag.api.infrastructure.storage.MinioMultipart;
+import com.rag.api.infrastructure.storage.MultipartStorage;
 import com.rag.api.interfaces.dto.Dtos;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -18,7 +18,7 @@ import java.util.Comparator;
 import java.util.List;
 
 /**
- * 分片上传：前端分片 → 后端转发 MinIO 原生 Multipart → 合并；会话状态落库，支持断点续传。
+ * 分片上传：前端分片 → 后端转发 S3 原生 Multipart → 合并；会话状态落库，支持断点续传。
  * 断点续传语义：前端以 sessionId 恢复会话，按 GET 会话返回的已传分片号跳过，只补传缺失分片。
  */
 @Service
@@ -40,7 +40,7 @@ public class ChunkUploadService {
     private static final String BIZ_KB_DOCUMENT = "KB_DOCUMENT";
 
     private final UploadSessionMapper sessionMapper;
-    private final MinioMultipart multipart;
+    private final MultipartStorage multipart;
     private final FileLibraryService fileLibraryService;
     private final DocumentAppService documentAppService;
     private final ObjectMapper objectMapper;

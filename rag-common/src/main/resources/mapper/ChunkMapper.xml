@@ -3,7 +3,8 @@
 <mapper namespace="com.rag.api.infrastructure.persistence.mapper.ChunkMapper">
 
     <sql id="Base_Column_List">
-        id, kb_id, document_id, tenant_id, seq, content, page, status, chunk_type, content_type, parent_chunk_id, section_title, section_path, content_hash, deleted
+        id, kb_id, document_id, tenant_id, seq, content, page, status, chunk_type, content_type, parent_chunk_id, section_title, section_path, content_hash,
+        image_url AS image_key, image_ocr, image_vision, deleted
     </sql>
 
     <select id="selectById" resultType="com.rag.api.infrastructure.persistence.entity.ChunkEntity">
@@ -28,6 +29,9 @@
             <if test="sectionTitle != null">section_title,</if>
             <if test="sectionPath != null">section_path,</if>
             <if test="contentHash != null">content_hash,</if>
+            <if test="imageKey != null">image_url,</if>
+            <if test="imageOcr != null">image_ocr,</if>
+            <if test="imageVision != null">image_vision,</if>
             <if test="deleted != null">deleted,</if>
         </trim>
         <trim prefix="VALUES (" suffix=")" suffixOverrides=",">
@@ -44,8 +48,23 @@
             <if test="sectionTitle != null">#{sectionTitle},</if>
             <if test="sectionPath != null">#{sectionPath},</if>
             <if test="contentHash != null">#{contentHash},</if>
+            <if test="imageKey != null">#{imageKey},</if>
+            <if test="imageOcr != null">#{imageOcr},</if>
+            <if test="imageVision != null">#{imageVision},</if>
             <if test="deleted != null">#{deleted},</if>
         </trim>
+    </insert>
+
+    <insert id="insertBatch">
+        INSERT INTO chunk (kb_id, document_id, tenant_id, seq, content, page, status, chunk_type,
+                           content_type, parent_chunk_id, section_title, section_path, content_hash,
+                           image_url, image_ocr, image_vision, deleted)
+        VALUES
+        <foreach collection="list" item="c" separator=",">
+            (#{c.kbId}, #{c.documentId}, #{c.tenantId}, #{c.seq}, #{c.content}, #{c.page}, #{c.status},
+             #{c.chunkType}, #{c.contentType}, #{c.parentChunkId}, #{c.sectionTitle}, #{c.sectionPath},
+             #{c.contentHash}, #{c.imageKey}, #{c.imageOcr}, #{c.imageVision}, 0)
+        </foreach>
     </insert>
 
     <update id="updateById">
@@ -64,6 +83,9 @@
             <if test="sectionTitle != null">section_title = #{sectionTitle},</if>
             <if test="sectionPath != null">section_path = #{sectionPath},</if>
             <if test="contentHash != null">content_hash = #{contentHash},</if>
+            <if test="imageKey != null">image_url = #{imageKey},</if>
+            <if test="imageOcr != null">image_ocr = #{imageOcr},</if>
+            <if test="imageVision != null">image_vision = #{imageVision},</if>
             <if test="deleted != null">deleted = #{deleted},</if>
         </set>
         WHERE deleted = 0 AND id = #{id}

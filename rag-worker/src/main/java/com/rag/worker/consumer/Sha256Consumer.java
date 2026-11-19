@@ -7,7 +7,7 @@ import com.rag.api.infrastructure.persistence.entity.LibraryFileEntity;
 import com.rag.api.infrastructure.persistence.mapper.DocumentMapper;
 import com.rag.api.infrastructure.persistence.mapper.GeneratedImageMapper;
 import com.rag.api.infrastructure.persistence.mapper.LibraryFileMapper;
-import com.rag.worker.infrastructure.storage.MinioStorage;
+import com.rag.worker.infrastructure.storage.ObjectStorage;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.amqp.core.Message;
@@ -21,7 +21,7 @@ import java.util.concurrent.Executor;
 
 /**
  * SHA-256 指纹消费者：收到消息立即 ack，提交 sha256Executor 异步执行；
- * 大文件/外部下载文件上传后，Worker 从 MinIO 流式计算 SHA-256
+ * 大文件/外部下载文件上传后，Worker 从对象存储流式计算 SHA-256
  * 并回写 document / library_file / generated_image，供后续秒传匹配。
  * 失败重试 3 次后放弃（指纹是增强能力，不阻断业务）。
  */
@@ -37,7 +37,7 @@ public class Sha256Consumer {
     private static final int MAX_RETRY = 3;
 
     private final ObjectMapper objectMapper;
-    private final MinioStorage minioStorage;
+    private final ObjectStorage minioStorage;
     private final DocumentMapper documentMapper;
     private final LibraryFileMapper libraryFileMapper;
     private final Executor sha256Executor;

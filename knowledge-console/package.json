@@ -13,12 +13,17 @@
     "@microsoft/fetch-event-source": "^2.0.1",
     "antd": "^5.21.6",
     "axios": "^1.7.7",
+    "docx-preview": "^0.4.1",
     "hash-wasm": "^4.12.0",
     "hls.js": "^1.7.3",
+    "jszip": "^3.10.2",
+    "mermaid": "^12.3.0",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
     "react-markdown": "^9.0.1",
     "react-router-dom": "^6.27.0",
+    "remark-gfm": "^4.0.1",
+    "xlsx": "https://cdn.sheetjs.com/xlsx-0.20.3/xlsx-0.20.3.tgz",
     "zustand": "^4.5.5"
   },
   "devDependencies": {

@@ -16,7 +16,7 @@ import java.util.LinkedHashMap;
 import java.util.Map;
 
 /**
- * 配额（spec 3.1）：MinIO 存储量、Token 月度消耗。
+ * 配额（spec 3.1）：对象存储用量、Token 月度消耗。
  */
 @Slf4j
 @Service
@@ -25,7 +25,7 @@ public class QuotaService {
 
     private final ChatMessageMapper chatMessageMapper;
     private final TenantMapper tenantMapper;
-    private final com.rag.api.infrastructure.storage.MinioStorage minioStorage;
+    private final com.rag.api.infrastructure.storage.ObjectStorage minioStorage;
     private final com.rag.api.infrastructure.persistence.mapper.LibraryFileMapper libraryFileMapper;
 
     public Map<String, Object> usage(String tenantId) {

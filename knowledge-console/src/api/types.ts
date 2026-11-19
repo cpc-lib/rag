@@ -113,7 +113,7 @@ export interface ResetAdminResp {
 }
 
 // ---- 模型池 ----
-export type ModelType = 'CHAT' | 'VISION' | 'EMBEDDING' | 'IMAGE';
+export type ModelType = 'CHAT' | 'VISION' | 'EMBEDDING' | 'IMAGE' | 'RERANK';
 
 /** 列表/详情返回的脱敏视图（密钥仅回传是否已配置） */
 export interface ModelItem {
@@ -283,6 +283,8 @@ export interface Citation {
   contentType: string | null;
   previewUrl: string | null;
   content: string;
+  /** IMAGE 切片的图片访问路径（需鉴权，前端用 blob 拉取） */
+  imageUrl: string | null;
 }
 
 export interface ChatStreamReq {

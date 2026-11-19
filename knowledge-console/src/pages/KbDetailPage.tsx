@@ -31,7 +31,7 @@ import { kbApi } from '../api/knowledgeBases';
 import { useAuthStore } from '../store/auth';
 import type { Chunk, DocumentItem, KnowledgeBase } from '../api/types';
 
-const ALLOWED_EXT = ['.txt', '.md', '.pdf', '.docx', '.xlsx', '.png', '.jpg', '.jpeg'];
+const ALLOWED_EXT = ['.txt', '.md', '.pdf', '.doc', '.docx', '.xlsx', '.png', '.jpg', '.jpeg'];
 
 const PIPELINE_STEPS = ['解析', '切片', '向量化', '索引'];
 
@@ -293,13 +293,8 @@ export default function KbDetailPage() {
     }
   };
 
-  const openPreview = async (doc: DocumentItem) => {
-    try {
-      const url = await documentApi.downloadUrl(doc.id);
-      window.open(url, '_blank');
-    } catch {
-      /* 错误提示已由拦截器统一处理 */
-    }
+  const openPreview = (doc: DocumentItem) => {
+    window.open(`/preview/${doc.id}?name=${encodeURIComponent(doc.fileName)}`, '_blank', 'noopener');
   };
 
   // ---- 切片抽屉 ----

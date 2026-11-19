@@ -26,7 +26,9 @@ import java.math.BigDecimal;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 
 /**
  * 对话与向量均走 OpenAI 兼容协议（chat completions 流式/非流式/function-calling、embeddings）。
@@ -257,6 +259,94 @@ public class LlmClient {
             throw new IllegalStateException("Embedding 返回数量不一致: " + vectors.size() + " != " + texts.size());
         }
         return vectors;
+    }
+
+    /**
+     * Rerank：OpenAI 兼容协议（POST {base}/rerank），对接 DashScope Qwen3-Reranker / vLLM / Cohere 兼容网关。
+     * 请求体 {model, query, documents:[...], top_n}；响应解析 results[].relevance_score
+     * （同时兼容 DashScope 原生 output.results[] 包裹）。
+     *
+     * @return 按相关度降序的 documents 下标；上游未返回分数的下标按原序追加在末尾
+     */
+    public List<Integer> rerank(String baseUrl, String apiKey, String model,
+                                String query, List<String> documents) {
+        ObjectNode compatibleBody = objectMapper.createObjectNode();
+        compatibleBody.put("model", model);
+        compatibleBody.put("query", query);
+        ArrayNode docs = compatibleBody.putArray("documents");
+        documents.forEach(docs::add);
+        compatibleBody.put("top_n", documents.size());
+
+        JsonNode resp;
+        try {
+            resp = postRerank(baseUrl, apiKey, "/rerank", compatibleBody);
+        } catch (WebClientResponseException e) {
+            if (e.getStatusCode().value() != 404) {
+                throw new IllegalStateException("Rerank 调用失败: " + upstreamError(e), e);
+            }
+            // 部分私有网关（如 maas）没有实现 OpenAI 兼容的 /rerank，回退 DashScope 原生接口
+            String nativeBase = stripCompatibleSuffix(baseUrl);
+            String nativePath = "/api/v1/services/rerank/text-rerank/text-rerank";
+            log.warn("Rerank 兼容接口 404，回退 DashScope 原生接口: {}{}", nativeBase, nativePath);
+            ObjectNode nativeBody = objectMapper.createObjectNode();
+            nativeBody.put("model", model);
+            ObjectNode input = nativeBody.putObject("input");
+            input.put("query", query);
+            ArrayNode nativeDocs = input.putArray("documents");
+            documents.forEach(nativeDocs::add);
+            ObjectNode parameters = nativeBody.putObject("parameters");
+            parameters.put("return_documents", false);
+            parameters.put("top_n", documents.size());
+            try {
+                resp = postRerank(nativeBase, apiKey, nativePath, nativeBody);
+            } catch (WebClientResponseException e2) {
+                throw new IllegalStateException("Rerank 调用失败（" + stripSlash(baseUrl) + "/rerank 与 "
+                        + nativeBase + nativePath + " 均已尝试）: " + upstreamError(e2), e2);
+            }
+        } catch (Exception e) {
+            throw new IllegalStateException("Rerank 调用失败: " + e.getMessage(), e);
+        }
+        JsonNode results = resp != null && resp.has("results") ? resp.path("results")
+                : resp == null ? null : resp.path("output").path("results");
+        if (results == null || !results.isArray()) {
+            throw new IllegalStateException("Rerank 响应缺少 results");
+        }
+        Map<Integer, Double> scoreByIndex = new HashMap<>();
+        for (JsonNode r : results) {
+            int index = r.path("index").asInt(-1);
+            if (index >= 0 && index < documents.size()) {
+                scoreByIndex.put(index, r.path("relevance_score").asDouble(0));
+            }
+        }
+        List<Integer> order = new ArrayList<>(documents.size());
+        scoreByIndex.entrySet().stream()
+                .sorted(Map.Entry.<Integer, Double>comparingByValue().reversed())
+                .forEach(e -> order.add(e.getKey()));
+        for (int i = 0; i < documents.size(); i++) {
+            if (!scoreByIndex.containsKey(i)) {
+                order.add(i);
+            }
+        }
+        return order;
+    }
+
+    /** POST 一个 rerank 端点并返回 JSON（带网络层重试与总超时）。 */
+    private JsonNode postRerank(String baseUrl, String apiKey, String path, ObjectNode body) {
+        return build(baseUrl, apiKey, timeoutSeconds).post()
+                .uri(path)
+                .contentType(MediaType.APPLICATION_JSON)
+                .bodyValue(body)
+                .retrieve()
+                .bodyToMono(JsonNode.class)
+                .retryWhen(networkRetry())
+                .block(blockTimeout(timeoutSeconds));
+    }
+
+    /** 去掉 OpenAI 兼容后缀，得到原生 API 的 host：.../compatible-mode/v1 → ... */
+    private String stripCompatibleSuffix(String baseUrl) {
+        String url = stripSlash(baseUrl == null ? "" : baseUrl);
+        String suffix = "/compatible-mode/v1";
+        return url.endsWith(suffix) ? url.substring(0, url.length() - suffix.length()) : url;
     }
 
     private ObjectNode buildBody(String model, List<LlmMessage> messages, ChatParams params, boolean stream,

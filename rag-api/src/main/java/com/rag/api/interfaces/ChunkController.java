@@ -7,6 +7,9 @@ import com.rag.api.infrastructure.persistence.entity.ChunkEntity;
 import com.rag.api.interfaces.dto.Dtos;
 import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
+import org.springframework.http.CacheControl;
+import org.springframework.http.MediaType;
+import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
@@ -16,6 +19,8 @@ import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
+
+import java.time.Duration;
 
 @RestController
 @RequestMapping("/api/v1")
@@ -34,6 +39,14 @@ public class ChunkController {
     @GetMapping("/chunks/{id}")
     public ApiResult<ChunkEntity> get(@PathVariable long id) {
         return ApiResult.ok(chunkAppService.get(id));
+    }
+
+    @GetMapping("/chunks/{id}/image")
+    public ResponseEntity<byte[]> image(@PathVariable long id) {
+        return ResponseEntity.ok()
+                .contentType(MediaType.IMAGE_PNG)
+                .cacheControl(CacheControl.maxAge(Duration.ofHours(1)).cachePrivate())
+                .body(chunkAppService.imageBytes(id));
     }
 
     @PostMapping("/chunks")

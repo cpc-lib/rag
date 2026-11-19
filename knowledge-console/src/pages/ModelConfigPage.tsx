@@ -24,6 +24,7 @@ const TYPE_LABEL: Record<ModelType, string> = {
   VISION: '视觉',
   EMBEDDING: '向量',
   IMAGE: '文生图',
+  RERANK: '重排序',
 };
 
 const TYPE_COLOR: Record<ModelType, string> = {
@@ -31,6 +32,7 @@ const TYPE_COLOR: Record<ModelType, string> = {
   VISION: 'purple',
   EMBEDDING: 'cyan',
   IMAGE: 'geekblue',
+  RERANK: 'gold',
 };
 
 const formatTime = (raw: string | null) => {
@@ -83,18 +85,20 @@ export default function ModelConfigPage() {
 
   const openEdit = async (m: ModelItem) => {
     setEditing(m);
-    const detail = await modelApi.get(m.id);
+    const data = await modelApi.get(m.id);
     form.setFieldsValue({
-      name: detail.name,
-      type: detail.type,
-      baseUrl: detail.baseUrl ?? '',
-      model: detail.model ?? '',
-      apiKey: detail.apiKey ?? '',
-      temperature: detail.temperature,
-      topP: detail.topP,
-      maxTokens: detail.maxTokens,
-      embeddingDim: detail.embeddingDim,
+      name: data.name,
+      type: data.type,
+      baseUrl: data.baseUrl ?? '',
+      model: data.model ?? '',
+      apiKey: data.apiKey ?? '',
+      temperature: data.temperature,
+      topP: data.topP,
+      maxTokens: data.maxTokens,
+      embeddingDim: data.embeddingDim,
     });
+    // 先关闭详情抽屉再开编辑抽屉：两层抽屉叠加会互相遮挡，导致编辑面板点不到
+    setDetail(null);
     setModalOpen(true);
   };
 
@@ -139,10 +143,12 @@ export default function ModelConfigPage() {
         await modelApi.create(req);
         message.success('已新增，请点击启用');
       }
+      const editedId = editing?.id;
       setModalOpen(false);
       const recs = await refresh();
-      if (detail) {
-        setDetail(recs.find((r) => r.id === detail.id) ?? null);
+      // 从详情点进来的编辑：保存后回到详情
+      if (editedId) {
+        setDetail(recs.find((r) => r.id === editedId) ?? null);
       }
     } finally {
       setSaving(false);

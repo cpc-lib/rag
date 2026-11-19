@@ -4,7 +4,7 @@ spring:
   main:
     web-application-type: none
   datasource:
-    url: jdbc:mysql://${MYSQL_HOST:192.168.1.200}:${MYSQL_PORT:3306}/${MYSQL_DB:rag}?serverTimezone=Asia/Shanghai&useUnicode=true&characterEncoding=UTF-8&useSSL=false&allowPublicKeyRetrieval=true
+    url: jdbc:mysql://${MYSQL_HOST:127.0.0.1}:${MYSQL_PORT:3306}/${MYSQL_DB:rag}?serverTimezone=Asia/Shanghai&useUnicode=true&characterEncoding=UTF-8&useSSL=false&allowPublicKeyRetrieval=true
     username: ${MYSQL_USER:root}
     password: ${MYSQL_PASSWORD:rag123456}
     driver-class-name: com.mysql.cj.jdbc.Driver
@@ -12,15 +12,15 @@ spring:
       maximum-pool-size: 5
   data:
     redis:
-      host: ${MIDDLEWARE_HOST:192.168.1.200}
+      host: ${MIDDLEWARE_HOST:127.0.0.1}
       port: ${REDIS_PORT:6379}
   rabbitmq:
-    host: ${MIDDLEWARE_HOST:192.168.1.200}
+    host: ${MIDDLEWARE_HOST:127.0.0.1}
     port: ${RABBITMQ_PORT:5672}
     username: ${RABBITMQ_USER:guest}
     password: ${RABBITMQ_PASSWORD:guest}
   elasticsearch:
-    uris: http://${MIDDLEWARE_HOST:192.168.1.200}:${ES_PORT:9200}
+    uris: http://${MIDDLEWARE_HOST:127.0.0.1}:${ES_PORT:9200}
 
 mybatis-plus:
   configuration:
@@ -51,16 +51,17 @@ rag:
     # 长视频（≥60s）按时间轴切段并行转码的段数：单路 ffmpeg 无法跑满 NVENC，3 路并发聚合速度约 4x；
     # 显卡较弱/多任务并存可调小为 1（关闭并行）或 2
     transcode-parallel: ${TRANSCODE_PARALLEL:3}
-  minio:
-    endpoint: http://${MIDDLEWARE_HOST:192.168.1.200}:${MINIO_PORT:9000}
-    access-key: ${MINIO_USER:minioadmin}
-    secret-key: ${MINIO_PASSWORD:minioadmin123}
-    bucket: ${MINIO_BUCKET:rag-files}
+  storage:
+    endpoint: http://${MIDDLEWARE_HOST:127.0.0.1}:${RUSTFS_PORT:9000}
+    access-key: ${RUSTFS_USER:rustfsadmin}
+    secret-key: ${RUSTFS_PASSWORD:rustfsadmin123}
+    bucket: ${RUSTFS_BUCKET:rag-files}
+    region: ${RUSTFS_REGION:us-east-1}
   milvus:
-    host: ${MIDDLEWARE_HOST:192.168.1.200}
+    host: ${MIDDLEWARE_HOST:127.0.0.1}
     port: ${MILVUS_PORT:19530}
   etcd:
-    endpoints: http://${MIDDLEWARE_HOST:192.168.1.200}:${ETCD_PORT:2379}
+    endpoints: http://${MIDDLEWARE_HOST:127.0.0.1}:${ETCD_PORT:2379}
     enabled: true
   ocr:
     # Tesseract 训练数据目录（需包含 chi_sim.traineddata 等），留空则 OCR 降级跳过
@@ -73,6 +74,10 @@ rag:
   worker:
     max-retry: 3
     retry-base-delay-ms: 10000
+    # Embedding 批次并发度（每批 ≤10 条）：大文档向量化耗时近似线性下降；上游限流会自动退避重试
+    embedding-concurrency: ${RAG_EMBEDDING_CONCURRENCY:8}
+    # 同时处理的文档数（每个文档占 1 个线程；需 ≤ 租户 max_mq_concurrency，否则多余任务会排队重试）
+    ingest-concurrency: ${RAG_INGEST_CONCURRENCY:2}
 
 logging:
   level:

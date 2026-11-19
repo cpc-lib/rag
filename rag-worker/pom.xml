@@ -24,7 +24,7 @@
         <maven.compiler.parameters>true</maven.compiler.parameters>
         <mybatis-plus.version>3.5.7</mybatis-plus.version>
         <milvus.version>2.4.3</milvus.version>
-        <minio.version>8.5.12</minio.version>
+        <awssdk.version>2.25.70</awssdk.version>
         <poi.version>5.2.5</poi.version>
         <pdfbox.version>2.0.31</pdfbox.version>
         <tess4j.version>5.11.0</tess4j.version>
@@ -76,10 +76,16 @@
             <scope>runtime</scope>
         </dependency>
 
+        <!-- 对象存储统一走 S3 协议（RustFS/MinIO 等 S3 兼容服务） -->
         <dependency>
-            <groupId>io.minio</groupId>
-            <artifactId>minio</artifactId>
-            <version>${minio.version}</version>
+            <groupId>software.amazon.awssdk</groupId>
+            <artifactId>s3</artifactId>
+            <version>${awssdk.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
+            <artifactId>url-connection-client</artifactId>
+            <version>${awssdk.version}</version>
         </dependency>
         <dependency>
             <groupId>io.milvus</groupId>
@@ -104,6 +110,12 @@
         <dependency>
             <groupId>org.apache.poi</groupId>
             <artifactId>poi-ooxml</artifactId>
+            <version>${poi.version}</version>
+        </dependency>
+        <!-- .doc（Word 97-2003 二进制）解析 -->
+        <dependency>
+            <groupId>org.apache.poi</groupId>
+            <artifactId>poi-scratchpad</artifactId>
             <version>${poi.version}</version>
         </dependency>
         <dependency>

@@ -1,5 +1,6 @@
 package com.rag.worker.config;
 
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.scheduling.concurrent.ThreadPoolTaskExecutor;
@@ -14,10 +15,10 @@ import java.util.concurrent.ThreadPoolExecutor;
 @Configuration
 public class ExecutorConfig {
 
-    /** 文档解析流水线：CPU/IO 混合型，核心 2 线程 */
+    /** 文档解析流水线：CPU/IO 混合型，并发文档数可配置（rag.worker.ingest-concurrency） */
     @Bean
-    public Executor ingestExecutor() {
-        return buildExecutor("ingest-", 2, 16);
+    public Executor ingestExecutor(@Value("${rag.worker.ingest-concurrency:2}") int concurrency) {
+        return buildExecutor("ingest-", Math.max(1, concurrency), 16);
     }
 
     /** SHA-256 计算：纯 IO 流式读取，轻量，核心 2 线程 */

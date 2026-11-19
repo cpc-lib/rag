@@ -11,16 +11,16 @@ rag/
 ├── rag-api/             Spring Boot Web：API + SSE 问答（:8080）
 ├── rag-worker/          Spring Boot 非 Web：MQ 消费者 + 文档流水线
 ├── knowledge-console/   React18 + TS + Vite 控制台（:5173）
-├── docker-compose.yml   本机中间件（MySQL/Redis/MinIO/etcd/ES/Milvus）
+├── docker-compose.yml   本机中间件（MySQL/Redis/RustFS/etcd/ES/Milvus）
 ├── rag_demo.sql 等价物： rag-api/src/main/resources/db/migration/rag_demo.sql（手动建表，无 Flyway）
 ├── RAG_DOCUMENT_PROCESSING_PIPELINE.md   文档流水线规格（§1–§32）
 ├── AGENTS.md            AI/新人上手指南
 └── CODE_INTRO.md        本文件
 ```
 
-技术栈：Java 17 + Spring Boot 3.3.5 + MyBatis-Plus + MySQL 8 + Redis + RabbitMQ + MinIO + Milvus 2.5 + Elasticsearch 8 + etcd 3.5；前端 React 18 / Antd 5 / Zustand / Vite 5。
+技术栈：Java 17 + Spring Boot 3.3.5 + MyBatis-Plus + MySQL 8 + Redis + RabbitMQ + RustFS（S3 兼容对象存储）+ Milvus 2.5 + Elasticsearch 8 + etcd 3.5；前端 React 18 / Antd 5 / Zustand / Vite 5。
 
-两个后端进程共享同一个 MySQL、MinIO、Milvus、ES、etcd；**各自有一套独立的实体/Mapper 类**（包名不同，禁止互相依赖），API 侧偏交易与查询，Worker 侧偏流水线。
+两个后端进程共享同一个 MySQL、RustFS、Milvus、ES、etcd；**各自有一套独立的实体/Mapper 类**（包名不同，禁止互相依赖），API 侧偏交易与查询，Worker 侧偏流水线。
 
 ---
 
@@ -55,9 +55,9 @@ rag/
 ### 2.2 application —— 业务服务层
 
 - **`AuthService`**：登录校验、签发 JWT（委托 JwtAuthFilter.createToken）、登出加 Redis 黑名单、改密
-- **`ChatOrchestrator`**：问答主编排。意图判定 → 需要知识库则走 `RetrievalService` → 需要工具（天气/Tavily）则工具调用循环 → LLM 流式输出。SSE 事件：`session`、`search_start`、`search_result`（citations 含 rerankScore）、`message`（delta）、`done`（token usage）、`error`
+- **`ChatOrchestrator`**：问答主编排。意图判定 → 需要知识库则走 `RetrievalService` → 需要工具（天气/Tavily）则工具调用循环 → LLM 流式输出。SSE 事件：`session`、`search_start`、`search_result`（citations）、`message`（delta）、`done`（token usage）、`error`
 - **`RetrievalService`**：混合检索，见 §4.2
-- **`DocumentAppService`**：上传（配额校验→MinIO→落库→投 MQ）、列表、预签名下载、删除（事务内删 chunk/task + 同步清 ES/Milvus/MinIO）、reparse（投 REINDEX）
+- **`DocumentAppService`**：上传（配额校验→对象存储→落库→投 MQ）、列表、预签名下载、删除（事务内删 chunk/task + 同步清 ES/Milvus/对象存储）、reparse（投 REINDEX）
 - **`ChunkAppService`**：切片查询/手工增改删。手工编辑 AUTO child 会置空 parent_chunk_id；删除 child 会解散其 parent
 - **`KnowledgeBaseService`**：KB CRUD + `getOwned()`（租户归属校验，跨租户抛 NOT_FOUND）；建 KB 时自动种默认提示词模板；切片参数（parent/child/overlap/separators/strategy）
 - **`PromptTemplateService`**：模板归属 KB；普通用户仅见被授权模板；删除 KB 级联清模板与授权
@@ -65,9 +65,9 @@ rag/
 - **`TenantService`**：租户管理与配额字段（maxStorageMb/maxLlmTokensMonth/maxSseConnections/maxMqConcurrency）
 - **`UserManageService`**：用户与授权。菜单授权与工具授权走 `user_feature`（MENU/TOOL）两个独立列表勾选；KB/模板授权走 user_kb/user_prompt；列表固定 3 条 IN 批查避免 N+1
 - **`MenuService` / `ToolConfigService`**：菜单目录、租户可用菜单；工具租户开关 + 密钥（工具可用 = 租户开关 AND 用户授权）
-- **`QuotaService`**：存储用量**优先 MinIO 按租户前缀实际统计**（`statPrefixSize`，覆盖原文件/生成图/derived 产物），MinIO 不可达降级 DB 求和（document+generated_image）；`checkStorage` 上传拦截；Token 月配额；SSE 并发
+- **`QuotaService`**：存储用量**优先对象存储按租户前缀实际统计**（`sumSizeByPrefix`，覆盖原文件/生成图/derived 产物），对象存储不可达降级 DB 求和（document+generated_image）；`checkStorage` 上传拦截；Token 月配额；SSE 并发
 - **`ChatSessionService`**：会话与消息持久化、token_usage 累计
-- **`ImageGenerationService`**：文生图（z-image 同步接口）→ 下载 → MinIO（`{tenant}/generated/{user}/uuid.png`）→ generated_image 落库；上传前同样 checkStorage
+- **`ImageGenerationService`**：文生图（z-image 同步接口）→ 下载 → 对象存储（`{tenant}/generated/{user}/uuid.png`）→ generated_image 落库；上传前同样 checkStorage
 
 ### 2.3 infrastructure —— 基础设施
 
@@ -76,8 +76,8 @@ rag/
 - `image/ZImageClient`：文生图同步 POST + 图片下载；Base URL 规整（剥离 `/compatible-mode/v1` 等后缀）；下载签名 URL 必须用 `URI.create`
 - `search/EsSearchClient`：索引 ensure/按文档删/BM25 检索
 - `search/MilvusClientWrapper`：collection ensure（schema 仅 chunk_id+document_id 两个字段）、insert、按文档删、向量检索
-- `storage/MinioStorage`：upload/download/presign/statSize/statPrefixSize/deleteObject/deletePrefix；md/txt 强制 `charset=utf-8`
-- `etcd/EtcdService`：业务动态配置中心。`RetrievalConfig`（vectorTopN/keywordTopN/topK/finalContextTopK/rerankTopN/maxContextTokens/rrfK/lowConfidenceThreshold）从 etcd `/rag/config/global/retrieval` 热更，yml 仅兜底
+- `storage/ObjectStorage`（+ `storage/MultipartStorage`）：upload/download/downloadRange/presignUrl/statSize/deleteObject/deletePrefix/sumSizeByPrefix；分片上传 createUpload/uploadPart/complete/abort；md/txt 强制 `charset=utf-8`
+- `etcd/EtcdService`：业务动态配置中心。`RetrievalConfig`（vectorTopN/keywordTopN/topK/finalContextTopK/maxContextTokens/rrfK/lowConfidenceThreshold）从 etcd `/rag/config/global/retrieval` 热更，yml 仅兜底
 - `mq/IngestPublisher`：投递 parse/reindex 消息（direct exchange `rag.ingest`）
 - `tool/WeatherClient`、`tool/TavilyClient`：外部工具 HTTP 调用，出站受 SSRF + 出站确认双层管控
 
@@ -97,7 +97,7 @@ rag/
 
 ### 2.5 config
 
-`DataInitializer`（首次启动种超级租户 + admin/admin123）、`MinioConfig`、`MybatisPlusConfig`（分页插件）、`RabbitMqConfig`（拓扑见 §4.3）、`WebCorsConfig`。
+`DataInitializer`（首次启动种超级租户 + admin/admin123）、`StorageConfig`（S3Client/S3Presigner）、`MybatisPlusConfig`（分页插件）、`RabbitMqConfig`（拓扑见 §4.3）、`WebCorsConfig`。
 
 ---
 
@@ -128,7 +128,7 @@ rag/
 - pdf：PDFBox 2.0.31 文本层；扫描页/文本稀疏页渲染位图 → Tess4J OCR（`rag.ocr.tessdata` 留空则降级跳过）
 - html/htm：jsoup 去 script/style，DOM 转 markdown 结构文本
 - png/jpg/jpeg：走 VISION 模型描述（未配置则降级）
-- 输出 `ParseOutcome(pages, warnings)`，产物 JSON 写 MinIO `derived/{version}/`
+- 输出 `ParseOutcome(pages, warnings)`，产物 JSON 写对象存储 `derived/{version}/`
 
 **`TokenCounter`**：近似计数（中文 1 字 1 token，ASCII 连续段 ceil(len/4)），无第三方 tokenizer。
 
@@ -162,7 +162,7 @@ SPI 契约：`ChunkStrategy.mode()` 返回 `ChunkMode`；`plan(ChunkContext)` �
 - `llm/VisionClient`：图片理解（多模态 chat）
 - `ocr/OcrService`：Tess4j 封装，独立 rag-ocr 线程池
 - `search/EsIndexer` / `search/MilvusIndexer`：索引写入侧（与 API 的检索侧对应）
-- `storage/MinioStorage`：worker 侧同构副本
+- `storage/ObjectStorage`：worker 侧同构副本（预签名 2 小时，供 ffmpeg 直读）
 - `etcd/WorkerRegistry`：worker 实例注册/心跳到 etcd
 - persistence：worker 自己的 6 个实体（Chunk/Document/KnowledgeBase/Model/PipelineTask/Tenant），仅映射流水线需要的列
 
@@ -179,10 +179,10 @@ SPI 契约：`ChunkStrategy.mode()` 返回 `ChunkMode`；`plan(ChunkContext)` �
 1. 取租户启用的 CHAT/EMBEDDING/RERANK 模型与 `EtcdService` 检索参数
 2. Milvus 向量召回 vectorTopN（默认 20）+ ES BM25 keywordTopN（20），两路各得 chunkId 列表
 3. **RRF 融合**：score = Σ 1/(rrfK + rank)，rrfK=60；融合后取 topK=8
-4. **Rerank（可选）**：拉取候选 chunk 文本调 RERANK 模型 `/rerank`，按 relevance_score 重排截到 rerankTopN=5；未配置模型或调用异常 → 直接沿用 RRF 顺序（warn 日志，不失败）
+4. **Rerank（可选）**：拉取候选 chunk 文本调 RERANK 模型 `POST {base}/rerank`（`model + query + documents + top_n`，解析 `results[].relevance_score`），按分数降序重排后继续走 parent 扩展；未配置模型、配置不完整或调用异常 → 直接沿用 RRF 顺序（warn 日志，不失败）
 5. **Parent 扩展**：CHILD 命中回溯 parent 内容，按 parent 单元去重
 6. **Token Budget**：按排序顺序累加近似 token，超过 maxContextTokens=12000 即截断
-7. citations 带回得分（含可空 rerankScore）供前端展示来源
+7. citations 带回得分（score）供前端展示来源
 
 低置信度（最高分 < lowConfidenceThreshold=0.35）时编排层可走兜底话术/工具分支。
 
@@ -198,7 +198,7 @@ direct exchange: rag.ingest（API/Worker 双侧声明，持久化）
 
 ### 4.4 文生图
 
-`ImageController.generate` → `ImageGenerationService`：菜单校验 → 启用 IMAGE 模型（base/key/model 留空回退 DashScope 官方 / LLM key / z-image-turbo）→ 同步生成 → 下载 PNG → checkStorage → MinIO → generated_image 落库。下载走后端鉴权端点（跨域 a[download] 与 MinIO CORS 限制）。
+`ImageController.generate` → `ImageGenerationService`：菜单校验 → 启用 IMAGE 模型（base/key/model 留空回退 DashScope 官方 / LLM key / z-image-turbo）→ 同步生成 → 下载 PNG → checkStorage → 对象存储 → generated_image 落库。下载走后端鉴权端点（跨域 a[download] 与对象存储 CORS 限制）。
 
 ---
 
@@ -224,7 +224,7 @@ direct exchange: rag.ingest（API/Worker 双侧声明，持久化）
 | chat_session / chat_message | 会话/消息 | 均按 tenant_id+user_id 隔离；message 存 token_usage |
 | generated_image | 生成图历史 | user_id、object_key、file_size、prompt/model/size/seed/status |
 
-MinIO 对象布局：
+对象存储（RustFS）对象布局：
 - 原文件：`{tenantId}/{kbId}/{yyyy-MM-dd}/{uuid}.{ext}`
 - 生成图：`{tenantId}/generated/{userId}/{uuid}.png`
 - 派生产物：`derived/{versionId}/parsed.json`、`ocr.json` 等
@@ -247,11 +247,11 @@ MinIO 对象布局：
 
 ## 7. 配置索引（application.yml）
 
-rag-api `rag.*`：`jwt.secret/ttl-hours`、`minio.*`、`milvus.*`、`etcd.endpoints/enabled`、`mq.exchange/queue/retry-queue/dlq-queue`、`retrieval.*`（vector/keyword/top-k/final-context-top-k/max-context-tokens/rrf-k/low-confidence-threshold）、`llm.timeout-seconds`、`chat.sse-timeout-seconds`。
+rag-api `rag.*`：`jwt.secret/ttl-hours`、`storage.*`（S3 endpoint/access-key/secret-key/bucket/region/presign-minutes）、`milvus.*`、`etcd.endpoints/enabled`、`mq.exchange/queue/retry-queue/dlq-queue`、`retrieval.*`（vector/keyword/top-k/final-context-top-k/max-context-tokens/rrf-k/low-confidence-threshold）、`llm.timeout-seconds`、`chat.sse-timeout-seconds`。
 
 rag-worker 额外：`ocr.tessdata/langs`、`es.analyzer`、`worker.max-retry/retry-base-delay-ms`。
 
-所有主机默认 `192.168.1.200`，库名默认 `rag_demo`，均支持环境变量覆盖。
+所有主机默认 `127.0.0.1`，库名默认 `rag_demo`，均支持环境变量覆盖。
 
 ---
 

@@ -13,6 +13,9 @@ public interface ChunkMapper {
 
     int insert(ChunkEntity entity);
 
+    /** 批量插入（切片落库用，避免逐条往返）。 */
+    int insertBatch(@Param("list") List<ChunkEntity> chunks);
+
     int updateById(ChunkEntity entity);
 
     Page<ChunkEntity> selectPageByDocumentId(Page<ChunkEntity> page, @Param("documentId") Long documentId);

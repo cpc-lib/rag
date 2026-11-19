@@ -70,9 +70,11 @@ public class IngestConsumer {
             return;
         }
 
-        // 租户并发额度：超出则直接放弃（消息已 ack，不再 requeue；由用户重新触发或依赖重试机制）
+        // 租户并发额度已满：延迟重新排队，不能直接丢弃（消息已 ack，丢弃会让任务永远 PENDING、文档卡在解析中）
         if (!semaphore.tryAcquire(msg.tenantId())) {
-            log.warn("租户 {} MQ 并发已达上限，任务跳过 task={}", msg.tenantId(), msg.taskId());
+            long delay = 15000L;
+            log.warn("租户 {} MQ 并发已达上限，{}ms 后重新排队 task={}", msg.tenantId(), delay, msg.taskId());
+            retryPublisher.publishRetry(msg, delay);
             return;
         }
 
