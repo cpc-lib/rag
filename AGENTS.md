@@ -209,5 +209,5 @@ SSE 事件类型（ChatOrchestrator）：`session` / `search_start` / `search_re
 
 ## 10. 参考文档
 
+- [README.md](README.md) — 架构图、核心链路时序、代码逐包导读、数据模型与配置说明
 - [RAG_DOCUMENT_PROCESSING_PIPELINE.md](RAG_DOCUMENT_PROCESSING_PIPELINE.md) — 文档处理流水线完整规格（解析/切片/多模态/检索/Rerank/预算，§1–§32）
-- [CODE_INTRO.md](CODE_INTRO.md) — 代码逐包导读与关键流程详解

@@ -335,6 +335,17 @@ sequenceDiagram
 
 SSE 事件：`session` / `search_start` / `search_result`（含引用）/ `message`（增量）/ `done`（用量）/ `error`。天气 / Tavily 工具调用复用 `search_start` 事件并携带 `stage=tool`。
 
+**检索实现细节**
+
+- **Query 改写**：`QueryRewriteService.expand` 默认开启，最多 3 条子查询，8 秒超时；未启用或失败时直接用原问题
+- **RRF 公式**：`score = Σ 1 / (rrfK + rank)`，`rrfK=60`；双路召回各 20 条（`vectorTopN` / `keywordTopN`），融合后取 `topK=8`
+- **Rerank**：`POST {base}/rerank`（`model + query + documents + top_n`），解析 `results[].relevance_score` 降序；未配置或调用异常沿用 RRF 顺序
+- **上下文预算**：CHILD 命中回溯 PARENT 后按 parent 去重，最终引用不超过 `finalContextTopK=5`，累计 token 不超过 `maxContextTokens=12000`
+- **向量化文本**：`文档：{文件名}\n章节：{sectionPath}\n类型：{contentType}\n\n{content}`，切片带上下文语义
+- **降级标记**：`search_result` 事件携带 `degraded`、`vectorAvailable`、`keywordAvailable`，前端可提示单路召回失效
+
+以上参数均有 yml 兜底值，可从 etcd `/rag/config/global/retrieval` 热更覆盖。
+
 ### 视频转码
 
 ```
@@ -407,6 +418,189 @@ flowchart LR
 
 可选能力统一静默降级：Rerank、OCR、Vision 调用失败只打 warn 日志，不阻断主流程；未配置对应模型时功能侧自动跳过。
 
+## 代码导读
+
+### rag-api 逐包（`com.rag.api`）
+
+启动类 `RagApiApplication`。
+
+**interfaces —— Web 入口**
+
+| 类 | 路由前缀 | 职责 |
+|---|---|---|
+| `AuthController` | `/api/v1/auth` | 登录 / 登出 / 当前用户 / 改密 |
+| `TenantController` | `/api/v1/tenants` | 平台管理员管理租户，含创建租户管理员 |
+| `KnowledgeBaseController` | `/api/v1/knowledge-bases` | 知识库 CRUD |
+| `DocumentController` | `/api/v1/documents` | 上传 / 列表 / 开始·停止·重新解析 / 删除 / 预签名下载 / 预览 |
+| `ChunkController` | `/api/v1` | 切片列表 / 详情 / 增改删 / `{id}/image` |
+| `ChunkUploadController` | `/api/v1/uploads` | 切片附件分片上传 |
+| `PromptTemplateController` | `/api/v1/prompts` | 提示词模板（归属知识库） |
+| `ModelController` | `/api/v1/models` | 模型池 CRUD + 启用开关 |
+| `UserManageController` | `/api/v1/users` | 用户、重置密码、菜单/工具/KB/提示词授权 |
+| `MenuController` | `/api/v1/menus` | 菜单目录与租户菜单开通 |
+| `ToolController` / `ToolConfigController` | `/api/v1/tools`、`/api/v1/tool-config` | 工具目录 / 租户开关与密钥 |
+| `ChatController` | `/api/v1/chat` | `POST /stream` SSE 问答 |
+| `ChatSessionController` | `/api/v1/chat-sessions` | 历史会话与消息 |
+| `ImageController` | `/api/v1/images` | 文生图 / 历史 / 鉴权代理下载 |
+| `QuotaController` | `/api/v1/quotas` | 存储、Token、SSE、MQ 配额用量 |
+| `FileLibraryController` | `/api/v1/library/files` | 文件库、分片上传、在线播放、触发转码 |
+| `SubtitleController` | `/api/v1/subtitles` | 字幕导入 / 编辑 / 翻译 |
+| `PipelineOpsController` | `/api/v1/ops/pipeline` | 队列积压查看、DLQ 重放 |
+| `GlobalExceptionHandler` | — | 统一异常 → `ApiResult`；未知路由 404 |
+
+`dto/Dtos.java` 集中全部请求/响应 record；`security/JwtAuthFilter`、`security/AuthGuard` 负责鉴权；`guard/SseConnectionGuard` 做租户级 SSE 并发计数。
+
+**application —— 业务服务**
+
+- `ChatOrchestrator`：问答主编排。工具意图预判 → 知识库检索路径（Query 改写 → 混合检索 → 模板渲染 → 流式生成）或工具调用循环 → SSE 输出
+- `RetrievalService`：混合检索，见下文「检索实现细节」
+- `QueryRewriteService`：多轮问题改写/扩展，默认开启，最多 3 条子查询，超时降级为原问题
+- `DocumentAppService`：上传（配额 → 对象存储 → 落库 → SHA-256）、开始/停止/重新解析、删除（事务内删切片与任务 + 清 ES/Milvus/对象存储）
+- `ChunkAppService`：切片查询与手工增删改；手工编辑 AUTO CHILD 会脱离 parent，删除 CHILD 会解散其 PARENT
+- `ChunkUploadService`：切片附件分片上传
+- `KnowledgeBaseService`：知识库 CRUD + `getOwned()` 归属校验；建库时种默认提示词模板
+- `PromptTemplateService`：模板归属知识库；普通用户仅见被授权模板；删库级联清理
+- `ModelService`：模型池，类型 `CHAT / VISION / EMBEDDING / IMAGE / RERANK`，同租户同类型单启用互斥
+- `TenantService`：租户与配额字段（存储 / 月 Token / SSE 并发 / MQ 并发）
+- `UserManageService`：用户与三类授权（菜单、工具、知识库/提示词）
+- `MenuService` / `ToolConfigService`：菜单目录与租户开通；工具可用 = 租户开关 AND 用户授权
+- `QuotaService`：存储用量优先按对象存储租户前缀实测，不可达降级 DB 求和；上传前拦截
+- `ChatSessionService`：会话与消息持久化、token 用量累计
+- `ImageGenerationService`：文生图 → 下载 → 对象存储 → `generated_image` 落库
+- `FileLibraryService` / `MediaTranscodeService`：文件库、分片上传、HLS 转码与进度
+- `SubtitleService` / `SubtitleCodec`：字幕解析、编辑、翻译与格式编解码
+- `PipelineOpsService`：队列积压查询与死信重放
+
+**infrastructure —— 基础设施**
+
+- `llm/LlmClient`：OpenAI 兼容 chat / embeddings / rerank，WebClient + SSE，`newConnection()` 防连接被 RST
+- `image/ZImageClient`：文生图同步调用 + 图片下载，Base URL 自动规整
+- `search/EsSearchClient`、`search/MilvusClientWrapper`：索引 ensure、按文档删除、BM25 / 向量检索
+- `storage/ObjectStorage` + `storage/MultipartStorage`：S3 协议上传/下载/预签名/统计/删除，分片上传；文本类强制 `charset=utf-8`
+- `etcd/EtcdService`：业务动态配置，`RetrievalConfig` 从 `/rag/config/global/retrieval` 热更
+- `mq/IngestPublisher`：投递 parse / reindex
+- `tool/WeatherClient`、`tool/TavilyClient`：外部工具调用，出站受 SSRF 与出站确认管控
+
+**鉴权链路**
+
+```
+请求（白名单：/api/v1/auth/login、/actuator、/error）
+  → JwtAuthFilter（OncePerRequestFilter）
+      Authorization: Bearer <jwt>
+      claims：sub=userId、tid=tenantId、ut=userType、name；jti 支持 Redis 黑名单（rag:jwt:bl:{jti}）
+      X-Tenant-Id 头必须与 tid 一致（平台管理员除外）
+      → TenantContext.set(Session)（ThreadLocal，finally 必 clear）
+  → Controller 内 AuthGuard.requirePlatform() / requireTenantAdmin() 或业务层归属校验
+```
+
+**config**：`DataInitializer`（种子租户与 admin）、`StorageConfig`（S3Client / S3Presigner）、`MybatisPlusConfig`、`RabbitMqConfig`、`WebCorsConfig`。
+
+### rag-worker 逐包（`com.rag.worker`）
+
+启动类 `RagWorkerApplication`，非 Web 进程。
+
+- `consumer/IngestConsumer`：`rag.ingest.parse` 消费者，手动 ack；校验 task=PENDING → 租户信号量 → RUNNING → `PipelineProcessor` → ack；失败按 `retry_count` 延迟重试，超 `max-retry` 置 FAILED 并投 DLQ
+- `consumer/MediaTranscodeConsumer`：视频转码消费者，收到即 ack 后提交线程池异步执行
+- `consumer/Sha256Consumer`：文件 SHA-256 异步计算
+- `consumer/StaleTaskRecovery`：启动时回收僵死 RUNNING 任务
+- `mq/RetryPublisher`、`mq/TenantMqSemaphore`：延迟重试投递（per-message TTL）与租户并发额度
+- `config/RabbitConfig`、`config/ExecutorConfig`：与 API 侧同构声明拓扑；三类消费者统一线程池
+- `pipeline/PipelineProcessor`：`PARSE`（解析→切片→图片素材→向量化→双写）与 `REINDEX`（保留切片重嵌重建）
+- `pipeline/ParseService`：按扩展名分派；PDF 同时抽取内嵌位图与矢量页截图
+- `pipeline/image/ImageAssetService`：图片 OCR + Vision 描述、上传对象存储、生成 IMAGE 切片
+- `pipeline/TokenCounter`：近似 token 计数（中文 1 字≈1 token，ASCII 连续段 ceil(len/4)），无第三方 tokenizer
+- `pipeline/DocProgressPublisher`、`pipeline/StoppedException`：进度广播与停止信号
+- `pipeline/pdf/*`、`pipeline/table/*`、`pipeline/ChunkMetadataResolver`：PDF 版式/表格辅助与切片元数据
+- `infrastructure/llm/EmbeddingClient`：`POST {base}/embeddings`，每批 ≤10，按 index 还原 float[]
+- `infrastructure/llm/VisionClient`、`infrastructure/ocr/OcrService`：图片理解与 Tess4J OCR
+- `infrastructure/search/EsIndexer`、`MilvusIndexer`：索引写入侧
+- `infrastructure/storage/ObjectStorage`：S3 协议写入与预签名读取
+- `infrastructure/etcd/WorkerRegistry`：实例注册与心跳
+- 持久层直接引用 `rag-common` 的实体与 Mapper，worker 内不再有实体类
+
+### 切片策略（`pipeline.chunk`）
+
+SPI 契约：`ChunkStrategy.mode()` 返回 `ChunkMode`；`plan(ChunkContext)` 返回 `List<ChunkPlan>`。`ChunkPlan` 是显式 record（parentChild 标志、parentContent、sectionTitle/Path、contentHash、children），`ChunkSupport` 提供打包、重叠、表格转换等共享能力。参数（parentSize / childSize / overlap / separators）来自 `knowledge_base`，为空时用策略默认值。
+
+| 模式 | 策略类 | 要点 |
+|---|---|---|
+| FIXED_SIZE | `FixedSizeStrategy` | 定长切分 |
+| RECURSIVE | `RecursiveStrategy` | 分隔符层级递归 |
+| PARAGRAPH | `ParagraphStrategy` | 段落聚合 |
+| SENTENCE | `SentenceStrategy` | 句子粒度 |
+| SEMANTIC | `SemanticStrategy` | 相邻片段 embedding 相似度断点 |
+| STRUCTURE | `StructureStrategy` | 结构化标题树 |
+| MARKDOWN | `MarkdownStrategy` / `MarkdownLikeStrategy` | Markdown 标题层级 |
+| HTML | `HtmlStrategy` | HTML DOM 结构 |
+| PDF_LAYOUT | `PdfLayoutStrategy` | PDF 版式、页眉页脚去除、图片页处理 |
+| TABLE | `TableStrategy` | 表格块，大表续片 |
+| QA | `QaStrategy` | 问答对格式 |
+| PARENT_CHILD | `ParentChildStrategy` | 主力策略：父子双粒度 |
+| SLIDING_WINDOW | `SlidingWindowStrategy` | 滑动窗口 |
+| CODE | `CodeStrategy` | Java 用 JavaParser AST，其余语言启发式 |
+| AUTO | `ChunkStrategyRouter` | pdf→PDF_LAYOUT，代码扩展名→CODE，其余→PARENT_CHILD |
+
+### RabbitMQ 拓扑
+
+```
+direct exchange: rag.ingest（API / Worker 双侧幂等声明，持久化）
+  rk parse           → rag.ingest.parse        PARSE 与 REINDEX 共用主队列
+  rk reindex         → rag.ingest.parse
+  rk retry           → rag.ingest.retry        单消息 TTL，死信回主队列 rk=parse
+  rk dlq             → rag.ingest.dlq          超过最大重试的终态
+  rk media.transcode → rag.media.transcode     视频转码
+  rk sha256          → rag.sha256              文件摘要计算
+```
+
+### 数据与对象存储
+
+持久层统一在 `rag-common`：25 个 `@TableName` 实体 + 普通 Mapper 接口 + `resources/mapper/*.xml`（insert/update/delete 均在 XML 中手写，软删除统一 `deleted=1`）。建表由 rag-api 的 Flyway `V1__init_schema.sql` 完成，worker 不引入 Flyway。
+
+| 表 | 作用 | 关键字段 / 约束 |
+|---|---|---|
+| `tenant` | 租户 | `tenant_code` 唯一且不可改；四类配额 |
+| `sys_user` | 用户 | `tenant_id + username`；`user_type` 0/1/2 |
+| `sys_menu` / `sys_tool` | 菜单/工具目录 | `code` 唯一 |
+| `user_feature` | 功能授权 | `user_id + feature_type(MENU/TOOL) + code` |
+| `user_kb` / `user_prompt` | 数据授权 | 知识库与提示词模板 |
+| `knowledge_base` | 知识库 | 每库独立 `es_index` / `milvus_collection`；切片策略与参数 |
+| `document` | 文档 | `object_key`、`status`、`progress`、`page_count`、`warning` / `error_msg` |
+| `chunk` | 切片 | `chunk_type(PARENT/CHILD)`、`parent_chunk_id`、`status(AUTO/MANUAL/DELETED)`、`content_type(TEXT/TABLE/IMAGE/CODE)`、`image_url/image_ocr/image_vision`；**无 tokenCount 列** |
+| `pipeline_task` | 流水线任务 | `type(PARSE/REINDEX)`、`status(PENDING/RUNNING/SUCCESS/FAILED/CANCELLED)`、`retry_count` |
+| `prompt_template` | 提示词 | 归属 `kb_id`；`is_default` |
+| `model` | 模型池 | `tenant + type + enabled`；密钥脱敏返回 |
+| `chat_session` / `chat_message` | 会话/消息 | 按 `tenant_id + user_id` 隔离；消息存 citations 与 token 用量 |
+| `generated_image` | 文生图历史 | `user_id`、`object_key`、`prompt`、`size`、`seed` |
+| `library_file` | 文件库 | 分片上传、HLS 转码状态 |
+| `subtitle` / `subtitle_cue` / `subtitle_cue_backup` | 字幕 | 字幕条与备份 |
+| `translate_lang` | 目标语言 | 租户维护 |
+
+RustFS 对象布局：
+
+```
+原文件      {tenantId}/{kbId}/{yyyy-MM-dd}/{uuid}.{ext}
+PDF 图片    {tenantId}/{kbId}/derived/{docId}/images/p{page}-{hash8}.png
+生成图      {tenantId}/generated/{userId}/{uuid}.png
+视频 HLS    {原文件 objectKey}.hls/
+```
+
+### 前端导读（knowledge-console）
+
+- 入口 `main.tsx` → `App.tsx`：三层路由守卫 `RequireAuth`（登录）/ `RequireUserType`（角色）/ `RequireMenu`（普通用户菜单码）
+- 页面：`LoginPage`、`TenantsPage`、`ModelConfigPage`、`KnowledgeBasesPage` + `KbDetailPage`、`PromptPage`、`ToolConfigPage`、`UsersPage`、`QuotaPage`、`ChatPage`、`ImageStudioPage`、`FileLibraryPage` + `FilePreviewPage`、`SubtitlePage`、`TranslateLangPage`
+- `api/client.ts`：axios 实例，拦截器注入 Bearer 与租户头，401 清登录态；类型集中在 `api/types.ts`
+- `store/auth.ts`：Zustand 持久化 token / 用户 / menuCodes
+- SSE 问答用 `@microsoft/fetch-event-source`，事件名与后端一致；Vite 仅代理 `/api → http://localhost:8080`
+
+### 修改代码检查清单
+
+- 新增接口：Controller 路由挂 `/api/v1` → DTO 加到 `Dtos.java` → 业务落 `application/` → 补租户归属校验 → 前端 `api/*.ts` + `types.ts` + 页面
+- 新增切片策略：实现 `ChunkStrategy`（`@Component`）→ `ChunkMode` 加枚举 → 必要时改 `ChunkStrategyRouter` 的 AUTO 映射 → 补 `ChunkPipelineTest`
+- 改 `chunk` 表：同步 Flyway 迁移、`rag-common` 实体、Mapper XML、检索与前端类型；**不得加 tokenCount**
+- 改模型调用：新类型先注册到 `ModelService`，失败降级策略与告警日志要明确
+- 改鉴权：过滤器、`AuthGuard`、前端路由守卫、菜单/工具授权四处一起看
+- 验证：`mvn -f rag-common/pom.xml install -DskipTests` → `mvn -f rag-worker/pom.xml clean test` → `mvn -f rag-api/pom.xml clean compile -DskipTests` → 前端 `npm run typecheck`
+
 ## 主要配置
 
 后端配置命名空间为 `rag.*`，均可用环境变量覆盖，常用项：
@@ -468,5 +662,4 @@ systemctl daemon-reload
 ## 进一步阅读
 
 - [AGENTS.md](AGENTS.md) — 项目全貌、架构地图、编码约定与常见坑位
-- [CODE_INTRO.md](CODE_INTRO.md) — 代码逐包导读与关键流程详解
 - [RAG_DOCUMENT_PROCESSING_PIPELINE.md](RAG_DOCUMENT_PROCESSING_PIPELINE.md) — 文档解析 / 切片 / 多模态 / 检索完整规格（§1–§32）
