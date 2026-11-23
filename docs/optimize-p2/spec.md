@@ -152,7 +152,7 @@ rag:
     max-external-calls: ${RAG_RECONCILE_MAX_CALLS:2000}
     max-duration-ms: ${RAG_RECONCILE_MAX_DURATION_MS:300000}
     cleanup-task-limit: ${RAG_RECONCILE_CLEANUP_LIMIT:100}
-    delete-batch: ${RAG_RECONCILE_DELETE_BATCH:500}
+    delete-kb-ids: ${RAG_RECONCILE_DELETE_KB_IDS:}   # dry-run=false 时的删除白名单，空=不限
     retention-days: ${RAG_RECONCILE_RETENTION_DAYS:30}
     report-ttl-hours: ${RAG_RECONCILE_REPORT_TTL_HOURS:168}
 ```
@@ -224,7 +224,7 @@ rag:
 1. `enabled=false` 启动 Worker，观察无 ES/Milvus 请求日志。
 2. 造 1 条 SQL 有效切片 + 1 条孤立 ES 文档 + 1 条孤立 Milvus 向量。
 3. `enabled=true, dry-run=true`：报告 `orphanEs=1, orphanMilvus=1, deleted*=0`。
-4. `dry-run=false`：孤儿被删，`chunk` 表行数不变。
+4. `dry-run=false`：孤儿被删，`chunk` 表行数不变；配置 `delete-kb-ids` 时仅白名单 KB 执行删除。
 5. 删除文档时人为让 Milvus 不可达：`index_cleanup_task` 新增 PENDING 行；恢复 Milvus 后下一轮巡检置 DONE。
 
 ### 1.11 可观测性

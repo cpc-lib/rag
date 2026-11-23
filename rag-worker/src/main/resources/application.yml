@@ -73,6 +73,8 @@ rag:
     # 索引一致性巡检（MySQL CHILD 切片 vs ES/Milvus chunkId）：默认关闭，首轮建议 dry-run 观察报告后再开启删除
     enabled: ${RAG_RECONCILE_ENABLED:false}
     dry-run: ${RAG_RECONCILE_DRY_RUN:true}
+    # 删除白名单（逗号分隔 kbId）：dry-run=false 时仅白名单内 KB 执行删除；留空表示不限制
+    delete-kb-ids: ${RAG_RECONCILE_DELETE_KB_IDS:}
     interval-ms: ${RAG_RECONCILE_INTERVAL_MS:3600000}
     initial-delay-ms: ${RAG_RECONCILE_INITIAL_DELAY_MS:300000}
     max-kbs-per-run: ${RAG_RECONCILE_MAX_KBS:1}

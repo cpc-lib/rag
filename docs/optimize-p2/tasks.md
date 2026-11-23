@@ -35,11 +35,12 @@
   - `PipelineOpsController` 新增 `GET /api/v1/ops/pipeline/reconcile/last`（`AuthGuard.requirePlatform()`）
   - 验证：无报告时返回 `available=false`；平台管理员可读，租户用户 403/404
 - [x] A8 单元测试
-  - `rag-worker/src/test/java/com/rag/worker/reconcile/IndexReconcileServiceTest.java`（9 个用例，见 spec 1.10）
+  - `rag-worker/src/test/java/com/rag/worker/reconcile/IndexReconcileServiceTest.java`（10 个用例，见 spec 1.10；含 delete-kb-ids 白名单）
   - 验证：`mvn -f rag-worker/pom.xml clean test`
-- [ ] A9 集成验证（环境阻塞：本机未启动 rag compose 的 ES/Milvus/RabbitMQ 等中间件，未执行；核心分支已由 A8 覆盖）
+- [x] A9 集成验证（本地 compose，3307/6380 端口避开占用；真实 ES 8.14 + Milvus 2.5 通过）
   - 按 spec 1.10 手工步骤 1–5 执行，记录报告 JSON
-  - 验证：dry-run 不删除；删除模式仅清孤儿；MySQL 切片数不变
+  - 结果：dry-run 报告 `orphanEs=1, orphanMilvus=1, deleted*=0`；`delete-kb-ids` 删除轮 `deletedEs=1, deletedMilvus=1`，MySQL 切片数仍为 1
+  - 另发现并修复 `KnowledgeBaseMapper.xml` 双重 UTF-8 BOM（否则运行期 XML 解析失败、应用无法启动）
 
 ## 阶段 B：前端组件拆分（纯重构）
 
@@ -79,9 +80,11 @@
   - `feat: 索引一致性巡检与孤儿清理`
   - `refactor: 拆分文件库上传与播放组件`
   - 文档：`docs: 补充 OPTIMIZE P2 计划与规格`
-- [ ] D4 上线参数确认
-  - Worker 首轮 `RAG_RECONCILE_ENABLED=true` + `RAG_RECONCILE_DRY_RUN=true`
-  - 观察 `GET /api/v1/ops/pipeline/reconcile/last` 报告后，再按知识库逐步开启删除模式
+- [x] D4 上线参数确认（已在本地 compose 实测生效）
+  - 首轮：`RAG_RECONCILE_ENABLED=true` + `RAG_RECONCILE_DRY_RUN=true`，每轮 1 个 KB（`RAG_RECONCILE_MAX_KBS=1`）
+  - 观察 `GET /api/v1/ops/pipeline/reconcile/last`：先确认目标 KB 的报告 `errors=[]` 且孤儿数符合预期
+  - 开启删除：`RAG_RECONCILE_DRY_RUN=false` + `RAG_RECONCILE_DELETE_KB_IDS=<已确认的kbId,逗号分隔>`，未列入白名单的 KB 仍只统计不删除
+  - 回滚：`RAG_RECONCILE_ENABLED=false` 立即停止巡检，不影响主链路
 
 ## 全局验收
 

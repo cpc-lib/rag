@@ -75,15 +75,39 @@ public class IndexReconcileService {
     private int retentionDays = 30;
     @Value("${rag.reconcile.report-ttl-hours:168}")
     private long reportTtlHours = 168;
+    /** 删除白名单：dry-run=false 时仅这些 KB 执行删除；为空表示不限制。 */
+    @Value("${rag.reconcile.delete-kb-ids:}")
+    private String deleteKbIdsRaw = "";
+    private Set<Long> deleteKbIds = Set.of();
 
     @PostConstruct
     void validateConfig() {
+        deleteKbIds = parseKbIds(deleteKbIdsRaw);
         if (maxDocsPerKb * 2 > maxExternalCalls) {
             int adjusted = Math.max(1, maxExternalCalls / 2);
             log.warn("rag.reconcile 预算不匹配：max-docs-per-kb({}) * 2 > max-external-calls({})，自动下调为 {}",
                     maxDocsPerKb, maxExternalCalls, adjusted);
             maxDocsPerKb = adjusted;
         }
+    }
+
+    private static Set<Long> parseKbIds(String raw) {
+        if (raw == null || raw.isBlank()) {
+            return Set.of();
+        }
+        Set<Long> ids = new HashSet<>();
+        for (String part : raw.split(",")) {
+            String s = part.trim();
+            if (s.isEmpty()) {
+                continue;
+            }
+            try {
+                ids.add(Long.parseLong(s));
+            } catch (NumberFormatException e) {
+                log.warn("rag.reconcile.delete-kb-ids 含非法值，已忽略: {}", s);
+            }
+        }
+        return ids;
     }
 
     @Scheduled(fixedDelayString = "${rag.reconcile.interval-ms:3600000}",
@@ -224,6 +248,10 @@ public class IndexReconcileService {
         report.kbIds.add(kb.getId());
         String esIndex = IndexNames.physical(kb.getEsIndex(), kb.getIndexVersion());
         String milvusCollection = IndexNames.physical(kb.getMilvusCollection(), kb.getIndexVersion());
+        boolean deleteAllowed = !dryRun && (deleteKbIds.isEmpty() || deleteKbIds.contains(kb.getId()));
+        if (!dryRun && !deleteAllowed) {
+            log.info("巡检跳过删除：kb={} 不在 delete-kb-ids 白名单", kb.getId());
+        }
         long cursor = Math.max(0L, afterDocId);
         int scanned = 0;
         while (scanned < maxDocsPerKb) {
@@ -250,7 +278,7 @@ public class IndexReconcileService {
                     break;
                 }
                 try {
-                    reconcileDocument(esIndex, milvusCollection, documentId, budget, report);
+                    reconcileDocument(esIndex, milvusCollection, documentId, deleteAllowed, budget, report);
                 } catch (Exception e) {
                     report.errors.add("doc=" + documentId + ": " + e.getMessage());
                     abort = true;
@@ -273,7 +301,7 @@ public class IndexReconcileService {
     }
 
     private void reconcileDocument(String esIndex, String milvusCollection, long documentId,
-                                   ReconcileBudget budget, ReconcileReport report) {
+                                   boolean deleteAllowed, ReconcileBudget budget, ReconcileReport report) {
         List<Long> expectedIds = chunkMapper.selectChildIdsByDocumentId(documentId);
         Set<Long> expected = expectedIds == null ? Set.of() : new HashSet<>(expectedIds);
 
@@ -312,7 +340,7 @@ public class IndexReconcileService {
         if (!milvus.indexMissing()) {
             report.missingMilvus += subtract(expected, milvus.ids()).size();
         }
-        if (dryRun) {
+        if (!deleteAllowed) {
             return;
         }
 

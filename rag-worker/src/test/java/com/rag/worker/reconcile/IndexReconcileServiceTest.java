@@ -23,6 +23,7 @@ import org.springframework.test.util.ReflectionTestUtils;
 import java.time.Duration;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -184,6 +185,41 @@ class IndexReconcileServiceTest {
         assertEquals(0, report.deletedEs);
         assertEquals(0, report.deletedMilvus);
         verifyNoInteractions(esIndexer);
+    }
+
+    @Test
+    void deleteKbIdsWhitelistLimitsDeletion() {
+        dryRun(false);
+        ReflectionTestUtils.setField(service, "deleteKbIds", Set.of(1L));
+
+        KnowledgeBaseEntity notListed = kb(2, "READY");
+        when(documentMapper.selectIdsByKbIdAfterId(2L, 0L, 50)).thenReturn(List.of(200L));
+        when(documentMapper.selectIdsByKbIdAfterId(2L, 200L, 50)).thenReturn(List.of());
+        when(chunkMapper.selectChildIdsByDocumentId(200L)).thenReturn(List.of(1L));
+        when(esIndexer.listChunkIds("kb_2", 200L, 10000))
+                .thenReturn(new ChunkIdPage(List.of(1L, 9L), false, false, 2));
+        when(milvusIndexer.listChunkIds("kb_2", 200L, 10000))
+                .thenReturn(new ChunkIdPage(List.of(1L), false, false, 2));
+
+        ReconcileReport skipped = service.reconcileKnowledgeBase(notListed, 0L, new ReconcileBudget(100, 100_000));
+
+        assertEquals(1, skipped.orphanEs);
+        assertEquals(0, skipped.deletedEs);
+        verify(esIndexer, never()).deleteStale(anyString(), anyLong(), anyList());
+
+        KnowledgeBaseEntity listed = kb(1, "READY");
+        when(documentMapper.selectIdsByKbIdAfterId(1L, 0L, 50)).thenReturn(List.of(100L));
+        when(documentMapper.selectIdsByKbIdAfterId(1L, 100L, 50)).thenReturn(List.of());
+        when(chunkMapper.selectChildIdsByDocumentId(100L)).thenReturn(List.of(1L));
+        when(esIndexer.listChunkIds("kb_1", 100L, 10000))
+                .thenReturn(new ChunkIdPage(List.of(1L, 3L), false, false, 2));
+        when(milvusIndexer.listChunkIds("kb_1", 100L, 10000))
+                .thenReturn(new ChunkIdPage(List.of(1L), false, false, 2));
+
+        ReconcileReport deleted = service.reconcileKnowledgeBase(listed, 0L, new ReconcileBudget(100, 100_000));
+
+        assertEquals(1, deleted.deletedEs);
+        verify(esIndexer).deleteStale("kb_1", 100L, List.of(1L));
     }
 
     @Test
