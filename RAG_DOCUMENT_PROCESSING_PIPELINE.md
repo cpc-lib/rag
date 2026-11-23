@@ -4,122 +4,77 @@
 
 企业级 RAG 系统不应该采用简单的：
 
-```text
-文档
-  ↓
-提取纯文本
-  ↓
-固定长度切片
-  ↓
-Embedding
-  ↓
-向量检索
+```mermaid
+flowchart LR
+    A["文档"] --> B["提取纯文本"] --> C["固定长度切片"] --> D["Embedding"] --> E["向量检索"]
 ```
 
 更推荐采用完整的结构化、多模态处理流水线：
 
-```text
-1. 文档分类
-        ↓
-2. Layout / Structure Parser
-        ↓
-3. 去页眉页脚
-        ↓
-4. Heading Reconstruction
-        ↓
-5. 图片抽取
-        ├── OCR
-        └── Vision
-        ↓
-6. 表格抽取
-        ├── Markdown
-        ├── JSON
-        └── Summary
-        ↓
-7. Parent Chunk
-        ↓
-8. Child Chunk
-        ↓
-9. Semantic Boundary Refinement
-        ↓
-10. Embedding
-        ↓
-11. Milvus
-        +
-    Elasticsearch
-        ↓
-12. Hybrid Search
-        ↓
-13. RRF
-        ↓
-14. Qwen3-Rerank
-        ↓
-15. Parent Context Expansion
-        ↓
-16. LLM
+```mermaid
+flowchart TD
+    S1["1. 文档分类"] --> S2["2. Layout / Structure Parser"]
+    S2 --> S3["3. 去页眉页脚"]
+    S3 --> S4["4. Heading Reconstruction"]
+    S4 --> S5["5. 图片抽取"]
+    S5 --> S5_1["OCR"]
+    S5 --> S5_2["Vision"]
+    S5_1 --> S6["6. 表格抽取"]
+    S5_2 --> S6
+    S6 --> S6_1["Markdown"]
+    S6 --> S6_2["JSON"]
+    S6 --> S6_3["Summary"]
+    S6_1 --> S7["7. Parent Chunk"]
+    S6_2 --> S7
+    S6_3 --> S7
+    S7 --> S8["8. Child Chunk"]
+    S8 --> S9["9. Semantic Boundary Refinement"]
+    S9 --> S10["10. Embedding"]
+    S10 --> S11_1["11. Milvus"]
+    S10 --> S11_2["11. Elasticsearch"]
+    S11_1 --> S12["12. Hybrid Search"]
+    S11_2 --> S12
+    S12 --> S13["13. RRF"]
+    S13 --> S14["14. Qwen3-Rerank"]
+    S14 --> S15["15. Parent Context Expansion"]
+    S15 --> S16["16. LLM"]
 ```
 
 整体架构可以进一步表示为：
 
-```text
-                          Document
-                             │
-                             ▼
-                   ┌─────────────────┐
-                   │ Document Router │
-                   └────────┬────────┘
-                            │
-                            ▼
-                Layout / Structure Parser
-                            │
-             ┌──────────────┼──────────────┐
-             │              │              │
-             ▼              ▼              ▼
-           Text           Image           Table
-             │              │              │
-             │         ┌────┴────┐    ┌────┴────┐
-             │         │         │    │         │
-             │        OCR      Vision Markdown JSON
-             │         │         │    │         │
-             └─────────┴────┬────┴────┴─────────┘
-                            │
-                            ▼
-                  Structure Reconstruction
-                            │
-                            ▼
-                     Parent Chunk
-                            │
-                            ▼
-                      Child Chunk
-                            │
-                            ▼
-                Semantic Boundary Refinement
-                            │
-                            ▼
-                        Embedding
-                            │
-                ┌───────────┴───────────┐
-                │                       │
-                ▼                       ▼
-             Milvus               Elasticsearch
-          Vector Search              BM25
-                │                       │
-                └───────────┬───────────┘
-                            │
-                            ▼
-                       Hybrid Search
-                            │
-                            ▼
-                            RRF
-                            │
-                            ▼
-                     Qwen3-Rerank
-                            │
-                            ▼
-                 Parent Context Expansion
-                            │
-                            ▼
-                           LLM
+```mermaid
+flowchart TD
+    Doc["Document"] --> Router["Document Router"]
+    Router --> Parser["Layout / Structure Parser"]
+    Parser --> Text["Text"]
+    Parser --> Image["Image"]
+    Parser --> Table["Table"]
+
+    Image --> OCR["OCR"]
+    Image --> Vision["Vision"]
+    Table --> MD["Markdown"]
+    Table --> JSON["JSON"]
+
+    Text --> Rebuild["Structure Reconstruction"]
+    OCR --> Rebuild
+    Vision --> Rebuild
+    MD --> Rebuild
+    JSON --> Rebuild
+
+    Rebuild --> PChunk["Parent Chunk"]
+    PChunk --> CChunk["Child Chunk"]
+    CChunk --> Semantic["Semantic Boundary Refinement"]
+    Semantic --> Embed["Embedding"]
+
+    Embed --> Milvus["Milvus (Vector Search)"]
+    Embed --> ES["Elasticsearch (BM25)"]
+
+    Milvus --> Hybrid["Hybrid Search"]
+    ES --> Hybrid
+    Hybrid --> RRF["RRF"]
+    RRF --> Rerank["Qwen3-Rerank"]
+    Rerank --> Expand["Parent Context Expansion"]
+    Expand --> LLM["LLM"]
 ```
 
 ## 2. 文档分类
@@ -236,11 +191,9 @@ PDF 中页眉页脚如果不清理，会产生大量重复文本，污染 Embedd
 
 例如：
 
-```text
-支付系统
-└── 退款管理
-    └── 退款审核
-        └── 支付宝退款
+```mermaid
+flowchart LR
+    H1["支付系统"] --> H2["退款管理"] --> H3["退款审核"] --> H4["支付宝退款"]
 ```
 
 可以生成：
@@ -274,12 +227,10 @@ UML
 
 建议图片采用双通道：
 
-```text
-Image
-  │
-  ├── OCR
-  │
-  └── Vision
+```mermaid
+flowchart LR
+    IMG["Image"] --> OCR["OCR"]
+    IMG --> VIS["Vision"]
 ```
 
 ## 7. OCR
@@ -382,10 +333,9 @@ Summary 示例：
 
 建议：
 
-```text
-Table
-  ↓
-Row Group
+```mermaid
+flowchart LR
+    T["Table"] --> RG["Row Group"]
 ```
 
 例如每 50 行一个 Chunk，并重复表头：
@@ -448,19 +398,15 @@ Milvus 主要检索 Child Chunk，最终返回给 LLM 时再扩展到 Parent Chu
 
 ## 13. Parent-Child 数据关系
 
-```text
-Document
-   │
-   ├── Parent 1
-   │      │
-   │      ├── Child 1
-   │      ├── Child 2
-   │      └── Child 3
-   │
-   └── Parent 2
-          │
-          ├── Child 4
-          └── Child 5
+```mermaid
+flowchart TD
+    Doc["Document"] --> P1["Parent 1"]
+    Doc --> P2["Parent 2"]
+    P1 --> C1["Child 1"]
+    P1 --> C2["Child 2"]
+    P1 --> C3["Child 3"]
+    P2 --> C4["Child 4"]
+    P2 --> C5["Child 5"]
 ```
 
 示例：
@@ -570,12 +516,9 @@ vector
 
 例如：
 
-```text
-Query
- ↓
-Embedding
- ↓
-Milvus Top 50
+```mermaid
+flowchart LR
+    Q["Query"] --> E["Embedding"] --> M["Milvus Top 50"]
 ```
 
 ## 17. Elasticsearch
@@ -613,16 +556,10 @@ Elasticsearch
 
 查询同时进入两条检索链路：
 
-```text
-Query
- │
- ├── Embedding
- │      ↓
- │    Milvus
- │
- └── Keyword
-        ↓
-    Elasticsearch
+```mermaid
+flowchart TD
+    Q["Query"] --> E["Embedding"] --> M["Milvus"]
+    Q --> K["Keyword"] --> ES["Elasticsearch"]
 ```
 
 得到：
@@ -662,18 +599,13 @@ Top 30 ~ 100
 
 例如：
 
-```text
-Milvus Top 50
-+
-Elasticsearch Top 50
-↓
-RRF
-↓
-Top 30
-↓
-Qwen3-Rerank
-↓
-Top 5 ~ 10
+```mermaid
+flowchart TD
+    M["Milvus Top 50"] --> RRF["RRF"]
+    ES["Elasticsearch Top 50"] --> RRF
+    RRF --> T30["Top 30"]
+    T30 --> RR["Qwen3-Rerank"]
+    RR --> T10["Top 5 ~ 10"]
 ```
 
 Rerank 输入：
@@ -692,12 +624,9 @@ Rerank 找到 Child Chunk 后，不应该直接发送给 LLM，而是根据 pare
 
 例如：
 
-```text
-Child 7
-↓
-Parent Chunk
-↓
-必要时 Neighbor Chunk
+```mermaid
+flowchart LR
+    C7["Child 7"] --> P["Parent Chunk"] --> N["必要时 Neighbor Chunk"]
 ```
 
 最终得到更完整的上下文。
@@ -706,10 +635,11 @@ Parent Chunk
 
 多个 Child Chunk 可能属于同一个 Parent：
 
-```text
-Child 1 → Parent A
-Child 2 → Parent A
-Child 3 → Parent B
+```mermaid
+flowchart LR
+    C1["Child 1"] --> PA["Parent A"]
+    C2["Child 2"] --> PA
+    C3["Child 3"] --> PB["Parent B"]
 ```
 
 最终需要：
@@ -907,76 +837,44 @@ rag:
 
 ## 28. 推荐 Worker Pipeline
 
-```text
-DocumentUploaded
-       │
-       ▼
-DocumentParseWorker
-       │
-       ▼
-LayoutAnalysisWorker
-       │
-       ▼
-ImageExtractionWorker
-       │
-       ├── OCR Worker
-       │
-       └── Vision Worker
-       │
-       ▼
-TableExtractionWorker
-       │
-       ▼
-StructureRebuildWorker
-       │
-       ▼
-ChunkWorker
-       │
-       ▼
-EmbeddingWorker
-       │
-       ├── Milvus Writer
-       │
-       └── Elasticsearch Writer
-       │
-       ▼
-DocumentReady
+```mermaid
+flowchart TD
+    U["DocumentUploaded"] --> P["DocumentParseWorker"]
+    P --> L["LayoutAnalysisWorker"]
+    L --> IMG["ImageExtractionWorker"]
+    IMG --> OCR["OCR Worker"]
+    IMG --> VIS["Vision Worker"]
+    OCR --> TBL["TableExtractionWorker"]
+    VIS --> TBL
+    TBL --> SR["StructureRebuildWorker"]
+    SR --> CW["ChunkWorker"]
+    CW --> EW["EmbeddingWorker"]
+    EW --> MW["Milvus Writer"]
+    EW --> ESW["Elasticsearch Writer"]
+    MW --> R["DocumentReady"]
+    ESW --> R
 ```
 
 大文件可以进一步拆成：
 
-```text
-Document
-↓
-Page Split
-↓
-Page Workers
-↓
-Merge
-↓
-Chunk
-↓
-Embedding
+```mermaid
+flowchart LR
+    D["Document"] --> PS["Page Split"] --> PW["Page Workers"] --> M["Merge"] --> C["Chunk"] --> E["Embedding"]
 ```
 
 ## 29. 推荐文档状态机
 
-```text
-UPLOADED
-↓
-PARSING
-↓
-PARSED
-↓
-EXTRACTING
-↓
-CHUNKING
-↓
-EMBEDDING
-↓
-INDEXING
-↓
-READY
+```mermaid
+stateDiagram-v2
+    [*] --> UPLOADED
+    UPLOADED --> PARSING
+    PARSING --> PARSED
+    PARSED --> EXTRACTING
+    EXTRACTING --> CHUNKING
+    CHUNKING --> EMBEDDING
+    EMBEDDING --> INDEXING
+    INDEXING --> READY
+    READY --> [*]
 ```
 
 失败状态可以细分为：
@@ -1002,80 +900,56 @@ failed_stage
 
 ## 30. 最终企业级 RAG Pipeline
 
-```text
-文件上传
-   │
-   ▼
-Document Classification
-   │
-   ▼
-Layout / Structure Parsing
-   │
-   ├── Text
-   ├── Image
-   ├── Table
-   ├── Formula
-   └── Code
-   │
-   ▼
-Header / Footer Removal
-   │
-   ▼
-Heading Reconstruction
-   │
-   ├── Image
-   │     ├── OCR
-   │     └── Vision
-   │
-   ├── Table
-   │     ├── Markdown
-   │     ├── JSON
-   │     └── Summary
-   │
-   ▼
-Structure Normalization
-   │
-   ▼
-Parent Chunk
-   │
-   ▼
-Child Chunk
-   │
-   ▼
-Semantic Boundary Refinement
-   │
-   ▼
-Embedding
-   │
-   ├───────────────┐
-   ▼               ▼
-Milvus        Elasticsearch
-Vector             BM25
-   │               │
-   └───────┬───────┘
-           ▼
-      Hybrid Search
-           │
-           ▼
-          RRF
-           │
-           ▼
-      Qwen3-Rerank
-           │
-           ▼
-   Parent Expansion
-           │
-           ▼
-     Context Dedup
-           │
-           ▼
-     Token Budget
-           │
-           ▼
-          LLM
-           │
-           ▼
-      Answer + Citation
+```mermaid
+flowchart TD
+    Up["文件上传"] --> Cls["Document Classification"]
+    Cls --> Parse["Layout / Structure Parsing"]
+    Parse --> B1["Text"]
+    Parse --> B2["Image"]
+    Parse --> B3["Table"]
+    Parse --> B4["Formula"]
+    Parse --> B5["Code"]
+
+    B1 --> HF["Header / Footer Removal"]
+    B2 --> HF
+    B3 --> HF
+    B4 --> HF
+    B5 --> HF
+
+    HF --> HR["Heading Reconstruction"]
+
+    HR --> ImgP["Image"]
+    ImgP --> OCR["OCR"]
+    ImgP --> Vis["Vision"]
+
+    HR --> TblP["Table"]
+    TblP --> MD["Markdown"]
+    TblP --> JSON["JSON"]
+    TblP --> Sum["Summary"]
+
+    OCR --> Norm["Structure Normalization"]
+    Vis --> Norm
+    MD --> Norm
+    JSON --> Norm
+    Sum --> Norm
+
+    Norm --> PC["Parent Chunk"]
+    PC --> CC["Child Chunk"]
+    CC --> SBR["Semantic Boundary Refinement"]
+    SBR --> Emb["Embedding"]
+
+    Emb --> Milvus["Milvus (Vector)"]
+    Emb --> ES["Elasticsearch (BM25)"]
+
+    Milvus --> HS["Hybrid Search"]
+    ES --> HS
+    HS --> RRF["RRF"]
+    RRF --> RR["Qwen3-Rerank"]
+    RR --> PE["Parent Expansion"]
+    PE --> Dedup["Context Dedup"]
+    Dedup --> TB["Token Budget"]
+    TB --> LLM["LLM"]
+    LLM --> Ans["Answer + Citation"]
 ```
 
 ## 31. 核心设计原则
@@ -1131,8 +1005,9 @@ Chunk 上下文不足
 
 最终架构目标不是单纯的：
 
-```text
-文档 → Chunk → Vector → LLM
+```mermaid
+flowchart LR
+    D["文档"] --> C["Chunk"] --> V["Vector"] --> L["LLM"]
 ```
 
 而是：

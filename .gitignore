@@ -14,6 +14,12 @@ tsconfig.tsbuildinfo
 # ---- 本地临时脚本与文件 ----
 tmp_*/
 
+# ---- 本地环境配置（含密钥，勿提交；模板见 .env.example） ----
+.env
+
+# ---- 本地 RabbitMQ 运行时数据 ----
+rabbitmq-env/rabbitmq/
+
 # ---- 日志 ----
 *.log
 

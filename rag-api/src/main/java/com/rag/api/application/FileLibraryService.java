@@ -319,7 +319,10 @@ public class FileLibraryService {
                 s.tenantId(), s.userId(), 100);
         if (histories.isEmpty()) return List.of();
         List<Long> fileIds = histories.stream().map(VideoPlaybackHistoryEntity::getFileId).toList();
+        // 批量按 ID 回查也限定当前租户+用户，避免脏播放记录带出其他租户文件元数据
         Map<Long, LibraryFileEntity> fileMap = libraryFileMapper.selectByIds(fileIds).stream()
+                .filter(f -> s.tenantId().equals(f.getTenantId())
+                        && f.getUserId() != null && f.getUserId() == s.userId())
                 .collect(Collectors.toMap(LibraryFileEntity::getId, f -> f, (a, b) -> a));
         return histories.stream().map(h -> {
             LibraryFileEntity f = fileMap.get(h.getFileId());

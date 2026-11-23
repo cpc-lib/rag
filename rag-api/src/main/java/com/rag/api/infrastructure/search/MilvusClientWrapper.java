@@ -18,12 +18,17 @@ import io.milvus.v2.service.vector.request.InsertReq;
 import io.milvus.v2.service.vector.request.SearchReq;
 import io.milvus.v2.service.vector.request.data.FloatVec;
 import io.milvus.v2.service.vector.response.SearchResp;
+import io.milvus.v2.service.utility.request.AlterAliasReq;
+import io.milvus.v2.service.utility.request.CreateAliasReq;
+import io.milvus.v2.service.utility.request.DescribeAliasReq;
+import io.milvus.v2.service.utility.request.DropAliasReq;
 import jakarta.annotation.PreDestroy;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 
 import java.util.ArrayList;
+import java.util.LinkedHashSet;
 import java.util.List;
 
 /**
@@ -39,12 +44,15 @@ public class MilvusClientWrapper {
 
     private final String host;
     private final int port;
+    private final boolean allowAutoRecreate;
     private volatile MilvusClientV2 client;
 
     public MilvusClientWrapper(@Value("${rag.milvus.host}") String host,
-                               @Value("${rag.milvus.port}") int port) {
+                               @Value("${rag.milvus.port}") int port,
+                               @Value("${rag.milvus.allow-auto-recreate:false}") boolean allowAutoRecreate) {
         this.host = host;
         this.port = port;
+        this.allowAutoRecreate = allowAutoRecreate;
     }
 
     private MilvusClientV2 client() {
@@ -87,7 +95,8 @@ public class MilvusClientWrapper {
     }
 
     /**
-     * 幂等确保集合存在且向量维度匹配；维度不匹配且集合为空时重建，有数据则报错提示租户管理员。
+     * 幂等确保集合存在且向量维度匹配；维度不匹配且**确认**集合为空时重建，有数据或无法探测时报错。
+     * 安全约束：探测失败必须 fail closed，禁止把"查询异常"当成"空集合"而删除数据。
      */
     public void ensureCollection(String collection, int dim) {
         if (!hasCollection(collection)) {
@@ -95,9 +104,28 @@ public class MilvusClientWrapper {
             return;
         }
         Integer existing = describeDim(collection);
-        if (existing != null && existing != dim) {
-            if (countRows(collection) == 0) {
-                log.warn("Milvus 集合维度 {} != {}，重建: {}", existing, dim, collection);
+        if (existing == null) {
+            // 无法确认现有维度时不做任何破坏性操作
+            throw new BizException(ErrorCode.UPSTREAM,
+                    "无法读取 Milvus 集合向量维度，已中止建集合操作: " + collection);
+        }
+        if (existing != dim) {
+            long rows;
+            try {
+                rows = countRows(collection);
+            } catch (Exception e) {
+                throw new BizException(ErrorCode.UPSTREAM,
+                        "Milvus 集合探测失败，无法确认是否为空，拒绝重建: " + collection + "（" + e.getMessage() + "）");
+            }
+            if (rows == 0) {
+                if (!allowAutoRecreate) {
+                    throw new BizException(ErrorCode.UPSTREAM,
+                            "Milvus 集合维度不一致且为空，但自动重建已禁用（rag.milvus.allow-auto-recreate=false）："
+                                    + collection + "。请手动删除集合或显式开启该配置后重试");
+                }
+                // 审计：任何 drop 都必须留下集合、维度与确认条件
+                log.warn("[AUDIT] Milvus 重建空集合 collection={} oldDim={} newDim={} confirmedRows=0 reason=dimension-mismatch",
+                        collection, existing, dim);
                 dropCollection(collection);
                 createCollection(collection, dim);
             } else {
@@ -148,19 +176,32 @@ public class MilvusClientWrapper {
         return null;
     }
 
+    /**
+     * 探测集合是否有数据：limit(1) 有返回行即视为非空。
+     * 查询异常必须向上抛出——调用方据此 fail closed，绝不能把异常当成 0 行。
+     */
     private long countRows(String collection) {
-        try {
-            var resp = client().query(io.milvus.v2.service.vector.request.QueryReq.builder()
-                    .collectionName(collection)
-                    .filter("")
-                    .outputFields(new ArrayList<>())
-                    .limit(1)
-                    .build());
-            // limit(1) 探测：有返回行即视为集合非空
-            return resp == null || resp.getQueryResults() == null ? 0 : resp.getQueryResults().size();
-        } catch (Exception e) {
-            return 0;
+        var resp = client().query(io.milvus.v2.service.vector.request.QueryReq.builder()
+                .collectionName(collection)
+                .filter("")
+                .outputFields(new ArrayList<>())
+                .limit(1)
+                .build());
+        if (resp == null || resp.getQueryResults() == null) {
+            throw new IllegalStateException("Milvus 集合行数探测返回空响应: " + collection);
         }
+        return resp.getQueryResults().size();
+    }
+
+    /** 统计某文档在集合中的向量数（索引对账用，limit=expected+1 足以判定是否一致）。 */
+    public long countByDocument(String collection, long documentId, int expected) {
+        var resp = client().query(io.milvus.v2.service.vector.request.QueryReq.builder()
+                .collectionName(collection)
+                .filter("document_id == " + documentId)
+                .outputFields(List.of("chunk_id"))
+                .limit(Math.max(1, expected + 1))
+                .build());
+        return resp == null || resp.getQueryResults() == null ? 0 : resp.getQueryResults().size();
     }
 
     public void insert(String collection, List<long[]> ids, List<float[]> vectors) {
@@ -229,6 +270,78 @@ public class MilvusClientWrapper {
 
     public void dropCollection(String collection) {
         client().dropCollection(DropCollectionReq.builder().collectionName(collection).build());
+    }
+
+    // ---------- 别名级双版本（RAG-003） ----------
+
+    /** 读名称：读别名存在则走别名（重建切换对检索透明），否则回退逻辑基名。 */
+    public String resolveReadName(String base) {
+        String alias = IndexNames.alias(base);
+        try {
+            var resp = client().describeAlias(DescribeAliasReq.builder().alias(alias).build());
+            if (resp != null && resp.getCollectionName() != null) {
+                return alias;
+            }
+        } catch (Exception e) {
+            // 别名不存在时 Milvus 抛异常，按未创建处理
+            log.debug("Milvus 读别名不存在或探测失败 base={}: {}", base, e.getMessage());
+        }
+        return base;
+    }
+
+    /** 幂等确保读别名指向目标集合；已存在则原子改指（重建完成时调用）。 */
+    public void switchAlias(String base, String target) {
+        String alias = IndexNames.alias(base);
+        try {
+            String current = aliasTarget(alias);
+            if (target.equals(current)) {
+                return;
+            }
+            if (current == null) {
+                client().createAlias(CreateAliasReq.builder().alias(alias).collectionName(target).build());
+            } else {
+                client().alterAlias(AlterAliasReq.builder().alias(alias).collectionName(target).build());
+            }
+            log.info("Milvus 读别名已切换 alias={} -> {}（原指向 {}）", alias, target, current);
+        } catch (Exception e) {
+            throw new BizException(ErrorCode.UPSTREAM, "Milvus 别名切换失败: " + e.getMessage());
+        }
+    }
+
+    /** 知识库级删除：读别名与全部版本物理集合一并清理。 */
+    public void deleteAcrossVersions(String base, Integer... versions) {
+        String alias = IndexNames.alias(base);
+        try {
+            if (aliasTarget(alias) != null) {
+                client().dropAlias(DropAliasReq.builder().alias(alias).build());
+            }
+        } catch (Exception e) {
+            log.warn("Milvus 别名删除失败 alias={}: {}", alias, e.getMessage());
+        }
+        LinkedHashSet<String> names = new LinkedHashSet<>();
+        names.add(base);
+        for (Integer version : versions) {
+            names.add(IndexNames.physical(base, version));
+        }
+        for (String name : names) {
+            try {
+                if (hasCollection(name)) {
+                    dropCollection(name);
+                }
+            } catch (Exception e) {
+                log.warn("Milvus 集合删除失败 collection={}: {}", name, e.getMessage());
+            }
+        }
+    }
+
+    /** 别名当前指向的集合名；别名不存在返回 null。 */
+    private String aliasTarget(String alias) {
+        try {
+            var resp = client().describeAlias(DescribeAliasReq.builder().alias(alias).build());
+            return resp == null ? null : resp.getCollectionName();
+        } catch (Exception e) {
+            return null;
+        }
     }
 
     @PreDestroy

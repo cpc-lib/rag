@@ -119,6 +119,18 @@ public final class Dtos {
     public record ChunkUpdateReq(String content, Integer page, String sectionTitle) {
     }
 
+    /**
+     * 文档级双索引对账（RAG-003）：DB 可索引 child 数 vs ES/Milvus 实际条数。
+     * consistent=true 表示三方数量一致；探测失败的通道返回 null 并给出 error。
+     */
+    public record IndexStatusView(long documentId, long dbChunkCount, Long esCount, Long milvusCount,
+                                  boolean consistent, String esError, String milvusError) {
+    }
+
+    /** 知识库索引重建（RAG-003 别名级双版本）：返回任务与目标版本。 */
+    public record KbRebuildView(long taskId, int targetVersion) {
+    }
+
     public record ToolConfigReq(Boolean weatherEnabled, Boolean tavilyEnabled, String tavilyApiKey) {
     }
 

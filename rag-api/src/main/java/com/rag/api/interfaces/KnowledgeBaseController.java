@@ -50,4 +50,10 @@ public class KnowledgeBaseController {
         knowledgeBaseService.delete(id);
         return ApiResult.ok();
     }
+
+    /** 知识库级索引重建（别名级双版本，重建期间旧索引可读）。 */
+    @PostMapping("/{id}/rebuild-index")
+    public ApiResult<Dtos.KbRebuildView> rebuildIndex(@PathVariable long id) {
+        return ApiResult.ok(knowledgeBaseService.rebuildIndex(id));
+    }
 }

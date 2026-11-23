@@ -6,6 +6,7 @@ import co.elastic.clients.elasticsearch.ElasticsearchClient;
 import co.elastic.clients.elasticsearch.core.BulkRequest;
 import co.elastic.clients.elasticsearch.core.BulkResponse;
 import co.elastic.clients.elasticsearch.core.SearchResponse;
+import co.elastic.clients.elasticsearch.indices.update_aliases.Action;
 import jakarta.annotation.PreDestroy;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
@@ -13,6 +14,7 @@ import org.springframework.stereotype.Component;
 
 import java.io.StringReader;
 import java.util.ArrayList;
+import java.util.LinkedHashSet;
 import java.util.List;
 
 /**
@@ -29,7 +31,7 @@ public class EsSearchClient {
     private final String analyzer;
 
     public EsSearchClient(ElasticsearchClient client,
-                          @Value("${rag.es.analyzer:standard}") String analyzer) {
+                          @Value("${rag.es.analyzer:cjk}") String analyzer) {
         this.client = client;
         this.analyzer = analyzer;
     }
@@ -38,9 +40,10 @@ public class EsSearchClient {
         try {
             boolean exists = client.indices().exists(e -> e.index(index)).value();
             if (exists) {
-                log.info("ES 索引已存在（跳过创建）: {}", index);
+                log.info("ES 索引已存在（跳过创建）: {}；analyzer/mapping 变更需删除索引并重建文档", index);
                 return;
             }
+            // content.exact 用于订单号/接口名/错误码等精确匹配；analyzer 默认 cjk（内置中文二元分词）
             String mapping = """
                     {"mappings":{"properties":{
                       "chunkId":{"type":"keyword"},
@@ -48,7 +51,8 @@ public class EsSearchClient {
                       "kbId":{"type":"keyword"},
                       "fileName":{"type":"keyword"},
                       "page":{"type":"integer"},
-                      "content":{"type":"text","analyzer":"%s"}
+                      "content":{"type":"text","analyzer":"%s",
+                        "fields":{"exact":{"type":"keyword","ignore_above":256}}}
                     }}}
                     """.formatted(analyzer);
             client.indices().create(c -> c.index(index).withJson(new StringReader(mapping)));
@@ -72,10 +76,34 @@ public class EsSearchClient {
             }
             BulkResponse resp = client.bulk(bulk.build());
             if (resp.errors()) {
-                log.warn("ES bulk 存在部分错误 index={} size={}", index, docs.size());
+                // 部分 item 失败不能视为成功，否则调用方会把不完整索引当作已就绪
+                List<String> failures = new ArrayList<>();
+                for (var item : resp.items()) {
+                    if (item.error() != null) {
+                        failures.add("id=" + item.id() + " status=" + item.status()
+                                + " reason=" + item.error().reason());
+                    }
+                }
+                log.error("ES bulk 部分写入失败 index={} 失败={}/{} 首个原因: {}",
+                        index, failures.size(), docs.size(), failures.isEmpty() ? "unknown" : failures.get(0));
+                throw new BizException(ErrorCode.UPSTREAM, "ES 部分写入失败（" + failures.size()
+                        + "/" + docs.size() + "）: " + (failures.isEmpty() ? "unknown" : failures.get(0)));
             }
+        } catch (BizException e) {
+            throw e;
         } catch (Exception e) {
             throw new BizException(ErrorCode.UPSTREAM, "ES 写入失败: " + e.getMessage());
+        }
+    }
+
+    /** 统计某文档在 ES 中的切片数（索引对账用）。 */
+    public long countByDocument(String index, long documentId) {
+        try {
+            var resp = client.count(c -> c.index(index)
+                    .query(q -> q.term(t -> t.field("documentId").value(String.valueOf(documentId)))));
+            return resp.count();
+        } catch (Exception e) {
+            throw new BizException(ErrorCode.UPSTREAM, "ES 统计文档切片数失败: " + e.getMessage());
         }
     }
 
@@ -88,11 +116,21 @@ public class EsSearchClient {
         }
     }
 
-    /** BM25 关键词检索，返回按相关度排序的 chunkId。 */
+    /**
+     * BM25 关键词检索，返回按相关度排序的 chunkId。
+     * 正文分词匹配 + 精确子字段加权：订单号/接口名等整串命中时优先；
+     * 只回传 chunkId、关闭 total 统计，降低大索引下的网络与计数开销。
+     */
     public List<Long> search(String index, String keyword, int topK) {
         try {
             SearchResponse<EsDoc> resp = client.search(s -> s.index(index)
-                            .query(q -> q.match(m -> m.field("content").query(keyword)))
+                            .query(q -> q.bool(b -> b
+                                    .should(sh -> sh.match(m -> m.field("content").query(keyword)))
+                                    .should(sh -> sh.term(t -> t.field("content.exact")
+                                            .value(keyword).boost(2.0f)))
+                                    .minimumShouldMatch("1")))
+                            .trackTotalHits(t -> t.enabled(false))
+                            .source(src -> src.filter(f -> f.includes("chunkId")))
                             .size(topK),
                     EsDoc.class);
             List<Long> ids = new ArrayList<>();
@@ -115,6 +153,87 @@ public class EsSearchClient {
             }
         } catch (Exception e) {
             log.warn("ES 删除索引失败: {}", index, e);
+        }
+    }
+
+    // ---------- 别名级双版本（RAG-003） ----------
+
+    /** 读名称：读别名存在则走别名（重建切换对检索透明），否则回退逻辑基名。 */
+    public String resolveReadName(String base) {
+        String alias = IndexNames.alias(base);
+        try {
+            if (client.indices().existsAlias(e -> e.name(alias)).value()) {
+                return alias;
+            }
+        } catch (Exception e) {
+            log.warn("ES 读别名探测失败，回退基名 index={} err={}", base, e.getMessage());
+        }
+        return base;
+    }
+
+    /** 幂等建立读别名（建库预创建时指向当前物理索引）。 */
+    public void ensureAlias(String base, String target) {
+        String alias = IndexNames.alias(base);
+        try {
+            if (client.indices().existsAlias(e -> e.name(alias)).value()) {
+                return;
+            }
+            client.indices().updateAliases(u -> u.actions(
+                    a -> a.add(ad -> ad.index(target).alias(alias))));
+            log.info("ES 读别名已创建 alias={} -> {}", alias, target);
+        } catch (Exception e) {
+            throw new BizException(ErrorCode.UPSTREAM, "ES 别名创建失败: " + e.getMessage());
+        }
+    }
+
+    /** 原子切换读别名到目标索引，同一请求内摘除旧索引，避免读写窗口。 */
+    public void switchAlias(String base, String target) {
+        String alias = IndexNames.alias(base);
+        try {
+            List<Action> actions = new ArrayList<>();
+            List<String> current = aliasIndices(alias);
+            for (String index : current) {
+                if (!index.equals(target)) {
+                    actions.add(Action.of(a -> a.remove(r -> r.index(index).alias(alias))));
+                }
+            }
+            actions.add(Action.of(a -> a.add(ad -> ad.index(target).alias(alias))));
+            client.indices().updateAliases(u -> u.actions(actions));
+            log.info("ES 读别名已切换 alias={} -> {}（原指向 {}）", alias, target, current);
+        } catch (Exception e) {
+            throw new BizException(ErrorCode.UPSTREAM, "ES 别名切换失败: " + e.getMessage());
+        }
+    }
+
+    /** 知识库级删除：读别名指向的索引与全部版本物理索引一并清理。 */
+    public void deleteAcrossVersions(String base, Integer... versions) {
+        String alias = IndexNames.alias(base);
+        try {
+            for (String index : aliasIndices(alias)) {
+                deleteIndex(index);
+            }
+        } catch (Exception e) {
+            log.warn("ES 别名索引清理失败 base={}: {}", base, e.getMessage());
+        }
+        // 别名不存在（重建失败/尚未切换）时按版本兜底删除物理索引
+        LinkedHashSet<String> names = new LinkedHashSet<>();
+        names.add(base);
+        for (Integer version : versions) {
+            names.add(IndexNames.physical(base, version));
+        }
+        for (String name : names) {
+            deleteIndex(name);
+        }
+    }
+
+    private List<String> aliasIndices(String alias) {
+        try {
+            if (!client.indices().existsAlias(e -> e.name(alias)).value()) {
+                return List.of();
+            }
+            return new ArrayList<>(client.indices().getAlias(g -> g.name(alias)).result().keySet());
+        } catch (Exception e) {
+            throw new BizException(ErrorCode.UPSTREAM, "ES 别名解析失败: " + e.getMessage());
         }
     }
 

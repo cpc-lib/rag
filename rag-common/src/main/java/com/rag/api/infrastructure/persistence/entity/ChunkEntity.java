@@ -27,6 +27,12 @@ public class ChunkEntity {
     private Long parentChunkId;
     private String sectionTitle;
     private String sectionPath;
+    /** PDF 版面坐标 x,y,width,height（pt），非 PDF 或无法定位时为空。 */
+    private String bbox;
+    /** 原文块标识，如 p3-b2 或 p3-b2~p3-b5（页-块，1 起）。 */
+    private String sourceId;
+    /** PDF 版面块语义类别：TITLE/PARAGRAPH/LIST/TABLE/IMAGE/CODE/FORMULA，非 PDF 为空。 */
+    private String blockType;
     private String contentHash;
     /** IMAGE 切片图片的对象存储 Key（列名 image_url）。 */
     @TableField("image_url")

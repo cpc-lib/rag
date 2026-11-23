@@ -10,11 +10,11 @@ services:
     ports:
       - "15672:15672"
       - "5672:5672"
-      - "61613:61613"
+      - "16163:61613"
     restart: unless-stopped
     volumes:
-      - /www/devops/rabbitmq/log:/var/log/rabbitmq
-      - /www/devops/rabbitmq/data:/var/lib/rabbitmq
+      - ./rabbitmq/log:/var/log/rabbitmq
+      - ./rabbitmq/data:/var/lib/rabbitmq
     networks:
       - rabbitmq
 

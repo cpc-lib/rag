@@ -36,7 +36,7 @@ public class ParentChildStrategy implements ChunkStrategy {
         String unitTitle = null;
         List<ChunkPlan> plans = new ArrayList<>();
 
-        for (var page : ctx.pages()) {
+        for (var page : support.mergeContinuedTables(ctx.pages())) {
             String text = page.text();
             if (text == null || text.isBlank()) {
                 continue;

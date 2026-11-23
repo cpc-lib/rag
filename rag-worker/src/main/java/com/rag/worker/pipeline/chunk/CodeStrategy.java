@@ -15,7 +15,7 @@ import java.util.regex.Pattern;
 /**
  * CODE（指南 §30）：
  * .java 用 JavaParser 真 AST，按类成员（方法/构造器/字段组）切片并补包名/类名元数据；
- * .py/.go/.ts/.js 用边界启发式（def/class/func/function 声明行起片）。
+ * .py/.go/.ts/.js/.sh 用边界启发式（def/class/func/function/函数声明行起片）。
  * 尽量保持代码结构完整，超长片才做 token 硬切兜底。
  */
 @Component
@@ -30,6 +30,8 @@ public class CodeStrategy implements ChunkStrategy {
             "^(?:export\\s+)?(?:default\\s+)?(?:async\\s+)?function\\s*\\w*"
                     + "|^(?:export\\s+)?class\\s+\\w+"
                     + "|^(?:export\\s+)?const\\s+\\w+\\s*=\\s*(?:async\\s*)?\\(");
+    private static final Pattern SH_BOUND = Pattern.compile(
+            "^(?:function\\s+[\\w.-]+|(?:function\\s+)?[\\w.-]+\\s*\\(\\s*\\))\\s*\\{?\\s*$");
 
     private final ChunkSupport support;
 
@@ -94,6 +96,7 @@ public class CodeStrategy implements ChunkStrategy {
             case "py" -> PY_BOUND;
             case "go" -> GO_BOUND;
             case "js", "jsx", "ts", "tsx" -> JS_BOUND;
+            case "sh" -> SH_BOUND;
             default -> Pattern.compile(
                     "^(?:public|private|protected)?\\s*(?:static\\s+)?[\\w<>\\[\\]]+\\s+\\w+\\s*\\(");
         };

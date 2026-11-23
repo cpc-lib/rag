@@ -33,6 +33,8 @@ public class EtcdService {
     public static class RetrievalConfig {
         public int vectorTopN = 20;
         public int keywordTopN = 20;
+        /** RRF 融合后进入精排/最终截断的候选数。 */
+        public int candidateTopK = 20;
         public int topK = 8;
         public int finalContextTopK = 5;
         public int maxContextTokens = 12000;
@@ -54,6 +56,7 @@ public class EtcdService {
                        @Value("${rag.etcd.enabled:true}") boolean enabled,
                        @Value("${rag.retrieval.vector-top-n:20}") int vectorTopN,
                        @Value("${rag.retrieval.keyword-top-n:20}") int keywordTopN,
+                       @Value("${rag.retrieval.candidate-top-k:20}") int candidateTopK,
                        @Value("${rag.retrieval.top-k:8}") int topK,
                        @Value("${rag.retrieval.final-context-top-k:5}") int finalContextTopK,
                        @Value("${rag.retrieval.max-context-tokens:12000}") int maxContextTokens,
@@ -63,16 +66,17 @@ public class EtcdService {
         this.endpoints = endpoints;
         this.enabled = enabled;
         this.objectMapper = objectMapper;
-        this.defaults = defaults(vectorTopN, keywordTopN, topK, finalContextTopK,
+        this.defaults = defaults(vectorTopN, keywordTopN, candidateTopK, topK, finalContextTopK,
                 maxContextTokens, rrfK, threshold);
         this.retrievalConfig = defaults;
     }
 
-    private RetrievalConfig defaults(int v, int k, int tk, int finalTopK, int maxTokens,
-                                     int rrf, double th) {
+    private RetrievalConfig defaults(int v, int k, int candidateTopK, int tk, int finalTopK,
+                                     int maxTokens, int rrf, double th) {
         RetrievalConfig c = new RetrievalConfig();
         c.vectorTopN = v;
         c.keywordTopN = k;
+        c.candidateTopK = candidateTopK;
         c.topK = tk;
         c.finalContextTopK = finalTopK;
         c.maxContextTokens = maxTokens;
@@ -157,6 +161,7 @@ public class EtcdService {
             RetrievalConfig c = new RetrievalConfig();
             c.vectorTopN = node.path("vectorTopN").asInt(defaults.vectorTopN);
             c.keywordTopN = node.path("keywordTopN").asInt(defaults.keywordTopN);
+            c.candidateTopK = node.path("candidateTopK").asInt(defaults.candidateTopK);
             c.topK = node.path("topK").asInt(defaults.topK);
             c.finalContextTopK = node.path("finalContextTopK").asInt(defaults.finalContextTopK);
             c.maxContextTokens = node.path("maxContextTokens").asInt(defaults.maxContextTokens);
