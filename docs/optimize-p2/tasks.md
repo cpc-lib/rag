@@ -75,7 +75,7 @@
   - `mvn -f rag-api/pom.xml clean test`
 - [x] D2 前端验证
   - `cd knowledge-console; npm run typecheck; npm run build`
-- [ ] D3 提交
+- [x] D3 提交
   - `feat: 索引一致性巡检与孤儿清理`
   - `refactor: 拆分文件库上传与播放组件`
   - 文档：`docs: 补充 OPTIMIZE P2 计划与规格`
