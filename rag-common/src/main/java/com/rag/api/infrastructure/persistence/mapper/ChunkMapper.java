@@ -31,6 +31,9 @@ public interface ChunkMapper {
     /** 文档下有效切片数（status != DELETED，断点续跑判定用）。 */
     long countActiveByDocumentId(@Param("documentId") Long documentId);
 
+    /** 文档下有效 CHILD 切片 id（索引一致性巡检用，不取正文）。 */
+    List<Long> selectChildIdsByDocumentId(@Param("documentId") Long documentId);
+
     /** 解散 parent：清空其有效 child 的 parent_chunk_id。 */
     int clearParentByParentId(@Param("parentChunkId") Long parentChunkId, @Param("documentId") Long documentId);
 

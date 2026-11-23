@@ -18,6 +18,9 @@ public interface KnowledgeBaseMapper {
 
     List<KnowledgeBaseEntity> selectByTenantId(@Param("tenantId") String tenantId);
 
+    /** 全租户知识库游标扫描（索引一致性巡检用）：按 id 升序分页。 */
+    List<KnowledgeBaseEntity> selectAllAfterId(@Param("afterId") Long afterId, @Param("limit") int limit);
+
     int logicDeleteById(@Param("id") Long id);
 
     /** 条件置 BUILDING：仅当当前非 BUILDING 时成功，返回 1 表示本次重建被受理。 */

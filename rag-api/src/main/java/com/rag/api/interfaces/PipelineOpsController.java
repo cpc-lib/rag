@@ -31,4 +31,11 @@ public class PipelineOpsController {
         AuthGuard.requirePlatform();
         return ApiResult.ok(pipelineOpsService.replayDlq(limit));
     }
+
+    /** 最近一次索引一致性巡检报告（只读）。 */
+    @GetMapping("/api/v1/ops/pipeline/reconcile/last")
+    public ApiResult<Map<String, Object>> lastReconcileReport() {
+        AuthGuard.requirePlatform();
+        return ApiResult.ok(pipelineOpsService.lastReconcileReport());
+    }
 }

@@ -103,6 +103,14 @@
         WHERE deleted = 0 AND kb_id = #{kbId}
     </select>
 
+    <select id="selectIdsByKbIdAfterId" resultType="java.lang.Long">
+        SELECT id
+        FROM document
+        WHERE deleted = 0 AND kb_id = #{kbId} AND id &gt; #{afterId}
+        ORDER BY id
+        LIMIT #{limit}
+    </select>
+
     <update id="startProcessing">
         UPDATE document
         SET status = #{status}, progress = #{progress}, error_msg = NULL, stop_requested = 0

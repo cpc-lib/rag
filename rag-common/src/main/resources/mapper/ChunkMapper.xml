@@ -138,6 +138,14 @@
         WHERE deleted = 0 AND document_id = #{documentId} AND status != 'DELETED'
     </select>
 
+    <select id="selectChildIdsByDocumentId" resultType="java.lang.Long">
+        SELECT id
+        FROM chunk
+        WHERE deleted = 0 AND document_id = #{documentId}
+          AND chunk_type = 'CHILD' AND status != 'DELETED'
+        ORDER BY id
+    </select>
+
     <update id="clearParentByParentId">
         UPDATE chunk
         SET parent_chunk_id = NULL

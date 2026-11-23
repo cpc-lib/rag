@@ -30,6 +30,10 @@ public interface DocumentMapper {
 
     List<Long> selectIdsByKbId(@Param("kbId") Long kbId);
 
+    /** 知识库下文档 id 游标分页（索引一致性巡检用）。 */
+    List<Long> selectIdsByKbIdAfterId(@Param("kbId") Long kbId, @Param("afterId") Long afterId,
+                                      @Param("limit") int limit);
+
     /** 开始/继续处理：仅 UPLOADED/STOPPED/FAILED 状态可流转，清空错误并复位停止标记。 */
     int startProcessing(@Param("id") Long id,
                         @Param("status") String status,

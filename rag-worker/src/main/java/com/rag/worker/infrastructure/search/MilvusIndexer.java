@@ -150,6 +150,38 @@ public class MilvusIndexer {
         return resp == null || resp.getQueryResults() == null ? 0 : resp.getQueryResults().size();
     }
 
+    /**
+     * 按文档列出集合中的 chunk_id（索引一致性巡检用）。
+     * 单次 query 上限 16384；返回条数达到 limit 视为可能不完整，调用方不得据此删除。
+     */
+    public ChunkIdPage listChunkIds(String collection, long documentId, int cap) {
+        if (!hasCollection(collection)) {
+            return new ChunkIdPage(List.of(), false, true, 1);
+        }
+        int limit = Math.min(Math.max(1, cap), QUERY_LIMIT);
+        List<Long> ids = new ArrayList<>();
+        try {
+            var resp = client().query(io.milvus.v2.service.vector.request.QueryReq.builder()
+                    .collectionName(collection)
+                    .filter("document_id == " + documentId)
+                    .outputFields(List.of("chunk_id"))
+                    .limit(limit)
+                    .build());
+            if (resp != null && resp.getQueryResults() != null) {
+                for (var result : resp.getQueryResults()) {
+                    Object value = result.getEntity() == null ? null : result.getEntity().get("chunk_id");
+                    if (value instanceof Number n) {
+                        ids.add(n.longValue());
+                    }
+                }
+            }
+        } catch (Exception e) {
+            throw new IllegalStateException("Milvus 列出文档 chunk_id 失败 collection=" + collection
+                    + " doc=" + documentId + ": " + e.getMessage(), e);
+        }
+        return new ChunkIdPage(ids, ids.size() >= limit, false, 2);
+    }
+
     private void createCollection(String collection, int dim) {
         CreateCollectionReq.CollectionSchema schema = CreateCollectionReq.CollectionSchema.builder().build();
         schema.addField(AddFieldReq.builder().fieldName("chunk_id").dataType(io.milvus.v2.common.DataType.Int64)

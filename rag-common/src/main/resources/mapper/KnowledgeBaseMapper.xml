@@ -89,6 +89,15 @@
         ORDER BY id DESC
     </select>
 
+    <select id="selectAllAfterId" resultType="com.rag.api.infrastructure.persistence.entity.KnowledgeBaseEntity">
+        SELECT <include refid="Base_Column_List"/>
+        FROM knowledge_base
+        WHERE deleted = 0 AND id &gt; #{afterId}
+          AND es_index IS NOT NULL AND milvus_collection IS NOT NULL
+        ORDER BY id
+        LIMIT #{limit}
+    </select>
+
     <update id="logicDeleteById">
         UPDATE knowledge_base SET deleted = 1 WHERE deleted = 0 AND id = #{id}
     </update>

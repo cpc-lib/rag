@@ -69,6 +69,20 @@ rag:
     langs: ${RAG_OCR_LANGS:chi_sim+eng}
   es:
     analyzer: ${RAG_ES_ANALYZER:standard}
+  reconcile:
+    # 索引一致性巡检（MySQL CHILD 切片 vs ES/Milvus chunkId）：默认关闭，首轮建议 dry-run 观察报告后再开启删除
+    enabled: ${RAG_RECONCILE_ENABLED:false}
+    dry-run: ${RAG_RECONCILE_DRY_RUN:true}
+    interval-ms: ${RAG_RECONCILE_INTERVAL_MS:3600000}
+    initial-delay-ms: ${RAG_RECONCILE_INITIAL_DELAY_MS:300000}
+    max-kbs-per-run: ${RAG_RECONCILE_MAX_KBS:1}
+    max-docs-per-kb: ${RAG_RECONCILE_MAX_DOCS:200}
+    max-ids-per-doc: ${RAG_RECONCILE_MAX_IDS:10000}
+    max-external-calls: ${RAG_RECONCILE_MAX_CALLS:2000}
+    max-duration-ms: ${RAG_RECONCILE_MAX_DURATION_MS:300000}
+    cleanup-task-limit: ${RAG_RECONCILE_CLEANUP_LIMIT:100}
+    retention-days: ${RAG_RECONCILE_RETENTION_DAYS:30}
+    report-ttl-hours: ${RAG_RECONCILE_REPORT_TTL_HOURS:168}
   llm:
     timeout-seconds: 60
   worker:

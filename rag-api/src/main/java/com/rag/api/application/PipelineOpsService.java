@@ -1,6 +1,9 @@
 package com.rag.api.application;
 
+import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.rag.api.common.BizException;
+import com.rag.api.common.ErrorCode;
 import com.rag.api.infrastructure.mq.IngestPublisher;
 import com.rag.api.infrastructure.persistence.entity.PipelineTaskEntity;
 import com.rag.api.infrastructure.persistence.mapper.PipelineTaskMapper;
@@ -10,6 +13,7 @@ import org.springframework.amqp.core.AmqpAdmin;
 import org.springframework.amqp.core.Message;
 import org.springframework.amqp.rabbit.core.RabbitTemplate;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.stereotype.Service;
 
 import java.util.LinkedHashMap;
@@ -25,12 +29,14 @@ import java.util.Map;
 public class PipelineOpsService {
 
     private static final int MAX_REPLAY = 200;
+    private static final String RECONCILE_REPORT_KEY = "rag:reconcile:last";
 
     private final RabbitTemplate rabbitTemplate;
     private final AmqpAdmin amqpAdmin;
     private final PipelineTaskMapper taskMapper;
     private final IngestPublisher publisher;
     private final ObjectMapper objectMapper;
+    private final StringRedisTemplate redis;
 
     @Value("${rag.mq.queue}")
     private String parseQueue;
@@ -93,5 +99,28 @@ public class PipelineOpsService {
         }
         log.info("DLQ 重放完成 请求上限={} 实际重放={}", max, replayed);
         return replayed;
+    }
+
+    /** 最近一次索引一致性巡检报告（Worker 写入 Redis）；无报告时返回 available=false。 */
+    public Map<String, Object> lastReconcileReport() {
+        String json;
+        try {
+            json = redis.opsForValue().get(RECONCILE_REPORT_KEY);
+        } catch (Exception e) {
+            log.warn("读取巡检报告失败: {}", e.getMessage());
+            throw new BizException(ErrorCode.UPSTREAM, "巡检报告读取失败");
+        }
+        if (json == null || json.isBlank()) {
+            return Map.of("available", false);
+        }
+        try {
+            Map<String, Object> report = objectMapper.readValue(json, new TypeReference<>() {
+            });
+            report.put("available", true);
+            return report;
+        } catch (Exception e) {
+            log.warn("巡检报告解析失败: {}", e.getMessage());
+            throw new BizException(ErrorCode.UPSTREAM, "巡检报告解析失败");
+        }
     }
 }

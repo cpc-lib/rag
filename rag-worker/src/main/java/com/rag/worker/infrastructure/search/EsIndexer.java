@@ -3,6 +3,7 @@ package com.rag.worker.infrastructure.search;
 import co.elastic.clients.elasticsearch.ElasticsearchClient;
 import co.elastic.clients.elasticsearch._types.FieldValue;
 import co.elastic.clients.elasticsearch._types.Refresh;
+import co.elastic.clients.elasticsearch._types.SortOrder;
 import co.elastic.clients.elasticsearch.core.BulkRequest;
 import co.elastic.clients.elasticsearch.core.BulkResponse;
 import co.elastic.clients.elasticsearch.indices.update_aliases.Action;
@@ -15,6 +16,7 @@ import org.springframework.stereotype.Component;
 import java.io.StringReader;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 
 /**
  * ES 索引端：建索引 / 删旧 / bulk 写入（BM25 侧数据）。
@@ -140,6 +142,59 @@ public class EsIndexer {
             throw new IllegalStateException("ES 统计文档切片数失败 index=" + index
                     + " doc=" + documentId + ": " + e.getMessage(), e);
         }
+    }
+
+    /**
+     * 按文档列出 ES 中的 chunkId（索引一致性巡检用）。
+     * 使用 search_after 分页，只取 chunkId 字段；达到上限时标记 truncated，调用方不得据此删除。
+     */
+    public ChunkIdPage listChunkIds(String index, long documentId, int cap) {
+        int limit = Math.max(1, cap);
+        if (!hasIndex(index)) {
+            return new ChunkIdPage(List.of(), false, true, 1);
+        }
+        List<Long> ids = new ArrayList<>();
+        List<FieldValue> after = null;
+        int pageSize = Math.min(500, limit);
+        int calls = 1;
+        try {
+            while (ids.size() < limit) {
+                final List<FieldValue> searchAfter = after;
+                var resp = client.search(s -> {
+                    s.index(index).size(pageSize)
+                            .source(src -> src.filter(f -> f.includes("chunkId")))
+                            .query(q -> q.term(t -> t.field("documentId").value(String.valueOf(documentId))))
+                            .sort(so -> so.field(f -> f.field("chunkId").order(SortOrder.Asc)));
+                    if (searchAfter != null) {
+                        s.searchAfter(searchAfter);
+                    }
+                    return s;
+                }, Map.class);
+                calls++;
+                var hits = resp.hits().hits();
+                if (hits.isEmpty()) {
+                    break;
+                }
+                for (var hit : hits) {
+                    Object value = hit.source() == null ? null : hit.source().get("chunkId");
+                    if (value != null) {
+                        ids.add(Long.parseLong(String.valueOf(value)));
+                    }
+                }
+                if (hits.size() < pageSize) {
+                    break;
+                }
+                after = hits.get(hits.size() - 1).sort();
+            }
+        } catch (Exception e) {
+            throw new IllegalStateException("ES 列出文档 chunkId 失败 index=" + index
+                    + " doc=" + documentId + ": " + e.getMessage(), e);
+        }
+        boolean truncated = ids.size() >= limit;
+        if (ids.size() > limit) {
+            ids = new ArrayList<>(ids.subList(0, limit));
+        }
+        return new ChunkIdPage(ids, truncated, false, calls);
     }
 
     public void deleteIndex(String index) {

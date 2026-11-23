@@ -18,6 +18,7 @@ import com.rag.api.infrastructure.persistence.mapper.ChatMessageMapper;
 import com.rag.api.infrastructure.persistence.mapper.ChatSessionMapper;
 import com.rag.api.infrastructure.persistence.mapper.ChunkMapper;
 import com.rag.api.infrastructure.persistence.mapper.DocumentMapper;
+import com.rag.api.infrastructure.persistence.mapper.IndexCleanupTaskMapper;
 import com.rag.api.infrastructure.persistence.mapper.KnowledgeBaseMapper;
 import com.rag.api.infrastructure.persistence.mapper.PipelineTaskMapper;
 import com.rag.api.infrastructure.persistence.mapper.PromptTemplateMapper;
@@ -79,6 +80,8 @@ class TenantIsolationCoverageTest {
     private ChunkMapper chunkMapper;
     @Mock
     private PipelineTaskMapper taskMapper;
+    @Mock
+    private IndexCleanupTaskMapper cleanupTaskMapper;
     @Mock
     private ModelService modelService;
     @Mock
@@ -147,7 +150,7 @@ class TenantIsolationCoverageTest {
                 modelService, milvus, es, minio, objectMapper, userManageService,
                 promptTemplateService, fileLibraryService, taskMapper, publisher);
         documentAppService = new DocumentAppService(documentMapper, chunkMapper, taskMapper,
-                knowledgeBaseService, quotaService, modelService, minio, es, milvus,
+                cleanupTaskMapper, knowledgeBaseService, quotaService, modelService, minio, es, milvus,
                 publisher, objectMapper, fileLibraryService, sha256Publisher);
         chunkAppService = new ChunkAppService(chunkMapper, documentMapper, taskMapper,
                 knowledgeBaseService, publisher, minio);

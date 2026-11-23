@@ -9,10 +9,12 @@ import com.rag.api.infrastructure.mq.IngestPublisher;
 import com.rag.api.infrastructure.mq.Sha256Publisher;
 import com.rag.api.infrastructure.persistence.entity.ChunkEntity;
 import com.rag.api.infrastructure.persistence.entity.DocumentEntity;
+import com.rag.api.infrastructure.persistence.entity.IndexCleanupTaskEntity;
 import com.rag.api.infrastructure.persistence.entity.KnowledgeBaseEntity;
 import com.rag.api.infrastructure.persistence.entity.PipelineTaskEntity;
 import com.rag.api.infrastructure.persistence.mapper.ChunkMapper;
 import com.rag.api.infrastructure.persistence.mapper.DocumentMapper;
+import com.rag.api.infrastructure.persistence.mapper.IndexCleanupTaskMapper;
 import com.rag.api.infrastructure.persistence.mapper.PipelineTaskMapper;
 import com.rag.api.infrastructure.search.EsSearchClient;
 import com.rag.api.infrastructure.search.MilvusClientWrapper;
@@ -53,6 +55,7 @@ public class DocumentAppService {
     private final DocumentMapper documentMapper;
     private final ChunkMapper chunkMapper;
     private final PipelineTaskMapper taskMapper;
+    private final IndexCleanupTaskMapper cleanupTaskMapper;
     private final KnowledgeBaseService knowledgeBaseService;
     private final QuotaService quotaService;
     private final ModelService modelService;
@@ -404,7 +407,9 @@ public class DocumentAppService {
         try {
             milvus.deleteByDocument(kb.getMilvusCollection(), doc.getId());
         } catch (Exception e) {
-            log.warn("Milvus 向量清理失败 doc={} err={}", doc.getId(), e.getMessage());
+            // Milvus 失败不再只打印 warn：落补偿任务，由 Worker 巡检排空，避免孤儿向量长期残留
+            log.warn("Milvus 向量清理失败，已记录补偿任务 doc={} err={}", doc.getId(), e.getMessage());
+            cleanupTaskMapper.insert(buildMilvusCleanupTask(doc, e.getMessage()));
         }
         minio.deleteObject(doc.getObjectKey());
         // 清理该文档派生图片（PDF 内嵌图片切片）
@@ -419,6 +424,18 @@ public class DocumentAppService {
 
     /** 文档类文件大小上限：PDF/Office 解析需整棵对象树进内存，500MB 级易触发 Worker OOM。 */
     private static final long MAX_DOCUMENT_BYTES = 100L * 1024 * 1024;
+
+    private IndexCleanupTaskEntity buildMilvusCleanupTask(DocumentEntity doc, String error) {
+        IndexCleanupTaskEntity task = new IndexCleanupTaskEntity();
+        task.setTenantId(doc.getTenantId());
+        task.setKbId(doc.getKbId());
+        task.setDocumentId(doc.getId());
+        task.setTarget("MILVUS");
+        task.setStatus("PENDING");
+        task.setAttempts(0);
+        task.setErrorMsg(error != null && error.length() > 500 ? error.substring(0, 500) : error);
+        return task;
+    }
 
     private void checkDocumentSize(long fileSize) {
         if (fileSize > MAX_DOCUMENT_BYTES) {
