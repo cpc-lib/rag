@@ -200,6 +200,7 @@ flowchart TD
 - **优化建议**：
   - 在 `App.tsx` 中使用 `React.lazy(() => import('./pages/...'))` + `<Suspense>` 实现路由级代码分割，并在 `vite.config.ts` 配置 `manualChunks` 将 `antd`、`xlsx`、`docx-preview` 拆分为独立 chunk；
   - `FilePreviewPage.tsx` 对视频/音频改用流式 URL（支持 HTTP Range）而非全量 `Blob` 下载，对纯文本/Markdown 预览增加大小上限保护（如超过 5MB 提示下载查看）；
+    - **已核实（不重复实现）**：文档上传白名单不含音视频，`/api/v1/documents/{id}/preview` 的视频/音频分支当前不可达；文件库 `GET /api/v1/library/files/{id}/stream` 已支持 `Range`/`206` 流式播放并覆盖该场景，故本次不新增实现。详见 `docs/optimize-p2/spec.md` 第 3 节。
   - 将 `FileLibraryPage.tsx` 中的分片上传逻辑抽离为 `useMultipartUpload` Hook，视频播放弹窗抽离为 `VideoPlayerModal` 组件。
 
 ### 4.5 自动化测试防线缺失与本地 `docker-compose.yml` 完整性
