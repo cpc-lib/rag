@@ -70,6 +70,26 @@ services:
         aws --endpoint-url http://rustfs:9000 s3 mb s3://rag-files || true
         aws --endpoint-url http://rustfs:9000 s3 mb s3://a-bucket || true
 
+  # RabbitMQ：文档解析流水线消息队列（exchange rag.ingest），Worker 依赖
+  rabbitmq:
+    image: rabbitmq:3.13-management
+    container_name: rag-rabbitmq
+    restart: unless-stopped
+    environment:
+      RABBITMQ_DEFAULT_USER: guest
+      RABBITMQ_DEFAULT_PASS: guest
+      TZ: Asia/Shanghai
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+    volumes:
+      - rabbitmq-data:/var/lib/rabbitmq
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 15s
+      timeout: 10s
+      retries: 12
+
   # etcd：同时作为 Milvus 元数据后端与业务服务注册/动态配置中心（业务前缀 /rag/）
   etcd:
     image: registry.cn-hangzhou.aliyuncs.com/snow-io/etcd:v3.5.18
@@ -142,3 +162,4 @@ volumes:
   etcd-data: {}
   es-data: {}
   milvus-data: {}
+  rabbitmq-data: {}

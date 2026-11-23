@@ -43,7 +43,10 @@ public class RagPersistenceAutoConfiguration {
 
             @Override
             public void updateFill(MetaObject metaObject) {
-                fillIfNull(metaObject, "updatedAt", LocalDateTime.now());
+                // 更新时必须覆盖：实体从库里查出后 updatedAt 已有旧值，判空会跳过导致时间戳不刷新
+                if (metaObject.hasSetter("updatedAt")) {
+                    metaObject.setValue("updatedAt", LocalDateTime.now());
+                }
             }
 
             private void fillIfNull(MetaObject metaObject, String field, Object value) {

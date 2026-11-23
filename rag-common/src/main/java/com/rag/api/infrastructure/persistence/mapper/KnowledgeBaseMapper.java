@@ -14,7 +14,7 @@ public interface KnowledgeBaseMapper {
 
     int updateById(KnowledgeBaseEntity entity);
 
-    List<KnowledgeBaseEntity> selectByIds(@Param("ids") Collection<Long> ids);
+    List<KnowledgeBaseEntity> selectByIds(@Param("tenantId") String tenantId, @Param("ids") Collection<Long> ids);
 
     List<KnowledgeBaseEntity> selectByTenantId(@Param("tenantId") String tenantId);
 

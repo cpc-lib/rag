@@ -20,7 +20,7 @@ public interface ChunkMapper {
 
     Page<ChunkEntity> selectPageByDocumentId(Page<ChunkEntity> page, @Param("documentId") Long documentId);
 
-    List<ChunkEntity> selectByIds(@Param("ids") Collection<Long> ids);
+    List<ChunkEntity> selectByIds(@Param("tenantId") String tenantId, @Param("ids") Collection<Long> ids);
 
     /** 文档下全部有效 CHILD 切片（向量化用），按 seq 升序。 */
     List<ChunkEntity> selectChildrenByDocumentId(@Param("documentId") Long documentId);

@@ -158,7 +158,12 @@ public class LlmClient {
             if (resp == null || !resp.has("choices")) {
                 throw new IllegalStateException("LLM 响应缺少 choices");
             }
-            return resp.path("choices").get(0).path("message");
+            JsonNode message = resp.path("choices").get(0).path("message");
+            // usage 挂到返回的 message 上，调用方据此累加 Token 消耗（非流式工具轮也会有消耗）
+            if (message instanceof ObjectNode node && resp.has("usage")) {
+                node.set("usage", resp.get("usage"));
+            }
+            return message;
         } catch (WebClientResponseException e) {
             throw new IllegalStateException("LLM 调用失败: " + upstreamError(e), e);
         } catch (Exception e) {

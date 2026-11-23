@@ -42,7 +42,11 @@ public class ModelService {
     }
 
     public ModelEntity findEnabled(String tenantId, String type) {
-        return mapper.selectEnabledByTenantIdAndType(tenantId, type);
+        ModelEntity m = mapper.selectEnabledByTenantIdAndType(tenantId, type);
+        if (m != null) {
+            validateBaseUrl(m.getBaseUrl());
+        }
+        return m;
     }
 
     // ---------- 管理（前端，脱敏） ----------
@@ -105,10 +109,72 @@ public class ModelService {
 
     // ---------- 私有 ----------
 
+    /** 平台内部服务常用端口：租户自定义 Base URL 不得指向，避免被当作 SSRF 探测入口。 */
+    private static final Set<Integer> INTERNAL_PORTS = Set.of(
+            3306, 6379, 9200, 9300, 2379, 2380, 9000, 9001, 19530, 5672, 15672);
+    /** 本地推理白名单端口（Ollama），允许租户在本机/内网使用。 */
+    private static final int LOCAL_INFERENCE_PORT = 11434;
+
+    /**
+     * 模型 Base URL 出站校验（SSRF 防护）：非平台管理员禁止访问回环/链路本地/内网地址与中间件端口，
+     * 仅放行本地推理白名单端口（Ollama 11434）。保存与运行时各校验一次，兜住历史脏数据。
+     */
+    private void validateBaseUrl(String baseUrl) {
+        if (baseUrl == null || baseUrl.isBlank()) {
+            return; // 留空走平台默认端点
+        }
+        TenantContext.Session session = TenantContext.get();
+        if (session != null && session.isPlatformAdmin()) {
+            return;
+        }
+        java.net.URI uri;
+        try {
+            uri = java.net.URI.create(baseUrl);
+        } catch (Exception e) {
+            throw BizException.badRequest("模型 Base URL 格式不合法");
+        }
+        String scheme = uri.getScheme();
+        if (!"http".equalsIgnoreCase(scheme) && !"https".equalsIgnoreCase(scheme)) {
+            throw BizException.badRequest("模型 Base URL 只支持 http/https");
+        }
+        String host = uri.getHost();
+        if (host == null || host.isBlank()) {
+            throw BizException.badRequest("模型 Base URL 缺少主机名");
+        }
+        int port = uri.getPort() > 0 ? uri.getPort()
+                : ("https".equalsIgnoreCase(scheme) ? 443 : 80);
+        if (isLocalOrPrivateHost(host)) {
+            if (port == LOCAL_INFERENCE_PORT) {
+                return; // 本地推理白名单
+            }
+            throw BizException.badRequest(
+                    "模型 Base URL 不允许指向本机/内网地址（本地推理请使用 11434 端口的 Ollama，其他内网模型请联系平台管理员）");
+        }
+        if (INTERNAL_PORTS.contains(port)) {
+            throw BizException.badRequest("模型 Base URL 端口 " + port + " 为平台内部服务端口，禁止使用");
+        }
+    }
+
+    private boolean isLocalOrPrivateHost(String host) {
+        if ("localhost".equalsIgnoreCase(host)) {
+            return true;
+        }
+        try {
+            java.net.InetAddress addr = java.net.InetAddress.getByName(host);
+            return addr.isLoopbackAddress() || addr.isLinkLocalAddress()
+                    || addr.isAnyLocalAddress() || addr.isSiteLocalAddress()
+                    || addr.isMulticastAddress();
+        } catch (Exception e) {
+            // 解析失败的域名交给后续 HTTP 调用报错，不在此拦截
+            return false;
+        }
+    }
+
     private void applyFields(ModelEntity m, Dtos.ModelReq req, boolean isCreate) {
         m.setName(req.name().trim());
         if (req.baseUrl() != null) {
             m.setBaseUrl(req.baseUrl().isBlank() ? null : req.baseUrl().trim());
+            validateBaseUrl(m.getBaseUrl());
         }
         if (isCreate) {
             m.setApiKey(req.apiKey() == null || req.apiKey().isBlank() ? null : req.apiKey());

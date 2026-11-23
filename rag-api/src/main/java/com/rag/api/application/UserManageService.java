@@ -166,7 +166,7 @@ public class UserManageService {
         requireOwned(userId);
         List<Long> ids = kbIds == null ? List.of() : kbIds.stream().distinct().toList();
         if (!ids.isEmpty()) {
-            List<KnowledgeBaseEntity> kbs = kbMapper.selectByIds(ids);
+            List<KnowledgeBaseEntity> kbs = kbMapper.selectByIds(s.tenantId(), ids);
             if (kbs.size() != ids.size() || kbs.stream().anyMatch(k -> !s.tenantId().equals(k.getTenantId()))) {
                 throw BizException.badRequest("存在不属于本租户的知识库");
             }
@@ -284,7 +284,7 @@ public class UserManageService {
         TenantContext.Session s = TenantContext.require();
         if (s.userType() == 2) {
             List<Long> ids = listKbIds(s.userId());
-            return ids.isEmpty() ? List.of() : kbMapper.selectByIds(ids);
+            return ids.isEmpty() ? List.of() : kbMapper.selectByIds(s.tenantId(), ids);
         }
         return kbMapper.selectByTenantId(s.tenantId());
     }

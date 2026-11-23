@@ -20,12 +20,12 @@
 ### 2.1 中间件（根目录 docker-compose.yml）
 
 ```bash
-docker compose up -d mysql redis rustfs rustfs-init etcd elasticsearch milvus
+docker compose up -d mysql redis rustfs rustfs-init rabbitmq etcd elasticsearch milvus
 ```
 
 MySQL 8.4 / Redis 7.4 / RustFS（9000 S3 API + 9001 控制台，S3 兼容对象存储，替代 MinIO）/ etcd 3.5 / ES 8.14 / Milvus 2.5 standalone。桶由 `rustfs-init`（amazon/aws-cli）自动建：`rag-files`（业务）、`a-bucket`（Milvus）。Milvus 的 `MINIO_ADDRESS/MINIO_ACCESS_KEY_ID/...` 是 Milvus 自身固定的变量名，指向 RustFS。
 
-> 注意：compose 不包含 `rabbitmq`，但 rag-worker 代码依赖 RabbitMQ（exchange `rag.ingest`）。本地跑 Worker 前需自备 RabbitMQ（5672/15672，guest/guest）。
+> 注意：`rabbitmq` 已并入根 compose（3.13-management，AMQP 5672 / 控制台 15672，guest/guest），Worker 直接可用；exchange `rag.ingest`。
 
 所有中间件地址默认指向 `127.0.0.1`，可用环境变量覆盖：`MIDDLEWARE_HOST`、`MYSQL_HOST/PORT/DB/USER/PASSWORD`、`RUSTFS_PORT/USER/PASSWORD/BUCKET/REGION`、`ES_PORT`、`MILVUS_PORT`、`ETCD_PORT` 等。
 
@@ -70,7 +70,8 @@ npm run dev                                  # http://localhost:5173
 ```bash
 mvn clean install -DskipTests               # 根目录聚合一键构建（reactor 自动按依赖排序：rag-common → rag-api/rag-worker）
 mvn -f rag-api/pom.xml clean compile -DskipTests   # 单模块构建前先 install rag-common
-mvn -f rag-worker/pom.xml clean test         # 唯一测试：ChunkPipelineTest
+mvn -f rag-worker/pom.xml clean test         # worker 解析/切片/版面元数据单测
+mvn -f rag-api/pom.xml clean test            # api 多租户隔离/QueryRewrite/Rerank 单测
 cd knowledge-console && npm run typecheck    # tsc --noEmit
 cd knowledge-console && npm run build
 ```

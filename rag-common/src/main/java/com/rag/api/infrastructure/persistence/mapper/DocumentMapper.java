@@ -23,9 +23,10 @@ public interface DocumentMapper {
     /** 仅查停止标记（Worker 停止检查用）。 */
     DocumentEntity selectStopRequestedById(@Param("id") Long id);
 
-    Page<DocumentEntity> selectPageByKbId(Page<DocumentEntity> page, @Param("kbId") Long kbId);
+    Page<DocumentEntity> selectPageByKbId(Page<DocumentEntity> page, @Param("kbId") Long kbId,
+                                          @Param("tenantId") String tenantId);
 
-    List<DocumentEntity> selectByIds(@Param("ids") Collection<Long> ids);
+    List<DocumentEntity> selectByIds(@Param("tenantId") String tenantId, @Param("ids") Collection<Long> ids);
 
     List<Long> selectIdsByKbId(@Param("kbId") Long kbId);
 

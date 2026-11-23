@@ -18,6 +18,9 @@ public interface PipelineTaskMapper {
     /** 扫描长时间未更新、可能因 Worker 崩溃而卡住的 PENDING/RUNNING 任务。 */
     List<PipelineTaskEntity> selectStaleTasks(@Param("minutes") int minutes);
 
+    /** 任务心跳：长耗时任务在各阶段刷新 updated_at，避免被僵尸任务扫描误判重复投递。 */
+    int touchRunningByDocumentId(@Param("documentId") Long documentId);
+
     int insert(PipelineTaskEntity entity);
 
     int updateById(PipelineTaskEntity entity);

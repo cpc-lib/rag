@@ -5,6 +5,9 @@ import com.rag.api.infrastructure.persistence.entity.DocumentEntity;
 import com.rag.api.infrastructure.persistence.entity.ModelEntity;
 import com.rag.worker.infrastructure.storage.ObjectStorage;
 import com.rag.worker.infrastructure.llm.VisionClient;
+import com.rag.worker.pipeline.pdf.PdfLayoutExtractor;
+import com.rag.worker.pipeline.pdf.PdfTableContinuation;
+import com.rag.worker.pipeline.table.TableModel;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.pdfbox.contentstream.PDFGraphicsStreamEngine;
@@ -17,8 +20,10 @@ import org.apache.pdfbox.pdmodel.graphics.image.PDImage;
 import org.apache.pdfbox.pdmodel.graphics.image.PDImageXObject;
 import org.apache.pdfbox.rendering.PDFRenderer;
 import org.apache.pdfbox.text.PDFTextStripper;
-import org.apache.poi.hwpf.HWPFDocument;
-import org.apache.poi.hwpf.extractor.WordExtractor;
+import org.apache.poi.ss.usermodel.CellType;
+import org.apache.poi.ss.usermodel.DataFormatter;
+import org.apache.poi.ss.util.CellRangeAddress;
+import org.apache.poi.xssf.usermodel.XSSFCell;
 import org.apache.poi.xssf.usermodel.XSSFRow;
 import org.apache.poi.xssf.usermodel.XSSFSheet;
 import org.apache.poi.xssf.usermodel.XSSFWorkbook;
@@ -38,32 +43,52 @@ import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.HashSet;
+import java.util.IdentityHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 
 /**
- * 多格式解析（spec 4.1）：MD/TXT 直读；DOC/DOCX/XLSX 用 POI；PDF 文本层 + 扫描页 OCR；
- * 图片同时提取 OCR 文字与视觉描述（可用时）。
+ * 多格式解析（spec 4.1）：MD/TXT/CSV/JSON/常见代码文件直读；DOCX/XLSX 用 POI；
+ * PDF 文本层 + 扫描页 OCR；图片同时提取 OCR 文字与视觉描述（可用时）。
  */
 @Slf4j
 @Service
 @RequiredArgsConstructor
 public class ParseService {
 
-    /** 宽或高小于该值的图片视为图标/装饰，不进入切片。 */
-    private static final int MIN_IMAGE_SIZE = 120;
-    /** 单文档最多抽取的内嵌图片数，避免视觉模型调用失控。 */
-    private static final int MAX_IMAGES = 200;
-    /** 单页矢量绘制操作数达到该值视为图形密集页（架构图/流程图）。 */
-    private static final int VECTOR_OP_THRESHOLD = 40;
-    /** 图形密集页的文字量上限：超过说明主要是正文/表格，整页截图会与文本切片重复。 */
-    private static final int PAGE_SNAPSHOT_MAX_TEXT = 800;
-    /** 单文档最多渲染的整页截图数（矢量图兜底，Vision 成本控制）。 */
-    private static final int MAX_PAGE_SNAPSHOTS = 20;
+    /**
+     * 解析页：text 为页文本，spans 记录版面块在 text 中的字符区间与 bbox（ISSUE RAG-007）。
+     * 非 PDF 或纯文本解析没有版面信息时 spans 为空，切片元数据只保留页码。
+     */
+    public record RawPage(int page, String text, List<BlockSpan> spans) {
 
-    public record RawPage(int page, String text) {
+        public RawPage(int page, String text) {
+            this(page, text, List.of());
+        }
     }
+
+    /**
+     * 版面块在页文本中的区间 [start, end)：blockId 形如 p3-b2（页-块，1 起），
+     * kind 为该块的语义类别，供切片阶段写入 chunk 的 bbox / source_id / block_type。
+     */
+    public record BlockSpan(int start, int end, String blockId, BBox bbox,
+                            PdfLayoutExtractor.BlockKind kind) {
+
+        public BlockSpan(int start, int end, String blockId, BBox bbox) {
+            this(start, end, blockId, bbox, PdfLayoutExtractor.BlockKind.PARAGRAPH);
+        }
+    }
+
+    /** 按纯文本直读、无需专用解析器的扩展名（与上传白名单 / ChunkStrategyRouter 保持一致）。 */
+    private static final Set<String> TEXT_EXTS = Set.of(
+            "txt", "md", "json", "sql", "xml", "yml", "yaml", "properties", "log", "ini", "conf",
+            "java", "py", "go", "js", "jsx", "ts", "tsx", "sh");
+
+    /** Excel 单元格显示格式化（日期/金额/编号按单元格格式输出，避免变成浮点串）。 */
+    private static final DataFormatter FORMATTER = new DataFormatter();
 
     /**
      * PDF 图片素材：page 从 0 起，png 为归一化后的 PNG 字节，hash 为前 8 位 SHA-256（去重与命名）。
@@ -73,6 +98,7 @@ public class ParseService {
     }
 
     public record ParseOutcome(List<RawPage> pages, List<String> warnings, List<RawImage> images) {
+
         public ParseOutcome(List<RawPage> pages, List<String> warnings) {
             this(pages, warnings, new ArrayList<>());
         }
@@ -91,30 +117,95 @@ public class ParseService {
         }
         String ext = extOf(doc.getFileName());
         return switch (ext) {
-            case "txt", "md" -> new ParseOutcome(
-                    List.of(new RawPage(0, new String(bytes, StandardCharsets.UTF_8))), new ArrayList<>());
+            case "csv" -> parseCsv(bytes);
             case "docx" -> parseDocx(bytes);
-            case "doc" -> parseDoc(bytes);
             case "xlsx" -> parseXlsx(bytes);
             case "pdf" -> parsePdf(doc, vision, bytes);
             case "html", "htm" -> parseHtml(bytes);
             case "png", "jpg", "jpeg" -> parseImage(doc, vision, bytes, ext);
-            default -> throw new IllegalStateException("不支持的文件类型: " + ext);
+            default -> {
+                if (TEXT_EXTS.contains(ext)) {
+                    yield plainText(bytes);
+                }
+                throw new NonRetryableException("不支持的文件类型: " + ext);
+            }
         };
     }
 
-    /**
-     * .doc（Word 97-2003 二进制）：HWPF 抽取正文，换行归一化为 \n。
-     */
-    private ParseOutcome parseDoc(byte[] bytes) {
-        try (HWPFDocument document = new HWPFDocument(new ByteArrayInputStream(bytes))) {
-            String text = new WordExtractor(document).getText();
-            String normalized = text.replace("\r\n", "\n").replace('\r', '\n')
-                    .replaceAll("\n{3,}", "\n\n");
-            return new ParseOutcome(List.of(new RawPage(0, normalized.strip())), new ArrayList<>());
-        } catch (Exception e) {
-            throw new IllegalStateException("doc 解析失败: " + e.getMessage(), e);
+    private ParseOutcome plainText(byte[] bytes) {
+        return new ParseOutcome(
+                List.of(new RawPage(0, new String(bytes, StandardCharsets.UTF_8))), new ArrayList<>());
+    }
+
+    /** CSV 转为 Markdown 表格，首行作为表头；解析异常时回退为纯文本。 */
+    private ParseOutcome parseCsv(byte[] bytes) {
+        String raw = new String(bytes, StandardCharsets.UTF_8);
+        if (raw.startsWith("\uFEFF")) {
+            raw = raw.substring(1);
         }
+        List<List<String>> rows = parseCsvRows(raw);
+        if (rows.isEmpty()) {
+            return plainText(bytes);
+        }
+        int cols = rows.stream().mapToInt(List::size).max().orElse(0);
+        if (cols == 0) {
+            return plainText(bytes);
+        }
+        List<List<TableModel.Cell>> grid = new ArrayList<>();
+        for (List<String> row : rows) {
+            List<TableModel.Cell> cells = new ArrayList<>(cols);
+            for (int i = 0; i < cols; i++) {
+                cells.add(TableModel.Cell.of(i < row.size() ? row.get(i) : ""));
+            }
+            grid.add(cells);
+        }
+        String markdown = new TableModel(null, 0, grid).toMarkdown();
+        return new ParseOutcome(List.of(new RawPage(0, markdown)), new ArrayList<>());
+    }
+
+    /** 最小 RFC4180 CSV 解析：支持双引号包裹、引号转义与字段内换行。 */
+    private List<List<String>> parseCsvRows(String raw) {
+        List<List<String>> rows = new ArrayList<>();
+        List<String> row = new ArrayList<>();
+        StringBuilder cell = new StringBuilder();
+        boolean quoted = false;
+        for (int i = 0; i < raw.length(); i++) {
+            char c = raw.charAt(i);
+            if (quoted) {
+                if (c == '"') {
+                    if (i + 1 < raw.length() && raw.charAt(i + 1) == '"') {
+                        cell.append('"');
+                        i++;
+                    } else {
+                        quoted = false;
+                    }
+                } else {
+                    cell.append(c);
+                }
+            } else if (c == '"') {
+                quoted = true;
+            } else if (c == ',') {
+                row.add(cell.toString());
+                cell.setLength(0);
+            } else if (c == '\n' || c == '\r') {
+                if (c == '\r' && i + 1 < raw.length() && raw.charAt(i + 1) == '\n') {
+                    i++;
+                }
+                row.add(cell.toString());
+                cell.setLength(0);
+                if (!(row.size() == 1 && row.get(0).isBlank())) {
+                    rows.add(row);
+                }
+                row = new ArrayList<>();
+            } else {
+                cell.append(c);
+            }
+        }
+        if (cell.length() > 0 || !row.isEmpty()) {
+            row.add(cell.toString());
+            rows.add(row);
+        }
+        return rows;
     }
 
     private ParseOutcome parseDocx(byte[] bytes) {
@@ -168,128 +259,237 @@ public class ParseService {
         return null;
     }
 
-    /** Word 表格 → Markdown 表格（指南 §16，供表格保护与切片）。 */
+    /** Word 表格 → 统一表格模型（指南 §16）：保留 gridSpan 横向合并，供后续切片重复表头。 */
     private String docxTableToMarkdown(XWPFTable table) {
-        List<List<String>> rows = new ArrayList<>();
-        int maxCols = 0;
+        List<List<TableModel.Cell>> grid = new ArrayList<>();
         for (XWPFTableRow row : table.getRows()) {
-            List<String> cells = row.getTableCells().stream()
-                    .map(XWPFTableCell::getText)
-                    .map(t -> t == null ? "" : t.replace("\\", "\\\\")
-                            .replace("|", "\\|").replaceAll("\\s+", " ").strip())
-                    .toList();
-            rows.add(cells);
-            maxCols = Math.max(maxCols, cells.size());
+            List<TableModel.Cell> cells = new ArrayList<>();
+            for (XWPFTableCell cell : row.getTableCells()) {
+                cells.add(new TableModel.Cell(cell.getText(), docxGridSpan(cell), 1));
+            }
+            if (!cells.isEmpty()) {
+                grid.add(cells);
+            }
         }
-        if (rows.isEmpty() || maxCols == 0) {
-            return "";
-        }
-        StringBuilder sb = new StringBuilder();
-        sb.append(toMdRow(rows.get(0), maxCols)).append('\n');
-        sb.append('|').append("---|".repeat(maxCols)).append('\n');
-        for (int r = 1; r < rows.size(); r++) {
-            sb.append(toMdRow(rows.get(r), maxCols)).append('\n');
-        }
-        return sb.toString();
+        return new TableModel(null, 0, grid).toMarkdown();
     }
 
-    private String toMdRow(List<String> cells, int cols) {
-        StringBuilder sb = new StringBuilder("|");
-        for (int c = 0; c < cols; c++) {
-            sb.append(c < cells.size() ? cells.get(c) : "").append('|');
+    /** Word 横向合并：gridSpan 表示单元格横跨的网格列数。 */
+    private int docxGridSpan(XWPFTableCell cell) {
+        try {
+            var tcPr = cell.getCTTc().getTcPr();
+            if (tcPr != null && tcPr.getGridSpan() != null && tcPr.getGridSpan().getVal() != null) {
+                return tcPr.getGridSpan().getVal().intValue();
+            }
+        } catch (Exception ignored) {
         }
-        return sb.toString();
+        return 1;
     }
 
     private ParseOutcome parseXlsx(byte[] bytes) {
+        try {
+            return new ParseOutcome(xlsxPages(bytes), new ArrayList<>());
+        } catch (Exception e) {
+            throw new IllegalStateException("Excel 解析失败: " + e.getMessage(), e);
+        }
+    }
+
+    /**
+     * Excel → 每 Sheet 一页 Markdown 表格（首行表头）。包级可见用于多 Sheet 回归测试。
+     * 合并区域按 colspan/rowspan 展开，保证表头与数据行列对齐。
+     */
+    static List<RawPage> xlsxPages(byte[] bytes) throws Exception {
         List<RawPage> pages = new ArrayList<>();
         try (XSSFWorkbook workbook = new XSSFWorkbook(new ByteArrayInputStream(bytes))) {
             for (int s = 0; s < workbook.getNumberOfSheets(); s++) {
                 XSSFSheet sheet = workbook.getSheetAt(s);
-                List<List<String>> rows = new ArrayList<>();
-                int maxCols = 0;
-                for (int r = 0; r <= sheet.getLastRowNum(); r++) {
-                    XSSFRow row = sheet.getRow(r);
-                    if (row == null) {
-                        continue;
-                    }
-                    List<String> cells = new ArrayList<>();
-                    for (int c = 0; c < row.getLastCellNum(); c++) {
-                        var cell = row.getCell(c);
-                        cells.add(cell == null ? "" : cell.toString().replace("\\", "\\\\")
-                                .replace("|", "\\|").replaceAll("\\s+", " ").strip());
-                    }
-                    if (cells.stream().anyMatch(v -> !v.isEmpty())) {
-                        rows.add(cells);
-                        maxCols = Math.max(maxCols, cells.size());
-                    }
+                List<List<TableModel.Cell>> grid = xlsxGrid(sheet);
+                if (grid.isEmpty()) {
+                    continue;
                 }
-                if (!rows.isEmpty()) {
-                    String sheetName = workbook.getSheetName(s);
-                    StringBuilder sb = new StringBuilder("# ")
-                            .append(sheetName == null ? "Sheet" + s : sheetName).append("\n\n")
-                            .append(toMdRow(rows.get(0), maxCols)).append('\n')
-                            .append('|').append("---|".repeat(maxCols)).append('\n');
-                    for (int r = 1; r < rows.size(); r++) {
-                        sb.append(toMdRow(rows.get(r), maxCols)).append('\n');
+                String sheetName = workbook.getSheetName(s);
+                String markdown = new TableModel(sheetName, s, grid).toMarkdown();
+                pages.add(new RawPage(s, "# " + (sheetName == null ? "Sheet" + s : sheetName)
+                        + "\n\n" + markdown));
+            }
+        }
+        return pages;
+    }
+
+    /** 读取 Sheet 为单元格网格：预扫描合并区域，跳过被覆盖格子并在起点写入跨度。 */
+    private static List<List<TableModel.Cell>> xlsxGrid(XSSFSheet sheet) {
+        Map<Long, CellRangeAddress> mergeStart = new HashMap<>();
+        Set<Long> covered = new HashSet<>();
+        int maxCols = 0;
+        for (CellRangeAddress region : sheet.getMergedRegions()) {
+            mergeStart.put(cellKey(region.getFirstRow(), region.getFirstColumn()), region);
+            for (int r = region.getFirstRow(); r <= region.getLastRow(); r++) {
+                for (int c = region.getFirstColumn(); c <= region.getLastColumn(); c++) {
+                    if (r != region.getFirstRow() || c != region.getFirstColumn()) {
+                        covered.add(cellKey(r, c));
                     }
-                    pages.add(new RawPage(s, sb.toString()));
                 }
             }
-        } catch (Exception e) {
-            throw new IllegalStateException("Excel 解析失败: " + e.getMessage(), e);
+            maxCols = Math.max(maxCols, region.getLastColumn() + 1);
         }
-        return new ParseOutcome(pages, new ArrayList<>());
+        for (int r = 0; r <= sheet.getLastRowNum(); r++) {
+            XSSFRow row = sheet.getRow(r);
+            if (row != null && row.getLastCellNum() > 0) {
+                maxCols = Math.max(maxCols, row.getLastCellNum());
+            }
+        }
+        List<List<TableModel.Cell>> grid = new ArrayList<>();
+        for (int r = 0; r <= sheet.getLastRowNum(); r++) {
+            XSSFRow row = sheet.getRow(r);
+            List<TableModel.Cell> cells = new ArrayList<>();
+            for (int c = 0; c < maxCols; c++) {
+                long key = cellKey(r, c);
+                if (covered.contains(key)) {
+                    continue;
+                }
+                XSSFCell cell = row == null ? null : row.getCell(c);
+                CellRangeAddress region = mergeStart.get(key);
+                String text = xlsxCellText(cell);
+                if (region != null) {
+                    cells.add(new TableModel.Cell(text,
+                            region.getLastColumn() - region.getFirstColumn() + 1,
+                            region.getLastRow() - region.getFirstRow() + 1));
+                } else {
+                    cells.add(TableModel.Cell.of(text));
+                }
+            }
+            if (cells.stream().anyMatch(c -> !c.text().isBlank())) {
+                grid.add(cells);
+            }
+        }
+        return grid;
     }
+
+    private static long cellKey(int row, int col) {
+        return ((long) row << 32) | (col & 0xffffffffL);
+    }
+
+    /** 用 DataFormatter 保留日期/金额/编号的显示格式；公式单元格保持原值输出。 */
+    private static String xlsxCellText(XSSFCell cell) {
+        if (cell == null) {
+            return "";
+        }
+        try {
+            if (cell.getCellType() == CellType.FORMULA) {
+                return cell.toString();
+            }
+            return FORMATTER.formatCellValue(cell);
+        } catch (Exception e) {
+            return cell.toString();
+        }
+    }
+
+    /** 单文档最多抽取的图片数。 */
+    private static final int MAX_IMAGES_PER_DOC = 30;
+    /** 小于该尺寸（显示尺寸 pt 或像素）的图片多为图标/线条，不进入 OCR/Vision。 */
+    private static final int MIN_IMAGE_SIDE = 80;
+    /** 单文档最多抽取的内嵌位图数（图片切片素材，独立上限）。 */
+    private static final int MAX_IMAGE_ASSETS = 200;
+    /** 单页矢量绘制操作数达到该值视为图形密集页（架构图/流程图）。 */
+    private static final int VECTOR_OP_THRESHOLD = 40;
+    /** 图形密集页的文字量上限：超过说明主要是正文/表格，整页截图会与文本切片重复。 */
+    private static final int PAGE_SNAPSHOT_MAX_TEXT = 800;
+    /** 单文档最多渲染的整页截图数（矢量图兜底，Vision 成本控制）。 */
+    private static final int MAX_PAGE_SNAPSHOTS = 20;
+
+    private final PdfLayoutExtractor pdfLayoutExtractor = new PdfLayoutExtractor();
+
+    /** 单页抽取结果：页号、页高与版面块（第二遍续接/组装使用）。 */
+    private record PageBlocks(int index, float height, List<PdfLayoutExtractor.Block> blocks) {
+    }
+
+    /** 页眉页脚判定：距页面顶部/底部的边距带。 */
+    private static final float MARGIN_BAND_PT = 55f;
+    /** 页眉页脚至少重复出现的页数。 */
+    private static final int HEADER_FOOTER_MIN_PAGES = 2;
 
     private ParseOutcome parsePdf(DocumentEntity doc, ModelEntity vision, byte[] bytes) {
         List<RawPage> pages = new ArrayList<>();
         List<String> warnings = new ArrayList<>();
         List<RawImage> images = new ArrayList<>();
         Set<String> imageHashes = new HashSet<>();
+        boolean imageChannels = ocrService.available()
+                || (vision != null && visionClient.isConfigured(vision.getBaseUrl(), vision.getModel()));
         boolean visionReady = vision != null
                 && visionClient.isConfigured(vision.getBaseUrl(), vision.getModel());
+        int[] imageBudget = {MAX_IMAGES_PER_DOC};
         int snapshots = 0;
-        try (PDDocument pdf = PDDocument.load(bytes)) {
-            PDFTextStripper stripper = new PDFTextStripper();
-            PDFRenderer renderer = new PDFRenderer(pdf);
+        // 同一图片对象跨页/重复绘制时复用识别结果，避免重复调用 OCR/Vision
+        Map<PDImageXObject, String> imageDescCache = new IdentityHashMap<>();
+        try (PDDocument pdf = PDDocument.load(new ByteArrayInputStream(bytes),
+                org.apache.pdfbox.io.MemoryUsageSetting.setupMixed(32L * 1024 * 1024))) {
             int total = pdf.getNumberOfPages();
+            PDFRenderer renderer = new PDFRenderer(pdf);
+            // 第一遍：抽取全部页块。页眉页脚需要跨页统计，因此不能在逐页循环里立即组装。
+            List<PageBlocks> extracted = new ArrayList<>(total);
             for (int i = 0; i < total; i++) {
+                List<PdfLayoutExtractor.Block> blocks;
+                try {
+                    blocks = new ArrayList<>(pdfLayoutExtractor.extractPage(pdf, i));
+                } catch (Exception le) {
+                    log.warn("PDF 第 {} 页版式抽取失败，回退纯文本: {}", i + 1, le.getMessage());
+                    blocks = new ArrayList<>(fallbackTextBlocks(pdf, i));
+                }
+                extracted.add(new PageBlocks(i, pageHeight(pdf, i), blocks));
+                // 图片素材：内嵌位图按内容哈希去重，作为独立 IMAGE 切片来源
                 PDPage page = pdf.getPage(i);
-                stripper.setStartPage(i + 1);
-                stripper.setEndPage(i + 1);
-                String text = stripper.getText(pdf);
                 extractImages(page, i, images, imageHashes, warnings);
-                // 矢量架构图（路径绘制）按整页截图兜底；需 Vision 才有检索价值
-                if (visionReady && snapshots < MAX_PAGE_SNAPSHOTS && text != null
-                        && text.strip().length() <= PAGE_SNAPSHOT_MAX_TEXT
+                if (visionReady && snapshots < MAX_PAGE_SNAPSHOTS
+                        && blocksTextLength(blocks) <= PAGE_SNAPSHOT_MAX_TEXT
                         && addPageSnapshot(page, i, images, imageHashes, renderer)) {
                     snapshots++;
                 }
-                if (text != null && text.strip().length() >= 10) {
-                    pages.add(new RawPage(i, text));
+            }
+            removeHeadersFooters(extracted);
+            // 第二遍：延迟一页输出，下一页抽取后才能判断上一页表格是否接续
+            List<PdfLayoutExtractor.Block> pending = null;
+            int pendingIndex = -1;
+            float pendingHeight = 0;
+            for (PageBlocks page : extracted) {
+                List<PdfLayoutExtractor.Block> blocks = new ArrayList<>(page.blocks());
+                boolean absorbed = false;
+                if (pending != null) {
+                    var connected = PdfTableContinuation.connect(pending, pendingHeight,
+                            blocks, page.height());
+                    blocks = new ArrayList<>(connected.current());
+                    absorbed = connected.absorbed();
+                    emitPdfPage(pdf, renderer, pendingIndex, pending, pages, warnings, vision,
+                            imageBudget, imageChannels, imageDescCache);
+                }
+                if (absorbed) {
+                    // 整页仅剩被接续表格与页码，内容已并入上一页
+                    pending = null;
+                    pendingIndex = -1;
                     continue;
                 }
-                // 无文本层 → 扫描页走 OCR
-                if (ocrService.available()) {
-                    try {
-                        BufferedImage image = renderer.renderImageWithDPI(i, 150);
-                        String ocrText = ocrService.ocr(image);
-                        pages.add(new RawPage(i, ocrText == null ? "" : ocrText));
-                    } catch (Exception oe) {
-                        log.warn("PDF 第 {} 页 OCR 失败: {}", i + 1, oe.getMessage());
-                        warnings.add("第" + (i + 1) + "页OCR失败已跳过");
-                        pages.add(new RawPage(i, ""));
-                    }
-                } else {
-                    warnings.add("第" + (i + 1) + "页为扫描件且OCR未配置已跳过");
-                    pages.add(new RawPage(i, ""));
-                }
+                pending = blocks;
+                pendingIndex = page.index();
+                pendingHeight = page.height();
+            }
+            if (pending != null) {
+                emitPdfPage(pdf, renderer, pendingIndex, pending, pages, warnings, vision,
+                        imageBudget, imageChannels, imageDescCache);
             }
         } catch (Exception e) {
             throw new IllegalStateException("PDF 解析失败: " + e.getMessage(), e);
         }
         return new ParseOutcome(pages, warnings, images);
+    }
+
+    /** 版面块文本总长度（用于判断是否为图形密集页，决定是否整页截图）。 */
+    private int blocksTextLength(List<PdfLayoutExtractor.Block> blocks) {
+        int length = 0;
+        for (PdfLayoutExtractor.Block block : blocks) {
+            if (block instanceof PdfLayoutExtractor.TextBlock text && text.text() != null) {
+                length += text.text().strip().length();
+            }
+        }
+        return length;
     }
 
     /**
@@ -303,9 +503,9 @@ public class ParseService {
             return;
         }
         for (COSName name : resources.getXObjectNames()) {
-            if (images.size() >= MAX_IMAGES) {
-                if (!warnings.contains("图片数量超过" + MAX_IMAGES + "张，其余已忽略")) {
-                    warnings.add("图片数量超过" + MAX_IMAGES + "张，其余已忽略");
+            if (images.size() >= MAX_IMAGE_ASSETS) {
+                if (!warnings.contains("图片数量超过" + MAX_IMAGE_ASSETS + "张，其余已忽略")) {
+                    warnings.add("图片数量超过" + MAX_IMAGE_ASSETS + "张，其余已忽略");
                 }
                 return;
             }
@@ -316,7 +516,7 @@ public class ParseService {
                 continue;
             }
             if (!(xObject instanceof PDImageXObject image) || image.isStencil()
-                    || image.getWidth() < MIN_IMAGE_SIZE || image.getHeight() < MIN_IMAGE_SIZE) {
+                    || image.getWidth() < MIN_IMAGE_SIDE || image.getHeight() < MIN_IMAGE_SIDE) {
                 continue;
             }
             byte[] png;
@@ -384,6 +584,11 @@ public class ParseService {
         }
 
         @Override
+        public Point2D getCurrentPoint() {
+            return null;
+        }
+
+        @Override
         public void appendRectangle(Point2D p0, Point2D p1, Point2D p2, Point2D p3) {
             ops++;
         }
@@ -406,6 +611,10 @@ public class ParseService {
 
         @Override
         public void curveTo(float x1, float y1, float x2, float y2, float x3, float y3) {
+        }
+
+        @Override
+        public void closePath() {
         }
 
         @Override
@@ -463,6 +672,233 @@ public class ParseService {
         } catch (Exception e) {
             return Integer.toHexString(java.util.Arrays.hashCode(data));
         }
+    }
+
+    /**
+     * 页眉页脚识别与剔除（ISSUE RAG-007）：位于页面上下边距带内、规范化后
+     * 在足够多页重复出现的文本（以及页码样式）视为页眉页脚并从页块中移除，
+     * 避免其被切片进正文、污染召回。
+     */
+    private void removeHeadersFooters(List<PageBlocks> pages) {
+        if (pages.size() < HEADER_FOOTER_MIN_PAGES) {
+            return;
+        }
+        Map<String, Set<Integer>> occurrences = new HashMap<>();
+        for (PageBlocks page : pages) {
+            for (PdfLayoutExtractor.Block block : page.blocks()) {
+                if (block instanceof PdfLayoutExtractor.TextBlock text && inMargin(text, page.height())) {
+                    String key = normalizeMarginText(text.text());
+                    if (!key.isEmpty()) {
+                        occurrences.computeIfAbsent(key, k -> new HashSet<>()).add(page.index());
+                    }
+                }
+            }
+        }
+        int threshold = Math.max(HEADER_FOOTER_MIN_PAGES, (int) Math.ceil(pages.size() * 0.4));
+        for (PageBlocks page : pages) {
+            List<PdfLayoutExtractor.Block> kept = new ArrayList<>(page.blocks().size());
+            for (PdfLayoutExtractor.Block block : page.blocks()) {
+                if (block instanceof PdfLayoutExtractor.TextBlock text && inMargin(text, page.height())) {
+                    String key = normalizeMarginText(text.text());
+                    boolean repeated = !key.isEmpty()
+                            && occurrences.getOrDefault(key, Set.of()).size() >= threshold;
+                    if (repeated || isPageNumber(text.text())) {
+                        continue;
+                    }
+                }
+                kept.add(block);
+            }
+            page.blocks().clear();
+            page.blocks().addAll(kept);
+        }
+    }
+
+    private boolean inMargin(PdfLayoutExtractor.TextBlock text, float pageHeight) {
+        return text.top() < MARGIN_BAND_PT
+                || (pageHeight > 0 && text.top() > pageHeight - MARGIN_BAND_PT);
+    }
+
+    /** 去数字与空白后的文本用于跨页重复判定（页码变化不影响识别）。 */
+    private String normalizeMarginText(String text) {
+        return text == null ? "" : text.replaceAll("\\d+", "").replaceAll("\\s+", "").strip();
+    }
+
+    /** 页码样式：1 / 第1页 / 1/10 / Page 1 of 10 / - 1 -。 */
+    private boolean isPageNumber(String text) {
+        String value = text == null ? "" : text.strip();
+        return value.matches("(?i)(第\\s*\\d{1,4}\\s*页?(\\s*/\\s*\\d{1,4})?"
+                + "|page\\s*\\d{1,4}(\\s*of\\s*\\d{1,4})?"
+                + "|[-—]\\s*\\d{1,4}\\s*[-—]"
+                + "|\\d{1,4}(\\s*/\\s*\\d{1,4})?)");
+    }
+
+    /** 输出单页：有文本层走版面组装，无文本层按扫描页 OCR。 */
+    private void emitPdfPage(PDDocument pdf, PDFRenderer renderer, int index,
+                             List<PdfLayoutExtractor.Block> blocks, List<RawPage> pages,
+                             List<String> warnings, ModelEntity vision, int[] imageBudget,
+                             boolean imageChannels, Map<PDImageXObject, String> imageDescCache) {
+        Assembled assembled = assemblePage(blocks, index, vision, warnings, imageBudget,
+                imageChannels, imageDescCache);
+        if (assembled.text().strip().length() >= 10) {
+            pages.add(new RawPage(index, assembled.text(), assembled.spans()));
+            return;
+        }
+        // 无文本层 → 扫描页走 OCR
+        if (ocrService.available()) {
+            try {
+                BufferedImage image = renderer.renderImageWithDPI(index, 150);
+                String ocrText = ocrService.ocr(image);
+                pages.add(new RawPage(index, ocrText == null ? "" : ocrText));
+            } catch (Exception oe) {
+                log.warn("PDF 第 {} 页 OCR 失败: {}", index + 1, oe.getMessage());
+                warnings.add("第" + (index + 1) + "页OCR失败已跳过");
+                pages.add(new RawPage(index, ""));
+            }
+        } else {
+            warnings.add("第" + (index + 1) + "页为扫描件且OCR未配置已跳过");
+            pages.add(new RawPage(index, ""));
+        }
+    }
+
+    /** 页高（与 PdfLayoutExtractor 的 top 坐标系一致，基于 MediaBox）。 */
+    private float pageHeight(PDDocument pdf, int index) {
+        try {
+            return pdf.getPage(index).getMediaBox().getHeight();
+        } catch (Exception e) {
+            return 0;
+        }
+    }
+
+    /** 版式抽取失败时按纯文本提取整页（保持阅读顺序），保证页面不丢失。 */
+    private List<PdfLayoutExtractor.Block> fallbackTextBlocks(PDDocument pdf, int pageIndex) {
+        try {
+            PDFTextStripper stripper = new PDFTextStripper();
+            stripper.setSortByPosition(true);
+            stripper.setStartPage(pageIndex + 1);
+            stripper.setEndPage(pageIndex + 1);
+            return List.of(new PdfLayoutExtractor.TextBlock(0, stripper.getText(pdf)));
+        } catch (Exception e) {
+            log.warn("PDF 第 {} 页纯文本回退提取失败: {}", pageIndex + 1, e.getMessage());
+            return List.of();
+        }
+    }
+
+    /**
+     * 组装单页文本（ISSUE RAG-007）：文本行 / 表格 Markdown / 图片识别结果
+     * 按版面自顶向下顺序拼接，图片说明保留在原文相邻位置而不是页尾。
+     * 同时记录每个块在页文本中的区间与 bbox，供切片阶段写入 chunk 元数据。
+     */
+    private Assembled assemblePage(List<PdfLayoutExtractor.Block> blocks, int pageIndex,
+                                   ModelEntity vision, List<String> warnings, int[] imageBudget,
+                                   boolean imageChannels, Map<PDImageXObject, String> descCache) {
+        StringBuilder sb = new StringBuilder();
+        List<BlockSpan> spans = new ArrayList<>();
+        int imgSeq = 0;
+        boolean budgetWarned = false;
+        for (int bi = 0; bi < blocks.size(); bi++) {
+            PdfLayoutExtractor.Block block = blocks.get(bi);
+            if (block.kind() == PdfLayoutExtractor.BlockKind.HEADER_FOOTER) {
+                continue;
+            }
+            String rendered = null;
+            if (block instanceof PdfLayoutExtractor.TextBlock t) {
+                rendered = t.text();
+            } else if (block instanceof PdfLayoutExtractor.TableBlock t) {
+                rendered = t.table().toMarkdown();
+            } else if (block instanceof PdfLayoutExtractor.ImageBlock img) {
+                if (!imageChannels) {
+                    continue;
+                }
+                if (imageBudget[0] <= 0) {
+                    if (!budgetWarned) {
+                        warnings.add("PDF 图片数量超过上限 " + MAX_IMAGES_PER_DOC + "，其余已跳过");
+                        budgetWarned = true;
+                    }
+                    continue;
+                }
+                if (img.width() < MIN_IMAGE_SIDE || img.height() < MIN_IMAGE_SIDE
+                        || img.image().getWidth() < MIN_IMAGE_SIDE
+                        || img.image().getHeight() < MIN_IMAGE_SIDE) {
+                    continue;
+                }
+                imageBudget[0]--;
+                imgSeq++;
+                String label = "第" + (pageIndex + 1) + "页图片" + imgSeq;
+                String described = descCache.computeIfAbsent(img.image(),
+                        k -> describeImageSafely(vision, k, warnings, label));
+                if (!described.isBlank()) {
+                    rendered = "[" + label + "]\n" + described;
+                }
+            }
+            int start = appendBlock(sb, rendered);
+            if (start >= 0) {
+                // 块序号按版面块顺序（1 起），与是否输出无关，保证同一文档重复解析时 id 稳定
+                spans.add(new BlockSpan(start, sb.length(),
+                        "p" + (pageIndex + 1) + "-b" + (bi + 1), block.bbox(), block.kind()));
+            }
+        }
+        return new Assembled(sb.toString(), spans);
+    }
+
+    /** 单页组装结果：文本 + 块区间索引。 */
+    private record Assembled(String text, List<BlockSpan> spans) {
+    }
+
+    /** 追加块内容并返回写入起始偏移；空内容返回 -1（不写入分隔符）。 */
+    private int appendBlock(StringBuilder sb, String text) {
+        if (text == null || text.isBlank()) {
+            return -1;
+        }
+        if (sb.length() > 0) {
+            sb.append("\n\n");
+        }
+        int start = sb.length();
+        sb.append(text.strip());
+        return start;
+    }
+
+    /** 图片识别（OCR + Vision 双通道），任何异常只告警返回空串，不阻断解析。 */
+    private String describeImageSafely(ModelEntity vision, PDImageXObject image,
+                                       List<String> warnings, String label) {
+        try {
+            return describeImage(vision, toPng(image), warnings, label);
+        } catch (Exception e) {
+            log.warn("{} 处理失败: {}", label, e.getMessage());
+            warnings.add(label + "处理失败");
+            return "";
+        }
+    }
+
+    private byte[] toPng(PDImageXObject image) throws Exception {
+        BufferedImage buffered = image.getImage();
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        ImageIO.write(buffered, "png", out);
+        return out.toByteArray();
+    }
+
+    private String describeImage(ModelEntity vision, byte[] png, List<String> warnings, String label) {
+        StringBuilder sb = new StringBuilder();
+        if (ocrService.available()) {
+            try {
+                String ocrText = ocrService.ocr(ImageIO.read(new ByteArrayInputStream(png)));
+                if (ocrText != null && !ocrText.isBlank()) {
+                    sb.append("OCR文字：").append(ocrText.strip()).append("\n");
+                }
+            } catch (Exception e) {
+                log.warn("{} OCR 失败: {}", label, e.getMessage());
+                warnings.add(label + "OCR失败");
+            }
+        }
+        if (vision != null && visionClient.isConfigured(vision.getBaseUrl(), vision.getModel())) {
+            String visionText = visionClient.describe(vision.getBaseUrl(), vision.getApiKey(),
+                    vision.getModel(), png, "image/png");
+            if (visionText != null && !visionText.isBlank()) {
+                sb.append("视觉描述：").append(visionText.strip());
+            } else {
+                warnings.add(label + "视觉模型调用失败");
+            }
+        }
+        return sb.toString();
     }
 
     private ParseOutcome parseImage(DocumentEntity doc, ModelEntity vision, byte[] bytes, String ext) {
@@ -575,29 +1011,28 @@ public class ParseService {
         sb.append(block.strip());
     }
 
-    /** HTML 表格 → Markdown 表格。 */
+    /** HTML 表格 → 统一表格模型：保留 colspan/rowspan，避免合并单元格导致列错位。 */
     private String htmlTableToMarkdown(org.jsoup.nodes.Element table) {
-        List<org.jsoup.nodes.Element> rows = table.select("tr");
-        if (rows.isEmpty()) {
-            return "";
+        List<List<TableModel.Cell>> grid = new ArrayList<>();
+        for (org.jsoup.nodes.Element row : table.select("tr")) {
+            List<TableModel.Cell> cells = new ArrayList<>();
+            for (org.jsoup.nodes.Element cell : row.select("td, th")) {
+                cells.add(new TableModel.Cell(cell.text(),
+                        htmlSpan(cell.attr("colspan")), htmlSpan(cell.attr("rowspan"))));
+            }
+            if (!cells.isEmpty()) {
+                grid.add(cells);
+            }
         }
-        List<List<String>> data = new ArrayList<>();
-        int maxCols = 0;
-        for (org.jsoup.nodes.Element row : rows) {
-            List<String> cells = row.select("td, th").stream()
-                    .map(c -> c.text().replace("\\", "\\\\").replace("|", "\\|")
-                            .replaceAll("\\s+", " ").strip())
-                    .toList();
-            data.add(cells);
-            maxCols = Math.max(maxCols, cells.size());
+        return new TableModel(null, 0, grid).toMarkdown();
+    }
+
+    private int htmlSpan(String value) {
+        try {
+            return value == null || value.isBlank() ? 1 : Math.max(1, Integer.parseInt(value.strip()));
+        } catch (NumberFormatException e) {
+            return 1;
         }
-        StringBuilder sb = new StringBuilder();
-        sb.append(toMdRow(data.get(0), maxCols)).append('\n');
-        sb.append('|').append("---|".repeat(maxCols)).append('\n');
-        for (int r = 1; r < data.size(); r++) {
-            sb.append(toMdRow(data.get(r), maxCols)).append('\n');
-        }
-        return sb.toString();
     }
 
     private String extOf(String fileName) {

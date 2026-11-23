@@ -361,6 +361,14 @@ export default function FilePreviewPage() {
             return;
           }
         } else if (kind === 'text' || kind === 'markdown') {
+          // 超大文本全量进内存会长时间白屏/飙升，超过 5MB 引导下载查看
+          if (blob.size > 5 * 1024 * 1024) {
+            if (!cancelled) {
+              setError('文本文件超过 5MB，浏览器内预览可能卡顿，请下载后查看');
+              setLoading(false);
+            }
+            return;
+          }
           setText(await blob.text());
         } else if (kind === 'doc') {
           const html = await documentApi.previewHtml(documentId);

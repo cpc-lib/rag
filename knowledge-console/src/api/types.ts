@@ -162,6 +162,18 @@ export interface KnowledgeBase {
   chunkStrategy: string;
   /** 分隔符 JSON 数组字符串，如 "[\"\\n\\n\",\"。\"]" */
   separators: string | null;
+  /** 当前生效的物理索引版本（0=旧版无版本后缀） */
+  indexVersion: number;
+  /** 索引状态：IDLE 正常 / BUILDING 重建中 */
+  indexState: 'IDLE' | 'BUILDING';
+  /** 重建中的目标版本（仅 BUILDING 时有值） */
+  indexTargetVersion: number | null;
+}
+
+/** 重建索引响应（POST /knowledge-bases/{id}/rebuild-index） */
+export interface KbRebuildView {
+  taskId: number;
+  targetVersion: number;
 }
 
 export interface KbCreateReq {
@@ -220,6 +232,12 @@ export interface Chunk {
   parentChunkId: number | null;
   sectionTitle: string | null;
   sectionPath: string | null;
+  /** PDF 版面坐标 x,y,width,height（pt），非 PDF 为空 */
+  bbox?: string | null;
+  /** 原文块标识，如 p3-b2 */
+  sourceId?: string | null;
+  /** PDF 版面块语义类别：TITLE/PARAGRAPH/LIST/TABLE/IMAGE/CODE/FORMULA */
+  blockType?: string | null;
 }
 
 // ---- 工具配置 ----
@@ -283,8 +301,14 @@ export interface Citation {
   contentType: string | null;
   previewUrl: string | null;
   content: string;
+  /** PDF 版面坐标 x,y,width,height（pt） */
+  bbox?: string | null;
+  /** 原文块标识，如 p3-b2 */
+  sourceId?: string | null;
+  /** PDF 版面块语义类别 */
+  blockType?: string | null;
   /** IMAGE 切片的图片访问路径（需鉴权，前端用 blob 拉取） */
-  imageUrl: string | null;
+  imageUrl?: string | null;
 }
 
 export interface ChatStreamReq {

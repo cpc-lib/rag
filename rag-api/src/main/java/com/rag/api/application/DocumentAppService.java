@@ -78,6 +78,7 @@ public class DocumentAppService {
         if (!ALLOWED_EXT.contains(ext)) {
             throw BizException.badRequest("不支持的文件类型: " + ext + "（允许: txt/md/html/pdf/docx/xlsx/png/jpg/jpeg）");
         }
+        checkDocumentSize(fileSize);
         quotaService.checkStorage(s.tenantId(), fileSize);
         return kb;
     }
@@ -130,6 +131,7 @@ public class DocumentAppService {
         if (!ALLOWED_EXT.contains(ext)) {
             throw BizException.badRequest("不支持的文件类型: " + ext + "（允许: txt/md/html/pdf/docx/xlsx/png/jpg/jpeg）");
         }
+        checkDocumentSize(file.getSize());
         quotaService.checkStorage(s.tenantId(), file.getSize());
 
         String objectKey = "%s/%d/%s/%s.%s".formatted(s.tenantId(), kbId,
@@ -242,8 +244,8 @@ public class DocumentAppService {
     }
 
     public Page<DocumentEntity> list(long kbId, long page, long size) {
-        knowledgeBaseService.getOwned(kbId);
-        return documentMapper.selectPageByKbId(new Page<>(page, size), kbId);
+        var kb = knowledgeBaseService.getOwned(kbId);
+        return documentMapper.selectPageByKbId(new Page<>(page, size), kbId, kb.getTenantId());
     }
 
     /** 使用原文件和知识库当前切片策略重新解析；人工切片由 Worker 保留。 */
@@ -413,6 +415,16 @@ public class DocumentAppService {
         documentMapper.logicDeleteById(doc.getId());
         fileLibraryService.removeByDocument(doc.getId());
         log.info("文档已删除 doc={} kb={}", doc.getId(), kb.getId());
+    }
+
+    /** 文档类文件大小上限：PDF/Office 解析需整棵对象树进内存，500MB 级易触发 Worker OOM。 */
+    private static final long MAX_DOCUMENT_BYTES = 100L * 1024 * 1024;
+
+    private void checkDocumentSize(long fileSize) {
+        if (fileSize > MAX_DOCUMENT_BYTES) {
+            throw BizException.badRequest("文档类文件最大 100MB（当前 %dMB），请拆分后再上传"
+                    .formatted(fileSize / 1024 / 1024));
+        }
     }
 
     private String extOf(String fileName) {

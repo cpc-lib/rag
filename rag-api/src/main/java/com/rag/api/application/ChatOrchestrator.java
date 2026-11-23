@@ -21,6 +21,7 @@ import org.springframework.stereotype.Service;
 import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -81,7 +82,7 @@ public class ChatOrchestrator {
             }
             sid = chatSession.getId();
             List<LlmClient.LlmMessage> history =
-                    chatSessionService.historyMessages(session.tenantId(), session.userId(), sid);
+                    trimHistory(chatSessionService.historyMessages(session.tenantId(), session.userId(), sid));
             send(emitter, "session", Map.of("sessionId", sid));
 
             // 提示词模板（必须属于当前知识库且用户已获授权）
@@ -110,12 +111,13 @@ public class ChatOrchestrator {
             if (toolDefs != null) {
                 try {
                     JsonNode intent = llmClient.chatOnce(cfg.getBaseUrl(), cfg.getApiKey(), cfg.getModel(),
-                            List.of(new LlmClient.LlmMessage("user", question)),
+                            withHistory(history, question),
                             toolDefs, intentParams, timeoutSeconds);
+                    addUsage(intent, promptTokens, completionTokens);
                     JsonNode intentCalls = intent.path("tool_calls");
                     toolHit = intentCalls.isArray() && !intentCalls.isEmpty();
                     if (toolHit) {
-                        runToolLoop(cfg, template, question, toolDefs, intentParams, params,
+                        runToolLoop(cfg, template, history, question, toolDefs, intentParams, params,
                                 intent, toolsCfg, session, kbId, citations, answer,
                                 promptTokens, completionTokens, emitter);
                     }
@@ -170,7 +172,8 @@ public class ChatOrchestrator {
      * system + user 起步，追加预判的 assistant tool_calls，执行工具（含 kb_search）后以 role=tool 回传结果；
      * 模型若在非流式轮直接给出完整答案则直接采用，否则最终强制不调工具、流式生成。
      */
-    private void runToolLoop(ModelEntity cfg, PromptTemplateEntity template, String question,
+    private void runToolLoop(ModelEntity cfg, PromptTemplateEntity template,
+                             List<LlmClient.LlmMessage> history, String question,
                              JsonNode toolDefs, LlmClient.ChatParams intentParams,
                              LlmClient.ChatParams params, JsonNode intent, ToolConfigEntity toolsCfg,
                              TenantContext.Session session, long kbId,
@@ -181,6 +184,8 @@ public class ChatOrchestrator {
                 template, buildMaterial(List.of()), "", question);
         List<LlmClient.LlmMessage> messages = new ArrayList<>();
         messages.add(new LlmClient.LlmMessage("system", systemPrompt));
+        // 多轮追问需要上文（如“那北京呢？”），工具路由与参数提取同样依赖历史
+        messages.addAll(history);
         messages.add(new LlmClient.LlmMessage("user", question));
 
         // 预判的 assistant 消息（含 tool_calls）+ 工具执行结果
@@ -198,6 +203,7 @@ public class ChatOrchestrator {
                 log.warn("工具循环第{}轮调用失败，直接生成最终答案: {}", round + 1, e.getMessage());
                 break;
             }
+            addUsage(resp, promptTokens, completionTokens);
             messages.add(assistantFromResponse(resp));
             JsonNode calls = resp.path("tool_calls");
             if (!calls.isArray() || calls.isEmpty()) {
@@ -277,11 +283,73 @@ public class ChatOrchestrator {
         return query.isBlank() ? "知识库检索" : query;
     }
 
+    /** 历史上下文窗口：条数与 token 双重上限，避免长会话无限膨胀把检索素材挤出上下文。 */
+    private static final int MAX_HISTORY_MESSAGES = 20;
+    private static final int MAX_HISTORY_TOKENS = 3000;
+
+    /**
+     * 截取最近的历史消息（从后往前累计，超出窗口的旧消息丢弃）。
+     */
+    private List<LlmClient.LlmMessage> trimHistory(List<LlmClient.LlmMessage> history) {
+        if (history == null || history.isEmpty()) {
+            return List.of();
+        }
+        List<LlmClient.LlmMessage> kept = new ArrayList<>();
+        int tokens = 0;
+        for (int i = history.size() - 1; i >= 0 && kept.size() < MAX_HISTORY_MESSAGES; i--) {
+            LlmClient.LlmMessage message = history.get(i);
+            int cost = estimateTokens(message.content());
+            if (!kept.isEmpty() && tokens + cost > MAX_HISTORY_TOKENS) {
+                break;
+            }
+            kept.add(message);
+            tokens += cost;
+        }
+        Collections.reverse(kept);
+        return kept;
+    }
+
+    /** 历史 + 本轮问题（工具预判与工具循环都带上文）。 */
+    private List<LlmClient.LlmMessage> withHistory(List<LlmClient.LlmMessage> history, String question) {
+        List<LlmClient.LlmMessage> messages = new ArrayList<>(history);
+        messages.add(new LlmClient.LlmMessage("user", question));
+        return messages;
+    }
+
+    /** 粗略 token 估算：中文 1 字≈1 token，ASCII 约 4 字符/token（与 worker TokenCounter 口径一致）。 */
+    private static int estimateTokens(String text) {
+        if (text == null || text.isEmpty()) {
+            return 0;
+        }
+        int cjk = 0;
+        for (int i = 0; i < text.length(); i++) {
+            if (text.charAt(i) > 127) {
+                cjk++;
+            }
+        }
+        return cjk + Math.max(1, (text.length() - cjk) / 4);
+    }
+
+    /**
+     * 非流式轮（意图预判 / 工具循环）的 usage 累加到 Token 统计。
+     * 否则模型在工具轮直接给出答案时，整次问答落库 Token 为 0，配额统计失真。
+     */
+    private void addUsage(JsonNode message, AtomicLong promptTokens, AtomicLong completionTokens) {
+        JsonNode usage = message == null ? null : message.get("usage");
+        if (usage == null) {
+            return;
+        }
+        promptTokens.addAndGet(usage.path("prompt_tokens").asLong());
+        completionTokens.addAndGet(usage.path("completion_tokens").asLong());
+    }
+
     /** 最终生成（流式），tools/toolChoice 非空时随请求携带；最后一帧的 usage 写入 token 统计。 */
     private void runFinalStream(ModelEntity cfg, List<LlmClient.LlmMessage> messages,
                                 JsonNode tools, String toolChoice, LlmClient.ChatParams params,
                                 StringBuilder answer, AtomicLong promptTokens, AtomicLong completionTokens,
                                 SseEmitter emitter) {
+        long[] lastUsage = {0, 0};
+        boolean[] hasUsage = {false};
         llmClient.chatStream(cfg.getBaseUrl(), cfg.getApiKey(), cfg.getModel(),
                         messages, params, tools, toolChoice, timeoutSeconds)
                 .doOnNext(delta -> {
@@ -290,11 +358,17 @@ public class ChatOrchestrator {
                         send(emitter, "message", Map.of("delta", delta.content()));
                     }
                     if (delta.promptTokens() != null) {
-                        promptTokens.set(delta.promptTokens());
-                        completionTokens.set(delta.completionTokens());
+                        lastUsage[0] = delta.promptTokens();
+                        lastUsage[1] = delta.completionTokens();
+                        hasUsage[0] = true;
                     }
                 })
                 .blockLast();
+        if (hasUsage[0]) {
+            // 累加而非覆盖：多轮工具调用 + 最终流式回答的 Token 都应计入租户消耗
+            promptTokens.addAndGet(lastUsage[0]);
+            completionTokens.addAndGet(lastUsage[1]);
+        }
     }
 
     /**

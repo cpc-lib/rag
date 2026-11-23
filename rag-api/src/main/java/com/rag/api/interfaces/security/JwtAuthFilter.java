@@ -34,6 +34,16 @@ import java.util.UUID;
 public class JwtAuthFilter extends OncePerRequestFilter {
 
     private static final Set<String> WHITELIST = Set.of("/api/v1/auth/login");
+    /**
+     * 允许通过 URL Query ?token= 鉴权的媒体读取路由（浏览器 <video>/<img>/<iframe> 无法带 Header）。
+     * 其余接口只接受 Authorization 头，避免主会话 JWT 出现在代理日志/Referer/浏览历史中。
+     */
+    private static final java.util.regex.Pattern QUERY_TOKEN_ALLOWED = java.util.regex.Pattern.compile(
+            "^/api/v1/(library/files/\\d+/(stream|download|hls/.*)"
+                    + "|chunks/\\d+/image"
+                    + "|documents/\\d+/preview(-html)?"
+                    + "|subtitles/\\d+/download"
+                    + "|images/\\d+/download)$");
     /** Redis 会话 key 前缀 */
     private static final String SESS_PREFIX = "rag:jwt:sess:";
     /** Redis 黑名单 key 前缀 */
@@ -71,13 +81,17 @@ public class JwtAuthFilter extends OncePerRequestFilter {
         String token;
         if (header != null && header.startsWith("Bearer ")) {
             token = header.substring(7);
-        } else {
-            // 媒体标签（<video>/<audio>）无法携带 Header，允许 ?token= 查询参数兜底
+        } else if ("GET".equalsIgnoreCase(request.getMethod())
+                && QUERY_TOKEN_ALLOWED.matcher(request.getRequestURI()).matches()) {
+            // 媒体标签（<video>/<audio>/<img>/<iframe>）无法携带 Header，仅限白名单媒体路由用 ?token=
             token = request.getParameter("token");
             if (token == null || token.isBlank()) {
                 writeError(response, ErrorCode.UNAUTHORIZED.httpStatus, "缺少 Bearer Token");
                 return;
             }
+        } else {
+            writeError(response, ErrorCode.UNAUTHORIZED.httpStatus, "缺少 Bearer Token");
+            return;
         }
         try {
             Claims claims = Jwts.parser().verifyWith(key).build().parseSignedClaims(token).getPayload();

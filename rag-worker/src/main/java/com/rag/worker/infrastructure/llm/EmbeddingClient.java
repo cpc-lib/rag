@@ -42,6 +42,9 @@ public class EmbeddingClient {
 
     private java.util.concurrent.ExecutorService embeddingPool;
 
+    /** 共享连接池与 WebClient：避免每批次新建 HttpClient（大文档数百批次会泄漏 FD/Direct Memory） */
+    private WebClient webClient;
+
     @jakarta.annotation.PostConstruct
     void initPool() {
         embeddingPool = java.util.concurrent.Executors.newFixedThreadPool(
@@ -51,6 +54,16 @@ public class EmbeddingClient {
                     t.setDaemon(true);
                     return t;
                 });
+        HttpClient httpClient = HttpClient.create(reactor.netty.resources.ConnectionProvider
+                        .builder("embedding")
+                        .maxConnections(Math.max(1, embeddingConcurrency) * 2)
+                        .maxIdleTime(Duration.ofSeconds(20))
+                        .build())
+                .option(ChannelOption.CONNECT_TIMEOUT_MILLIS, 10_000)
+                .responseTimeout(Duration.ofSeconds(timeoutSeconds));
+        this.webClient = WebClient.builder()
+                .clientConnector(new ReactorClientHttpConnector(httpClient))
+                .build();
     }
 
     @jakarta.annotation.PreDestroy
@@ -114,15 +127,8 @@ public class EmbeddingClient {
         Exception lastError = null;
         for (int attempt = 1; attempt <= 3; attempt++) {
             try {
-                HttpClient httpClient = HttpClient.create()
-                        .option(ChannelOption.CONNECT_TIMEOUT_MILLIS, 10_000)
-                        .responseTimeout(Duration.ofSeconds(timeoutSeconds));
-                resp = WebClient.builder()
-                        .baseUrl(base)
-                        .defaultHeader(HttpHeaders.AUTHORIZATION, "Bearer " + (apiKey == null ? "" : apiKey))
-                        .clientConnector(new ReactorClientHttpConnector(httpClient))
-                        .build()
-                        .post().uri("/embeddings")
+                resp = webClient.post().uri(base + "/embeddings")
+                        .header(HttpHeaders.AUTHORIZATION, "Bearer " + (apiKey == null ? "" : apiKey))
                         .contentType(MediaType.APPLICATION_JSON)
                         .bodyValue(body)
                         .retrieve()

@@ -28,9 +28,8 @@ public class SseConnectionGuard {
     public void acquire(String tenantId, int maxConnections) {
         String key = KEY_PREFIX + tenantId;
         Long count = redis.opsForValue().increment(key);
-        if (count != null && count == 1) {
-            redis.expire(key, java.time.Duration.ofMinutes(10));
-        }
+        // 每次拿连接都续期：只要有活跃连接，计数 key 就不能中途过期（否则限流被清零）
+        redis.expire(key, java.time.Duration.ofMinutes(10));
         if (count != null && count > maxConnections) {
             release(tenantId);
             throw new BizException(ErrorCode.SSE_LIMIT,

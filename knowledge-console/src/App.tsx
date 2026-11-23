@@ -1,22 +1,25 @@
 import { BrowserRouter, Navigate, Route, Routes } from 'react-router-dom';
+import { lazy, Suspense } from 'react';
 import type { ReactNode } from 'react';
 import { useAuthStore } from './store/auth';
 import MainLayout from './components/MainLayout';
 import LoginPage from './pages/LoginPage';
-import TenantsPage from './pages/TenantsPage';
-import ModelConfigPage from './pages/ModelConfigPage';
-import PromptPage from './pages/PromptPage';
-import KnowledgeBasesPage from './pages/KnowledgeBasesPage';
-import KbDetailPage from './pages/KbDetailPage';
-import ToolConfigPage from './pages/ToolConfigPage';
-import QuotaPage from './pages/QuotaPage';
-import ChatPage from './pages/ChatPage';
-import ImageStudioPage from './pages/ImageStudioPage';
-import SubtitlePage from './pages/SubtitlePage';
-import FileLibraryPage from './pages/FileLibraryPage';
-import TranslateLangPage from './pages/TranslateLangPage';
-import UsersPage from './pages/UsersPage';
-import FilePreviewPage from './pages/FilePreviewPage';
+
+// 路由级懒加载：首屏只加载登录/布局，管理页按需拉取，避免主包 2MB+ 全量加载
+const TenantsPage = lazy(() => import('./pages/TenantsPage'));
+const ModelConfigPage = lazy(() => import('./pages/ModelConfigPage'));
+const PromptPage = lazy(() => import('./pages/PromptPage'));
+const KnowledgeBasesPage = lazy(() => import('./pages/KnowledgeBasesPage'));
+const KbDetailPage = lazy(() => import('./pages/KbDetailPage'));
+const ToolConfigPage = lazy(() => import('./pages/ToolConfigPage'));
+const QuotaPage = lazy(() => import('./pages/QuotaPage'));
+const ChatPage = lazy(() => import('./pages/ChatPage'));
+const ImageStudioPage = lazy(() => import('./pages/ImageStudioPage'));
+const SubtitlePage = lazy(() => import('./pages/SubtitlePage'));
+const FileLibraryPage = lazy(() => import('./pages/FileLibraryPage'));
+const TranslateLangPage = lazy(() => import('./pages/TranslateLangPage'));
+const UsersPage = lazy(() => import('./pages/UsersPage'));
+const FilePreviewPage = lazy(() => import('./pages/FilePreviewPage'));
 
 function RequireAuth({ children }: { children: ReactNode }) {
   const token = useAuthStore((s) => s.token);
@@ -64,7 +67,8 @@ function HomeRedirect() {
 export default function App() {
   return (
     <BrowserRouter future={{ v7_startTransition: true, v7_relativeSplatPath: true }}>
-      <Routes>
+      <Suspense fallback={<div style={{ padding: 48, textAlign: 'center', color: '#888' }}>加载中…</div>}>
+        <Routes>
         <Route path="/login" element={<LoginPage />} />
         {/* 原文件预览：独立窗口展示，不套用管理端布局 */}
         <Route
@@ -190,7 +194,8 @@ export default function App() {
           />
         </Route>
         <Route path="*" element={<Navigate to="/" replace />} />
-      </Routes>
+        </Routes>
+      </Suspense>
     </BrowserRouter>
   );
 }

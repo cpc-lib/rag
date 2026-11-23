@@ -18,6 +18,12 @@
         WHERE deleted = 0 AND id = #{id} AND status = 'PENDING'
     </update>
 
+    <update id="touchRunningByDocumentId">
+        UPDATE pipeline_task
+        SET updated_at = NOW()
+        WHERE deleted = 0 AND document_id = #{documentId} AND status = 'RUNNING'
+    </update>
+
     <select id="selectStaleTasks" resultType="com.rag.api.infrastructure.persistence.entity.PipelineTaskEntity">
         SELECT <include refid="Base_Column_List"/>
         FROM pipeline_task
