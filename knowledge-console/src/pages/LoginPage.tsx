@@ -47,7 +47,7 @@ export default function LoginPage() {
           </Typography.Title>
           <Typography.Text type="secondary">企业级多租户 RAG 问答平台</Typography.Text>
         </div>
-        <Form layout="vertical" onFinish={onFinish} requiredMark={false}>
+        <Form layout="vertical" onFinish={onFinish}>
           <Form.Item
             name="username"
             label="账号"
@@ -67,11 +67,15 @@ export default function LoginPage() {
               autoComplete="current-password"
             />
           </Form.Item>
-          <Form.Item name="tenantCode" label="租户编码（选填）">
+          <Form.Item
+            name="tenantCode"
+            label="租户编码"
+            rules={[{ required: true, whitespace: true, message: '请输入租户编码' }]}
+          >
             <Input
               size="large"
               prefix={<BankOutlined />}
-              placeholder="多租户同名账号时填写；平台管理员为 SUPER_TENANT"
+              placeholder="请输入租户编码（平台管理员为 SUPER_TENANT）"
             />
           </Form.Item>
           <Button
