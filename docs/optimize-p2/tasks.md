@@ -38,9 +38,10 @@
   - `rag-worker/src/test/java/com/rag/worker/reconcile/IndexReconcileServiceTest.java`（10 个用例，见 spec 1.10；含 delete-kb-ids 白名单）
   - 验证：`mvn -f rag-worker/pom.xml clean test`
 - [x] A9 集成验证（本地 compose，3307/6380 端口避开占用；真实 ES 8.14 + Milvus 2.5 通过）
-  - 按 spec 1.10 手工步骤 1–5 执行，记录报告 JSON
-  - 结果：dry-run 报告 `orphanEs=1, orphanMilvus=1, deleted*=0`；`delete-kb-ids` 删除轮 `deletedEs=1, deletedMilvus=1`，MySQL 切片数仍为 1
-  - 另发现并修复 `KnowledgeBaseMapper.xml` 双重 UTF-8 BOM（否则运行期 XML 解析失败、应用无法启动）
+  - 手工造 KB 8 + document 28 + CHILD 切片 4347 + ES/Milvus 各 2 条（4347 合法 + 104347 孤儿）
+  - dry-run 报告 `orphanEs=1, orphanMilvus=1, deleted*=0, errors=[]`
+  - delete-kb-ids=8 白名单报告 `deletedEs=1, deletedMilvus=1`；ES 实查只剩 4347；同 JVM Milvus SDK filter "chunk_id in [104347]" 后 count=1（孤儿被清），新 client 30s 后仍可见是 Milvus 副本一致性延迟非代码问题；MySQL cnt=1
+  - 用临时 bootstrap/probe 验证 Milvus SDK 2.4.3 delete（SDK 2.4.3 filter 必须用整数不加引号；生产代码 `chunk_id in [数字]` 格式正确）
 
 ## 阶段 B：前端组件拆分（纯重构）
 
